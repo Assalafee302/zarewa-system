@@ -288,6 +288,52 @@ export function seedAuthUsers(db) {
   })();
 }
 
+/**
+ * Create a new login user (HR onboarding, staff import). Does not open a session.
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ username: string, displayName: string, password: string, roleKey: string }} row
+ * @returns {{ ok: true, userId: string } | { ok: false, error: string }}
+ */
+export function createAppUserRecord(db, row) {
+  const username = String(row?.username ?? '')
+    .trim()
+    .toLowerCase();
+  const displayName = String(row?.displayName ?? '').trim();
+  const roleKey = String(row?.roleKey ?? '').trim();
+  if (!username) return { ok: false, error: 'Username is required.' };
+  if (!displayName) return { ok: false, error: 'Display name is required.' };
+  if (!roleKey) return { ok: false, error: 'Role is required.' };
+  const strength = validatePasswordStrength(row?.password);
+  if (!strength.ok) return strength;
+  if (db.prepare(`SELECT 1 FROM app_users WHERE lower(trim(username)) = ?`).get(username)) {
+    return { ok: false, error: 'Username already exists.' };
+  }
+  const userId = `USR-${crypto.randomBytes(8).toString('hex').toUpperCase()}`;
+  const createdAtISO = nowIso();
+  try {
+    db.prepare(
+      `INSERT INTO app_users (
+        id, username, display_name, password_hash, role_key, status, last_login_at_iso, created_at_iso
+      ) VALUES (?,?,?,?,?,?,?,?)`
+    ).run(
+      userId,
+      username,
+      displayName,
+      createPasswordHash(String(row.password)),
+      roleKey,
+      'active',
+      '',
+      createdAtISO
+    );
+  } catch (e) {
+    if (e && (e.code === 'SQLITE_CONSTRAINT_UNIQUE' || e.code === 'SQLITE_CONSTRAINT_PRIMARYKEY')) {
+      return { ok: false, error: 'Username already exists.' };
+    }
+    throw e;
+  }
+  return { ok: true, userId };
+}
+
 function findSessionRow(db, token) {
   return db
     .prepare(
