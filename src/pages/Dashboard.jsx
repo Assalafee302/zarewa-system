@@ -133,7 +133,7 @@ function KpiCard({ title, value, sub, onClick, titleAttr, highlight, children })
 const Dashboard = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { products: invProducts, movements, wipByProduct, coilLots } = useInventory();
+  const { products: invProducts, movements, wipByProduct, coilLots, purchaseOrders } = useInventory();
   const ws = useWorkspace();
   const { show: showToast } = useToast();
   const currentUserName = ws?.session?.user?.displayName?.split?.(' ')?.[0] || '';
@@ -254,6 +254,41 @@ const Dashboard = () => {
     [ws]
   );
 
+  const openPaymentRequestsCount = useMemo(
+    () =>
+      paymentRequests.filter((x) => {
+        const requested = Number(x.amountRequestedNgn) || 0;
+        const paid = Number(x.paidAmountNgn) || 0;
+        if (x.approvalStatus === 'Rejected') return false;
+        if (x.approvalStatus !== 'Approved') return true;
+        return paid < requested;
+      }).length,
+    [paymentRequests]
+  );
+
+  const pendingCoilRequests = useMemo(() => {
+    const apiList = ws?.snapshot?.coilRequests;
+    if (ws?.hasWorkspaceData && Array.isArray(apiList)) {
+      return apiList.filter((r) => r.status === 'pending');
+    }
+    return [];
+  }, [ws]);
+
+  const productionJobs = useMemo(
+    () =>
+      ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.productionJobs) ? ws.snapshot.productionJobs : [],
+    [ws]
+  );
+  const managerReviewCount = useMemo(
+    () => productionJobs.filter((j) => j.managerReviewRequired).length,
+    [productionJobs]
+  );
+
+  const transitPoCount = useMemo(
+    () => purchaseOrders.filter((p) => ['Approved', 'On loading', 'In Transit'].includes(p.status)).length,
+    [purchaseOrders]
+  );
+
   const healthySkus = useMemo(() => {
     return invProducts
       .filter((p) => p.stockLevel >= p.lowStockThreshold)
@@ -294,6 +329,7 @@ const Dashboard = () => {
   }, [lowStockSkus]);
 
   const dashboardAlerts = useMemo(() => {
+    const pendingRefundPayouts = refunds.filter((x) => x.status === 'Approved' && refundOutstandingAmount(x) > 0);
     return [
       {
         id: 'stock',
@@ -303,53 +339,86 @@ const Dashboard = () => {
           liveLowStockCount > 0
             ? 'Open Operations to replenish or adjust low-stock lines.'
             : 'No low-stock SKU currently needs attention.',
+        hint: 'Open Store & production — stock records, GRN, and adjustments.',
         severity: liveLowStockCount > 0 ? 'danger' : 'info',
         path: '/operations',
       },
       {
+        id: 'coil',
+        type: 'Coil requests',
+        title:
+          pendingCoilRequests.length > 0
+            ? `${pendingCoilRequests.length} coil request(s) pending`
+            : 'No pending coil requests',
+        detail:
+          pendingCoilRequests.length > 0
+            ? 'Store or management acknowledgement still needed.'
+            : 'No coil requests waiting on acknowledgement.',
+        hint: 'Open Operations · Stock & coil requests.',
+        severity: pendingCoilRequests.length > 0 ? 'warning' : 'info',
+        path: '/operations',
+        state: { focusOpsTab: 'inventory' },
+      },
+      {
+        id: 'procurement',
+        type: 'Procurement',
+        title:
+          transitPoCount > 0
+            ? `${transitPoCount} PO(s) approved or in transit`
+            : 'No POs awaiting receipt',
+        detail:
+          transitPoCount > 0
+            ? 'Approved, on loading, or in transit — follow up before GRN.'
+            : 'Nothing in the approved / transit pipeline right now.',
+        hint: 'Open Procurement to track purchase orders and transport.',
+        severity: transitPoCount > 0 ? 'warning' : 'info',
+        path: '/procurement',
+      },
+      {
+        id: 'conversion',
+        type: 'Production',
+        title:
+          managerReviewCount > 0
+            ? `${managerReviewCount} job(s) need manager review`
+            : 'No conversion escalations',
+        detail:
+          managerReviewCount > 0
+            ? 'Yield or reference variance flagged for sign-off.'
+            : 'No production jobs are waiting on manager review.',
+        hint: 'Open Operations · Production for traceability and sign-off.',
+        severity: managerReviewCount > 0 ? 'warning' : 'info',
+        path: '/operations',
+        state: { focusOpsTab: 'production' },
+      },
+      {
         id: 'requests',
         type: 'Approvals',
-        title: `${
-          paymentRequests.filter((x) => {
-            const requested = Number(x.amountRequestedNgn) || 0;
-            const paid = Number(x.paidAmountNgn) || 0;
-            if (x.approvalStatus === 'Rejected') return false;
-            if (x.approvalStatus !== 'Approved') return true;
-            return paid < requested;
-          }).length
-        } payment request(s) open`,
+        title: `${openPaymentRequestsCount} payment request(s) open`,
         detail: 'Finance approvals and treasury payouts still waiting for action.',
-        severity: paymentRequests.some((x) => {
-          const requested = Number(x.amountRequestedNgn) || 0;
-          const paid = Number(x.paidAmountNgn) || 0;
-          if (x.approvalStatus === 'Rejected') return false;
-          if (x.approvalStatus !== 'Approved') return true;
-          return paid < requested;
-        })
-          ? 'warning'
-          : 'info',
+        hint: 'Open Finance on the Payment requests tab.',
+        severity: openPaymentRequestsCount > 0 ? 'warning' : 'info',
         path: '/accounts',
         state: { accountsTab: 'requests' },
       },
       {
         id: 'refunds',
         type: 'Refunds',
-        title: `${refunds.filter((x) => x.status === 'Approved' && refundOutstandingAmount(x) > 0).length} refund payout(s) pending`,
+        title: `${pendingRefundPayouts.length} refund payout(s) pending`,
         detail: 'Approved customer refunds that still need treasury payout.',
-        severity: refunds.some((x) => x.status === 'Approved' && refundOutstandingAmount(x) > 0) ? 'warning' : 'info',
+        hint: 'Open Finance on Treasury to record customer refund payouts.',
+        severity: pendingRefundPayouts.length > 0 ? 'warning' : 'info',
         path: '/accounts',
         state: { accountsTab: 'treasury' },
       },
     ];
-  }, [liveLowStockCount, paymentRequests, refunds]);
-
-  const pendingCoilRequests = useMemo(() => {
-    const apiList = ws?.snapshot?.coilRequests;
-    if (ws?.hasWorkspaceData && Array.isArray(apiList)) {
-      return apiList.filter((r) => r.status === 'pending');
-    }
-    return [];
-  }, [ws]);
+  }, [
+    liveLowStockCount,
+    managerReviewCount,
+    openPaymentRequestsCount,
+    pendingCoilRequests,
+    refunds,
+    transitPoCount,
+  ]);
 
   const salesTrendData = useMemo(
     () =>
@@ -644,7 +713,7 @@ const Dashboard = () => {
                   : 'Connect API for live feed'}
             </span>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
             {dashboardAlerts.map((a) => (
               <button
                 key={a.id}
