@@ -1,0 +1,1597 @@
+@import "tailwindcss";
+
+@theme {
+  --color-zarewa-teal: #134e4a;
+  --color-zarewa-mint: #2ECC71;
+  --color-sequence-bg: #F9FAFB;
+  --color-zarewa-surface: #ffffff;
+  --color-zarewa-surface-muted: #f8fafc;
+  --shadow-sequence: 0 18px 50px rgba(15, 23, 42, 0.08);
+  --shadow-zarewa-card:
+    0 20px 60px -32px rgba(15, 23, 42, 0.28),
+    0 10px 24px -18px rgba(20, 83, 45, 0.14);
+  --radius-zarewa: 24px;
+}
+
+@keyframes z-toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.z-toast-item {
+  animation: z-toast-in 0.28s ease-out;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-sequence-bg);
+  font-family:
+    'Inter',
+    system-ui,
+    -apple-system,
+    Segoe UI,
+    Roboto,
+    sans-serif;
+  color: #0f172a;
+  text-rendering: optimizeLegibility;
+}
+
+/* Shared field styles — keep list pages visually aligned */
+.z-input-search {
+  @apply w-full bg-gray-50 border border-gray-100 rounded-xl py-2.5 pl-10 pr-4 text-sm outline-none transition-all;
+  @apply focus:border-teal-500/30 focus:ring-2 focus:ring-[#134e4a]/10;
+}
+
+.z-card-dark {
+  @apply bg-[#134e4a] p-6 rounded-zarewa text-white shadow-xl;
+}
+
+.z-card-muted {
+  @apply bg-white/95 p-6 rounded-zarewa border border-white/80;
+  box-shadow: var(--shadow-zarewa-card);
+}
+
+.z-section-title-dark {
+  @apply text-[10px] font-bold text-white/40 uppercase tracking-[0.2em] mb-4;
+}
+
+.z-section-title {
+  @apply text-xs font-bold text-[#134e4a] uppercase tracking-widest mb-4;
+}
+
+.z-btn-primary {
+  @apply inline-flex items-center justify-center gap-2 bg-[#134e4a] text-white px-6 py-2.5 rounded-xl font-bold text-xs shadow-lg shadow-teal-900/10 hover:brightness-110 transition-all;
+  @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/30 focus-visible:ring-offset-2 focus-visible:ring-offset-[#F8FAFC];
+}
+
+.z-btn-secondary {
+  @apply inline-flex items-center justify-center gap-2 bg-white border border-gray-100 text-[#134e4a] px-6 py-2.5 rounded-xl font-bold text-xs shadow-sm hover:bg-gray-50 transition-all;
+  @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/20 focus-visible:ring-offset-2 focus-visible:ring-offset-[#F8FAFC];
+}
+
+.z-empty-state {
+  @apply text-center py-16 px-6 rounded-zarewa border border-dashed;
+  background: linear-gradient(180deg, rgb(248 250 252 / 0.95) 0%, rgb(255 255 255 / 0.85) 100%);
+  border-color: rgb(226 232 240 / 0.9);
+  box-shadow: inset 0 1px 0 0 rgb(255 255 255 / 0.8);
+}
+
+/* Unified form labels — use across modals and pages */
+.z-field-label {
+  @apply block text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-1.5 ml-0.5;
+}
+
+.z-input {
+  @apply w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-semibold text-[#134e4a] outline-none transition-all;
+  @apply focus:border-teal-500/35 focus:ring-2 focus:ring-[#134e4a]/10;
+}
+
+.z-textarea {
+  @apply w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-medium text-gray-800 outline-none transition-all resize-none;
+  @apply focus:border-teal-500/35 focus:ring-2 focus:ring-[#134e4a]/10;
+}
+
+.z-select {
+  @apply w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-semibold text-[#134e4a] appearance-none outline-none cursor-pointer transition-all;
+  @apply focus:border-teal-500/35 focus:ring-2 focus:ring-[#134e4a]/10;
+}
+
+/* Modal inner panels (sits inside ModalFrame) */
+.z-modal-panel {
+  @apply w-full max-h-[min(90vh,900px)] overflow-hidden flex flex-col rounded-[32px] bg-white/98 shadow-2xl border border-white/80;
+  box-shadow: var(--shadow-zarewa-card);
+}
+
+.z-modal-panel-lg {
+  @apply w-full max-w-[min(100%,1152px)] max-h-[min(92vh,920px)] overflow-hidden flex flex-col rounded-[32px] bg-white/98 shadow-2xl border border-white/80;
+  box-shadow: var(--shadow-zarewa-card);
+}
+
+/* App shell — subtle depth behind content */
+.z-app-bg {
+  background:
+    radial-gradient(1200px 600px at 85% -10%, rgb(45 212 191 / 0.12), transparent 60%),
+    radial-gradient(900px 500px at 0% 100%, rgb(19 78 74 / 0.09), transparent 55%),
+    #f8fafc;
+}
+
+.z-kpi-card {
+  @apply rounded-[26px] border border-white/80 bg-white/96 p-5 text-left transition-all duration-200;
+  box-shadow: var(--shadow-zarewa-card);
+}
+
+.z-kpi-card:hover {
+  @apply -translate-y-0.5 border-slate-200;
+}
+
+.z-soft-panel {
+  @apply rounded-[28px] border border-white/80 bg-white/94;
+  box-shadow: var(--shadow-zarewa-card);
+}
+
+.z-status-pill {
+  @apply inline-flex items-center rounded-full border px-3 py-1 text-[10px] font-black uppercase tracking-[0.14em];
+}
+
+.z-toolbar-shell {
+  @apply rounded-[26px] border border-white/80 bg-white/88 backdrop-blur-xl;
+  box-shadow: var(--shadow-zarewa-card);
+}
+
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(19 78 74 / 0.25) transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgb(19 78 74 / 0.22);
+  border-radius: 999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Quotation preview: A4 width on screen */
+.quotation-print-a4 {
+  width: 100%;
+  max-width: 210mm;
+  margin-left: auto;
+  margin-right: auto;
+  box-sizing: border-box;
+}
+
+/* Unified data lists — same rhythm as Sales / Operations tables */
+.z-list-thead {
+  @apply hidden sm:grid px-4 text-[10px] font-bold text-slate-500 uppercase tracking-wider border-b border-slate-200 pb-2 mb-0 gap-x-3;
+}
+
+.z-list-row {
+  @apply rounded-2xl border border-slate-200/90 bg-white px-4 py-3.5 shadow-sm transition-all hover:border-slate-300 hover:shadow-md text-sm text-slate-800;
+}
+
+.z-panel-section {
+  @apply rounded-[28px] border border-white/80 bg-white/95 p-6 sm:p-7;
+  box-shadow: var(--shadow-zarewa-card);
+}
+
+.z-form-actions {
+  @apply flex flex-col-reverse sm:flex-row gap-3 pt-4 mt-4 border-t border-slate-100;
+}
+
+.z-page-hero {
+  @apply rounded-[28px] border border-white/80 bg-white/95 p-6 sm:p-7 mb-8;
+  box-shadow: var(--shadow-zarewa-card);
+}
+
+/* A4 report preview on screen (inside modal) */
+.report-print-a4 {
+  width: 100%;
+  max-width: 210mm;
+  margin-left: auto;
+  margin-right: auto;
+  box-sizing: border-box;
+}
+
+/* Receipt full — A5 landscape (fits ~4–5 payment rows comfortably) */
+@page receipt-a5-landscape {
+  margin: 5mm 6mm;
+  size: A5 landscape;
+}
+
+.receipt-print-landscape {
+  page: receipt-a5-landscape;
+  width: 100%;
+  max-width: 210mm;
+  min-height: 148mm;
+  margin-left: auto;
+  margin-right: auto;
+  box-sizing: border-box;
+  font-family:
+    'Inter',
+    system-ui,
+    -apple-system,
+    Segoe UI,
+    Roboto,
+    sans-serif;
+}
+
+/*
+ * Full receipt: color + depth for screen/PDF; borders + zebra + highlight bar still read in B&W.
+ */
+.rpt-full {
+  --rpt-ink: #111827;
+  --rpt-ink-soft: #374151;
+  --rpt-teal: #134e4a;
+  --rpt-teal-mid: #0f766e;
+  --rpt-mint: #ecfdf5;
+  --rpt-mint-deep: #d1fae5;
+  --rpt-orange: #ea580c;
+  --rpt-border: #9ca3af;
+  --rpt-border-strong: #4b5563;
+  --rpt-muted: #525252;
+  --rpt-band: #1f2937;
+  padding: 3mm 3.5mm 2.5mm;
+  border: 1px solid rgb(19 78 74 / 0.22);
+  border-radius: 10px;
+  background: linear-gradient(180deg, #ffffff 0%, #fafafa 100%);
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 0.9) inset,
+    0 4px 24px rgb(15 23 42 / 0.08),
+    0 0 0 1px rgb(19 78 74 / 0.06);
+}
+
+.rpt-full-head {
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid rgb(19 78 74 / 0.18);
+  margin-bottom: 2.5mm;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  box-shadow: 0 1px 3px rgb(15 23 42 / 0.05);
+}
+
+.rpt-full-accent {
+  height: 3px;
+  background: linear-gradient(90deg, var(--rpt-teal) 0%, var(--rpt-teal-mid) 45%, var(--rpt-orange) 100%);
+}
+
+.rpt-full-head-inner {
+  padding: 2mm 2.5mm 2mm;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2mm 3mm;
+}
+
+.rpt-full-brand {
+  display: flex;
+  align-items: center;
+  gap: 2mm;
+  min-width: 0;
+}
+
+.rpt-full-logo-ring {
+  flex-shrink: 0;
+  width: 10mm;
+  height: 10mm;
+  border-radius: 10px;
+  background: linear-gradient(145deg, var(--rpt-mint-deep) 0%, #ffffff 100%);
+  border: 1px solid rgb(19 78 74 / 0.15);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.95);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rpt-full-logo {
+  width: 6.5mm;
+  height: 6.5mm;
+  object-fit: contain;
+}
+
+.rpt-full-legal {
+  margin: 0;
+  font-size: 5.5pt;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--rpt-muted);
+  line-height: 1.2;
+}
+
+.rpt-full-title {
+  margin: 0.35mm 0 0;
+  font-size: 11pt;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--rpt-teal);
+  line-height: 1.1;
+}
+
+.rpt-full-refline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35mm 0.75mm;
+  font-size: 7.5pt;
+  line-height: 1.3;
+  color: #0f172a;
+}
+
+.rpt-full-ref-item {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4mm 0.6mm;
+}
+
+.rpt-full-ref-k {
+  font-size: 6pt;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #64748b;
+}
+
+.rpt-full-ref-v {
+  font-weight: 700;
+}
+
+.rpt-full-ref-dot {
+  color: #cbd5e1;
+  font-weight: 600;
+}
+
+.rpt-full-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.36fr) minmax(0, 1fr);
+  gap: 2.5mm 3mm;
+  align-items: start;
+}
+
+@media (max-width: 520px) {
+  .rpt-full-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.rpt-full-aside {
+  padding: 2mm 2.25mm;
+  border-radius: 7px;
+  border: 1px dashed rgb(19 78 74 / 0.28);
+  background: linear-gradient(165deg, #ffffff 0%, var(--rpt-mint) 40%, #f0fdfa 100%);
+  box-shadow: 0 1px 2px rgb(19 78 74 / 0.06);
+}
+
+.rpt-full-aside-label {
+  margin: 0 0 0.5mm;
+  font-size: 6pt;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--rpt-teal);
+}
+
+.rpt-full-aside-name {
+  margin: 0;
+  font-size: 9.5pt;
+  font-weight: 800;
+  color: #0f172a;
+  line-height: 1.25;
+}
+
+.rpt-full-aside-phone {
+  margin: 0.5mm 0 0;
+  font-size: 7.5pt;
+  color: var(--rpt-muted);
+  font-weight: 600;
+}
+
+.rpt-full-aside-box {
+  margin-top: 2mm;
+  padding-top: 2mm;
+  border-top: 1px solid rgb(19 78 74 / 0.12);
+}
+
+.rpt-full-aside-dl {
+  margin: 0;
+}
+
+.rpt-full-aside-row {
+  margin: 0 0 1.25mm;
+}
+
+.rpt-full-aside-row:last-child {
+  margin-bottom: 0;
+}
+
+.rpt-full-aside-dt {
+  margin: 0 0 0.15mm;
+  font-size: 5.75pt;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--rpt-muted);
+}
+
+.rpt-full-aside-dd {
+  margin: 0;
+  font-size: 7.25pt;
+  font-weight: 700;
+  color: var(--rpt-ink);
+  line-height: 1.3;
+}
+
+.rpt-full-aside-dd-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.rpt-full-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2.25mm;
+}
+
+.rpt-full-block {
+  margin: 0;
+}
+
+.rpt-full-block-title {
+  margin: 0 0 1mm;
+  font-size: 6.5pt;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--rpt-teal);
+}
+
+.rpt-full-shell {
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid rgb(19 78 74 / 0.15);
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(15 23 42 / 0.05);
+}
+
+.rpt-full-table {
+  font-size: 8.25pt;
+  line-height: 1.25;
+}
+
+.rpt-full-table--history .rpt-full-th:nth-child(1) {
+  width: 18%;
+}
+
+.rpt-full-table--history .rpt-full-th:nth-child(2) {
+  width: 28%;
+}
+
+.rpt-full-table--history .rpt-full-th:nth-child(3) {
+  width: 30%;
+}
+
+.rpt-full-table--history .rpt-full-th:nth-child(4) {
+  width: 24%;
+}
+
+.rpt-full-table--lines .rpt-full-th:nth-child(1) {
+  width: 42%;
+}
+
+.rpt-full-table--lines .rpt-full-th:nth-child(2) {
+  width: 38%;
+}
+
+.rpt-full-table--lines .rpt-full-th:nth-child(3) {
+  width: 20%;
+}
+
+.rpt-full-th {
+  padding: 1.1mm 1.35mm;
+  font-size: 6.75pt;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.055em;
+  color: #fff;
+  background: linear-gradient(180deg, var(--rpt-teal) 0%, #0d5c56 100%);
+  border: none;
+  border-bottom: 2px solid rgb(0 0 0 / 0.35);
+}
+
+.rpt-full-td {
+  padding: 1.35mm 1.35mm;
+  border: none;
+  border-bottom: 1px solid #d1d5db;
+  vertical-align: middle;
+  color: var(--rpt-ink);
+}
+
+.rpt-full-table tbody tr:nth-child(even) .rpt-full-td {
+  background: rgb(248 250 252 / 0.95);
+}
+
+.rpt-full-tr--highlight .rpt-full-td {
+  background: linear-gradient(90deg, var(--rpt-mint-deep) 0%, #ecfdf5 100%) !important;
+  box-shadow: none;
+}
+
+.rpt-full-tr--highlight .rpt-full-td:first-child {
+  border-left: 3px solid var(--rpt-teal);
+}
+
+.rpt-full-td-muted {
+  color: var(--rpt-ink-soft);
+  font-size: 7.75pt;
+}
+
+.rpt-full-td-strong {
+  font-weight: 700;
+  font-size: 8.5pt;
+}
+
+.rpt-full-td-amt {
+  font-weight: 800;
+  font-size: 9pt;
+  color: var(--rpt-teal);
+  text-align: right;
+}
+
+.rpt-full-badge {
+  display: inline-block;
+  margin-left: 1.5mm;
+  padding: 0.15mm 1mm;
+  font-size: 5.5pt;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--rpt-teal);
+  background: #fff;
+  border: 1px solid rgb(19 78 74 / 0.35);
+  border-radius: 4px;
+  vertical-align: middle;
+  box-shadow: 0 1px 1px rgb(19 78 74 / 0.08);
+}
+
+.rpt-full-hint {
+  margin: 0.75mm 0 0;
+  font-size: 6pt;
+  line-height: 1.3;
+  color: var(--rpt-muted);
+}
+
+.rpt-full-totalbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-top: 1.5mm;
+  padding: 1.5mm 2mm;
+  border-radius: 7px;
+  background: linear-gradient(115deg, var(--rpt-teal) 0%, #0f3d39 42%, var(--rpt-teal-mid) 100%);
+  color: #fff;
+  border: 1px solid rgb(0 0 0 / 0.2);
+  box-shadow: 0 2px 10px rgb(19 78 74 / 0.22);
+}
+
+.rpt-full-totalbar-label {
+  font-size: 8pt;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.rpt-full-totalbar-amt {
+  font-size: 13pt;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+}
+
+.rpt-full-foot {
+  margin-top: 2.5mm;
+  padding-top: 1.75mm;
+  border-top: 1px solid var(--rpt-border-strong);
+  font-size: 6.5pt;
+  line-height: 1.4;
+  color: var(--rpt-muted);
+}
+
+.rpt-full-foot-ref {
+  margin: 0 0 0.5mm;
+}
+
+.rpt-full-foot-ref-k {
+  font-weight: 800;
+  color: var(--rpt-teal);
+  margin-right: 0.5mm;
+}
+
+.rpt-full-foot-by {
+  margin: 0;
+}
+
+.rpt-full-foot-sig {
+  font-weight: 800;
+  color: var(--rpt-teal);
+}
+
+/* Cutting list A5 production pack — named page for print dialog (tight margins = max content) */
+@page cutting-list-a5 {
+  margin: 4mm 4.5mm;
+  size: A5 portrait;
+}
+
+.cutting-list-a5-report-root {
+  width: 100%;
+  max-width: 148mm;
+  margin-left: auto;
+  margin-right: auto;
+  box-sizing: border-box;
+  font-size: 6.75pt;
+  line-height: 1.2;
+}
+
+.cutting-list-a5-sheet {
+  page: cutting-list-a5;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1.1fr);
+  gap: 1.25mm;
+  min-height: 198mm;
+  box-sizing: border-box;
+}
+
+.cutting-list-a5-sheet--break-after {
+  break-after: page;
+  page-break-after: always;
+}
+
+/* Continuation sections: slim header row, table uses remaining space */
+.cutting-list-a5-sheet--continuation {
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 198mm;
+}
+
+.cl-a5-merge-top {
+  border: 1px solid #cbd5e1;
+  border-radius: 2px;
+  padding: 2mm;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cl-a5-merge-bottom {
+  border: 1px solid #cbd5e1;
+  border-radius: 2px;
+  padding: 2mm;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.cl-a5-info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2mm;
+  align-items: stretch;
+  min-height: 0;
+}
+
+.cl-a5-info-panel {
+  min-height: 0;
+}
+
+.cl-a5-ql-cat {
+  font-size: 6pt;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #134e4a;
+  margin: 2px 0 1px;
+}
+
+.cl-a5-panel-title {
+  font-size: 6.5pt;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #134e4a;
+  margin-bottom: 2px;
+}
+
+.cl-a5-dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1px 6px;
+  font-size: 6.5pt;
+}
+
+.cl-a5-dl dt {
+  font-weight: 600;
+  color: #64748b;
+}
+
+.cl-a5-dl dd {
+  margin: 0;
+  color: #0f172a;
+}
+
+.cl-a5-ql-th,
+.cl-a5-rcpt-th,
+.cl-a5-cl-th {
+  border: 1px solid #cbd5e1;
+  background: #f1f5f9;
+  padding: 1px 3px;
+  font-size: 6pt;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #134e4a;
+}
+
+.cl-a5-ql-td,
+.cl-a5-rcpt-td,
+.cl-a5-cl-td {
+  border: 1px solid #e2e8f0;
+  padding: 1px 3px;
+  font-size: 6.5pt;
+  vertical-align: top;
+}
+
+.cl-a5-cl-table {
+  flex: 1 1 auto;
+}
+
+.cl-a5-cl-table thead {
+  display: table-header-group;
+}
+
+.cl-a5-cl-table tbody tr {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+/* Factory cutting list — richer layout (screen + print) */
+.cutting-list-factory-root.cl-factory-theme {
+  --cl-teal: #134e4a;
+  --cl-teal-mid: #0f766e;
+  --cl-mint: #ecfdf5;
+  --cl-mint-deep: #d1fae5;
+  --cl-surface: #f8fafc;
+  --cl-surface-warm: #fffbeb;
+  --cl-orange: #ea580c;
+  --cl-orange-soft: #fff7ed;
+  --cl-border: #e2e8f0;
+  --cl-text-muted: #64748b;
+  font-family:
+    'Inter',
+    system-ui,
+    -apple-system,
+    Segoe UI,
+    Roboto,
+    sans-serif;
+  letter-spacing: 0.006em;
+}
+
+.cutting-list-factory-root .cutting-list-a5-sheet {
+  display: flex;
+  flex-direction: column;
+  min-height: 198mm;
+  gap: 1.25mm;
+}
+
+.cl-factory-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.75mm;
+  align-items: start;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Cutting lengths column first, slightly wider for numbers */
+.cl-factory-body--cut-first {
+  grid-template-columns: 1.08fr 0.92fr;
+}
+
+.cl-factory-panel {
+  background: linear-gradient(165deg, #ffffff 0%, var(--cl-surface) 100%);
+  border: 1px solid var(--cl-border);
+  border-radius: 10px;
+  padding: 1.35mm 1.65mm 1.15mm;
+  box-shadow: 0 1px 3px rgb(15 23 42 / 0.06);
+}
+
+.cl-factory-panel--accent {
+  background: linear-gradient(165deg, #ffffff 0%, var(--cl-mint) 55%, #f0fdfa 100%);
+  border-color: rgb(19 78 74 / 0.18);
+  box-shadow:
+    0 0 0 1px rgb(19 78 74 / 0.06),
+    0 4px 14px rgb(19 78 74 / 0.08);
+}
+
+/* Cutting list column: minimal top padding so tables start high on the sheet */
+.cl-factory-panel--cut-list {
+  padding-top: 0.5mm;
+  align-self: start;
+}
+
+.cl-factory-panel--cut-list .cl-factory-cut-title {
+  font-size: 6.35pt;
+}
+
+.cl-factory-panel--cut-list .cl-factory-cut-th {
+  font-size: 6.35pt;
+  padding: 0.85mm 1.2mm;
+  letter-spacing: 0.05em;
+}
+
+.cl-factory-panel--cut-list .cl-factory-cut-td {
+  font-size: 7.25pt;
+  padding: 0.65mm 1.15mm;
+  line-height: 1.22;
+}
+
+.cl-factory-panel--cut-list .cl-factory-cut-total-row .cl-factory-cut-td {
+  font-size: 6.85pt;
+}
+
+.cl-factory-cut-empty {
+  margin: 0;
+  padding: 0.5mm 0;
+  font-size: 6.75pt;
+  font-style: italic;
+  color: var(--cl-text-muted);
+}
+
+/* Banner — compact for A5 */
+.cl-factory-banner {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgb(19 78 74 / 0.2);
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  box-shadow: 0 2px 8px rgb(15 23 42 / 0.06);
+  margin-bottom: 0.5mm;
+}
+
+.cl-factory-banner-accent {
+  height: 2px;
+  background: linear-gradient(90deg, var(--cl-teal) 0%, var(--cl-teal-mid) 40%, var(--cl-orange) 100%);
+}
+
+.cl-factory-banner-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1.25mm 2mm;
+  padding: 1.15mm 1.65mm 0.55mm;
+}
+
+.cl-factory-banner-refline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35mm 0.65mm;
+  padding: 0.45mm 1.65mm 0.65mm;
+  border-top: 1px solid rgb(19 78 74 / 0.08);
+  font-size: 6.35pt;
+  line-height: 1.25;
+  color: #0f172a;
+}
+
+.cl-factory-ref-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35mm 0.5mm;
+  min-width: 0;
+}
+
+.cl-factory-ref-k {
+  font-size: 5.35pt;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--cl-text-muted);
+}
+
+.cl-factory-ref-v {
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.cl-factory-ref-sep {
+  color: #cbd5e1;
+  font-weight: 600;
+  user-select: none;
+}
+
+.cl-factory-banner-left {
+  display: flex;
+  align-items: center;
+  gap: 1.25mm;
+  min-width: 0;
+}
+
+.cl-factory-logo-ring {
+  flex-shrink: 0;
+  width: 8.5mm;
+  height: 8.5mm;
+  border-radius: 9px;
+  background: linear-gradient(145deg, var(--cl-mint-deep) 0%, #fff 100%);
+  border: 1px solid rgb(19 78 74 / 0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.9);
+}
+
+.cl-factory-logo-img {
+  width: 5.5mm;
+  height: 5.5mm;
+  object-fit: contain;
+}
+
+.cl-factory-banner-titles {
+  min-width: 0;
+}
+
+.cl-factory-legal-name {
+  margin: 0;
+  font-size: 6pt;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--cl-teal);
+  line-height: 1.15;
+}
+
+.cl-factory-doc-title {
+  margin: 0.25mm 0 0;
+  font-size: 9pt;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--cl-teal);
+  line-height: 1.05;
+}
+
+.cl-factory-id-pill {
+  font-size: 6.25pt;
+  font-weight: 700;
+  padding: 0.85mm 1.5mm;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #f1f5f9 0%, #e2e8f0 100%);
+  border: 1px solid #cbd5e1;
+  color: #0f172a;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.cl-factory-banner-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55mm;
+  text-align: right;
+}
+
+.cl-factory-meta-tile {
+  background: var(--cl-surface);
+  border: 1px solid var(--cl-border);
+  border-radius: 6px;
+  padding: 0.55mm 1.15mm;
+  min-width: 21mm;
+}
+
+.cl-factory-meta-k {
+  display: block;
+  font-size: 5.25pt;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--cl-text-muted);
+}
+
+.cl-factory-meta-v {
+  display: block;
+  font-size: 6.25pt;
+  font-weight: 700;
+  color: #0f172a;
+  margin-top: 0.1mm;
+}
+
+.cl-factory-subbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.15mm;
+  padding: 0.9mm 1.65mm 1.1mm;
+  background: linear-gradient(90deg, var(--cl-orange-soft) 0%, #fff 50%, var(--cl-mint) 100%);
+  border-top: 1px solid rgb(234 88 12 / 0.12);
+}
+
+.cl-factory-subbar--triple {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 0.9fr);
+  gap: 0.5mm 1.15mm;
+  align-items: baseline;
+}
+
+.cl-factory-subbar-seg {
+  min-width: 0;
+}
+
+.cl-factory-subbar-seg .cl-factory-subbar-k {
+  margin-right: 0.4mm;
+}
+
+.cl-factory-subbar-item {
+  flex: 1 1 38%;
+  min-width: 0;
+}
+
+.cl-factory-subbar-item--wide {
+  flex: 1 1 100%;
+}
+
+.cl-factory-subbar-k {
+  font-size: 5.5pt;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--cl-orange);
+  margin-right: 1mm;
+}
+
+.cl-factory-subbar-v {
+  font-size: 6pt;
+  font-weight: 600;
+  color: #334155;
+}
+
+/* Billing / cutting tables */
+.cl-factory-bill-block {
+  margin-bottom: 1.15mm;
+}
+
+.cl-factory-cut-block {
+  margin-bottom: 1.15mm;
+}
+
+.cl-factory-cut-block:last-child {
+  margin-bottom: 0;
+}
+
+.cl-factory-bill-title-bar,
+.cl-factory-cut-title-bar {
+  display: flex;
+  align-items: center;
+  gap: 1mm;
+  margin-bottom: 0.45mm;
+}
+
+.cl-factory-bill-title-dot {
+  width: 2mm;
+  height: 2mm;
+  border-radius: 50%;
+  background: var(--cl-teal);
+  box-shadow: 0 0 0 1px rgb(19 78 74 / 0.2);
+}
+
+.cl-factory-cut-title-icon {
+  width: 2.5mm;
+  height: 2.5mm;
+  border-radius: 2px;
+  background: linear-gradient(135deg, var(--cl-teal) 0%, var(--cl-teal-mid) 100%);
+}
+
+.cl-factory-bill-title,
+.cl-factory-cut-title {
+  margin: 0;
+  font-size: 6pt;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--cl-teal);
+}
+
+.cl-factory-table-shell {
+  border-radius: 5px;
+  overflow: hidden;
+  border: 1px solid var(--cl-border);
+  background: #fff;
+}
+
+.cl-factory-table-shell--cut {
+  border-color: rgb(19 78 74 / 0.15);
+}
+
+.cl-factory-bill-th,
+.cl-factory-cut-th {
+  border: none;
+  border-bottom: 1px solid rgb(19 78 74 / 0.2);
+  background: linear-gradient(180deg, var(--cl-teal) 0%, #0d5c56 100%);
+  color: #fff;
+  padding: 0.75mm 1.15mm;
+  font-size: 5.25pt;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.055em;
+  line-height: 1.15;
+}
+
+.cl-factory-cut-th {
+  background: linear-gradient(180deg, #115e59 0%, var(--cl-teal) 100%);
+}
+
+.cl-factory-bill-td,
+.cl-factory-cut-td {
+  border: none;
+  border-bottom: 1px solid #f1f5f9;
+  padding: 0.55mm 1.1mm;
+  font-size: 5.75pt;
+  line-height: 1.2;
+  vertical-align: middle;
+}
+
+.cl-factory-bill-table tbody tr:nth-child(even):not(.cl-factory-bill-subtotal-row) .cl-factory-bill-td,
+.cl-factory-cut-table tbody tr:nth-child(even):not(.cl-factory-cut-total-row) .cl-factory-cut-td {
+  background: rgb(248 250 252 / 0.85);
+}
+
+.cl-factory-bill-td-amount {
+  font-weight: 700;
+  color: var(--cl-teal);
+}
+
+.cl-factory-bill-subtotal-row .cl-factory-bill-td {
+  background: var(--cl-mint) !important;
+  border-top: 1px solid rgb(19 78 74 / 0.12);
+  border-bottom: none;
+  padding-top: 0.85mm;
+  padding-bottom: 0.85mm;
+}
+
+.cl-factory-bill-subtotal-label {
+  text-align: right;
+  font-weight: 800;
+  font-size: 5.75pt;
+  text-transform: uppercase;
+  letter-spacing: 0.055em;
+  color: var(--cl-teal);
+}
+
+.cl-factory-bill-subtotal-value {
+  font-weight: 800;
+  font-size: 6.25pt;
+  color: #0f172a;
+}
+
+.cl-factory-cut-total-row .cl-factory-cut-td {
+  background: linear-gradient(90deg, var(--cl-mint-deep) 0%, #ecfdf5 100%);
+  border-top: 2px solid var(--cl-teal);
+  border-bottom: none;
+  font-size: 6.1pt;
+}
+
+.cl-factory-cut-table tbody tr:not(.cl-factory-cut-total-row) {
+  break-inside: auto;
+  page-break-inside: auto;
+}
+
+.cl-factory-cut-total-row {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+/* Grand total — same visual weight as billing subtotal row */
+.cl-factory-grand-shell {
+  margin: 0.35mm 0 1.15mm;
+  border-radius: 5px;
+  overflow: hidden;
+  border: 1px solid var(--cl-border);
+  background: #fff;
+}
+
+/* Receipt */
+.cl-factory-receipt-box {
+  border-radius: 6px;
+  border: 1px solid rgb(234 88 12 / 0.25);
+  background: linear-gradient(180deg, var(--cl-orange-soft) 0%, #fff 70%);
+  padding: 1.15mm;
+  margin-bottom: 1.1mm;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.8);
+}
+
+.cl-factory-receipt-head {
+  margin: 0 0 0.75mm;
+  font-size: 5.75pt;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--cl-orange);
+}
+
+.cl-factory-receipt-empty {
+  margin: 0;
+  font-size: 6pt;
+  color: var(--cl-text-muted);
+  font-style: italic;
+}
+
+.cl-factory-receipt-row {
+  font-size: 5.75pt;
+  line-height: 1.3;
+  padding: 0.45mm 0.85mm;
+  margin-bottom: 0.55mm;
+  border-radius: 3px;
+  background: rgb(255 255 255 / 0.85);
+  border: 1px solid rgb(254 215 170 / 0.5);
+}
+
+.cl-factory-receipt-row:last-child {
+  margin-bottom: 0;
+}
+
+.cl-factory-receipt-id {
+  font-weight: 700;
+  color: var(--cl-teal);
+}
+
+.cl-factory-receipt-sep {
+  margin: 0 0.5mm;
+  color: #cbd5e1;
+}
+
+.cl-factory-receipt-amt {
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.cl-factory-receipt-bank {
+  color: #475569;
+}
+
+/* Chips */
+.cl-factory-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65mm;
+  margin-bottom: 0.9mm;
+}
+
+.cl-factory-chip {
+  font-size: 5.25pt;
+  font-weight: 700;
+  padding: 0.35mm 1.1mm;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid var(--cl-border);
+  color: #475569;
+}
+
+.cl-factory-chip--muted {
+  background: #f1f5f9;
+  color: var(--cl-text-muted);
+}
+
+.cl-factory-chip--accent {
+  background: var(--cl-mint);
+  border-color: rgb(19 78 74 / 0.2);
+  color: var(--cl-teal);
+}
+
+/* Scratchpad */
+.cl-factory-scratch {
+  margin-top: 0.35mm;
+  padding: 1.15mm;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  background: linear-gradient(180deg, #fafafa 0%, #fff 100%);
+  box-shadow: inset 0 1px 2px rgb(15 23 42 / 0.04);
+}
+
+.cl-factory-scratch-title {
+  display: flex;
+  align-items: center;
+  gap: 1mm;
+  margin: 0 0 1mm;
+  font-size: 6pt;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.055em;
+  color: #0f172a;
+}
+
+.cl-factory-scratch-title-mark {
+  width: 1mm;
+  height: 3.25mm;
+  border-radius: 1px;
+  background: linear-gradient(180deg, var(--cl-orange) 0%, var(--cl-teal) 100%);
+}
+
+.cl-factory-scratch-sub {
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0.02em;
+  color: var(--cl-text-muted);
+  font-size: 5.65pt;
+}
+
+.cl-factory-field-label {
+  display: block;
+  font-size: 5.15pt;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.045em;
+  color: var(--cl-text-muted);
+  margin-bottom: 0.25mm;
+}
+
+.cl-factory-write-line {
+  min-height: 3.15mm;
+  border-bottom: 1px dashed #94a3b8;
+  background: linear-gradient(180deg, transparent 60%, rgb(148 163 184 / 0.06) 100%);
+}
+
+.cl-factory-scratch-row3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0.85mm 1.15mm;
+  align-items: start;
+}
+
+.cl-factory-scratch-footer {
+  margin: 1.1mm 0 0;
+  padding-top: 0.85mm;
+  text-align: center;
+  font-size: 6.25pt;
+  font-weight: 800;
+  letter-spacing: 0.035em;
+  color: var(--cl-teal);
+  border-top: 1px solid var(--cl-border);
+}
+
+/* Continuation + footer */
+.cl-factory-continue-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1.15mm;
+  border-radius: 6px;
+  padding: 1.1mm 1.5mm;
+  margin-bottom: 1.1mm;
+  border: 1px solid rgb(19 78 74 / 0.2);
+  background: linear-gradient(90deg, #ecfeff 0%, #f0fdfa 100%);
+  font-size: 6pt;
+  line-height: 1.28;
+}
+
+.cl-factory-continue-tag {
+  flex-shrink: 0;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  font-size: 5.15pt;
+  color: var(--cl-teal);
+  padding: 0.35mm 1mm;
+  border-radius: 3px;
+  background: rgb(255 255 255 / 0.9);
+  border: 1px solid rgb(19 78 74 / 0.15);
+}
+
+.cl-factory-continue-body {
+  font-weight: 600;
+  color: #334155;
+}
+
+.cl-factory-page-foot {
+  margin: 0.65mm 0 0;
+  text-align: right;
+  font-size: 5.15pt;
+  color: var(--cl-text-muted);
+  letter-spacing: 0.035em;
+}
+
+.cl-factory-page-foot-brand {
+  font-weight: 800;
+  color: var(--cl-teal);
+}
+
+.cl-factory-col-right--full {
+  width: 100%;
+  max-width: 100%;
+}
+
+/* Customer quotation print — A4, multi-page long quotes, system layout */
+@media print {
+  /* Re-assert A5 for factory cutting list (named page) so margins stay tight when printing */
+  @page cutting-list-a5 {
+    margin: 4mm 4.5mm;
+    size: A5 portrait;
+  }
+
+  @page receipt-a5-landscape {
+    margin: 5mm 6mm;
+    size: A5 landscape;
+  }
+
+  @page {
+    margin: 8mm 10mm;
+    size: A4 portrait;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  body * {
+    visibility: hidden;
+  }
+
+  .quotation-print-root,
+  .quotation-print-root *,
+  .receipt-print-root,
+  .receipt-print-root *,
+  .report-print-root,
+  .report-print-root *,
+  .cutting-list-print-root,
+  .cutting-list-print-root *,
+  .cutting-list-a5-report-root,
+  .cutting-list-a5-report-root * {
+    visibility: visible;
+  }
+
+  .quotation-print-root,
+  .report-print-root,
+  .cutting-list-print-root {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 210mm !important;
+    max-width: 210mm !important;
+    margin: 0 auto;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    border: none !important;
+    box-sizing: border-box;
+    z-index: auto !important;
+    pointer-events: auto !important;
+  }
+
+  /* A5 cutting list pack — own width + named page size */
+  .cutting-list-a5-report-root {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 148mm !important;
+    max-width: 148mm !important;
+    margin: 0 auto;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    border: none !important;
+    box-sizing: border-box;
+    z-index: auto !important;
+    pointer-events: auto !important;
+  }
+
+  .cutting-list-factory-root,
+  .cutting-list-factory-root * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .cutting-list-factory-root .cl-factory-panel,
+  .cutting-list-factory-root .cl-factory-banner,
+  .cutting-list-factory-root .cl-factory-table-shell,
+  .cutting-list-factory-root .cl-factory-grand-shell,
+  .cutting-list-factory-root .cl-factory-receipt-box,
+  .cutting-list-factory-root .cl-factory-scratch {
+    box-shadow: none !important;
+  }
+
+  .cutting-list-factory-root .cl-factory-panel,
+  .cutting-list-factory-root .cl-factory-banner,
+  .cutting-list-factory-root .cl-factory-table-shell,
+  .cutting-list-factory-root .cl-factory-grand-shell,
+  .cutting-list-factory-root .cl-factory-meta-tile,
+  .cutting-list-factory-root .cl-factory-id-pill {
+    border-radius: 4px !important;
+  }
+
+  .report-print-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 8pt;
+  }
+
+  .report-print-table thead {
+    display: table-header-group;
+  }
+
+  .report-print-table tbody tr.report-print-tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Receipts: thermal (~80mm), advance A6 portrait, or full A5 landscape */
+  .receipt-print-root {
+    position: absolute;
+    left: 0;
+    top: 0;
+    margin: 0 auto;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    border: none !important;
+    box-sizing: border-box;
+  }
+
+  .receipt-print-root .receipt-print-thermal {
+    width: 80mm !important;
+    max-width: 80mm !important;
+  }
+
+  .receipt-print-root .receipt-print-a6 {
+    width: 105mm !important;
+    max-width: 105mm !important;
+    min-height: 148mm;
+  }
+
+  .receipt-print-root .receipt-print-landscape {
+    width: 210mm !important;
+    max-width: 210mm !important;
+    min-height: 148mm;
+  }
+
+  .receipt-print-landscape,
+  .receipt-print-landscape * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .receipt-print-landscape.rpt-full {
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    background: #fff !important;
+  }
+
+  .receipt-print-landscape .rpt-full-head,
+  .receipt-print-landscape .rpt-full-shell,
+  .receipt-print-landscape .rpt-full-aside,
+  .receipt-print-landscape .rpt-full-totalbar,
+  .receipt-print-landscape .rpt-full-badge,
+  .receipt-print-landscape .rpt-full-logo-ring {
+    box-shadow: none !important;
+  }
+
+  .rpt-full-table thead {
+    display: table-header-group;
+  }
+
+  .quotation-print-table {
+    width: 100%;
+  }
+
+  .quotation-print-table thead {
+    display: table-header-group;
+  }
+
+  .quotation-print-table tbody tr.quotation-print-tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Prefer signature block on one page; payment/terms may flow above it */
+  .quotation-print-signatures {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}

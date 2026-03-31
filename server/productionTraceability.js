@@ -1,0 +1,698 @@
+import { actorName } from './auth.js';
+import { appendAuditLog, assertPeriodOpen } from './controlOps.js';
+
+function nextId(prefix) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function normalizeIso(value) {
+  if (!value) return nowIso();
+  const raw = String(value).trim();
+  if (!raw) return nowIso();
+  return raw.includes('T') ? raw : `${raw}T12:00:00.000Z`;
+}
+
+function safeNumber(value, fallback = 0) {
+  const next = Number(value);
+  return Number.isFinite(next) ? next : fallback;
+}
+
+function positiveNumberOrNull(value) {
+  const next = Number(value);
+  return Number.isFinite(next) && next > 0 ? next : null;
+}
+
+function clampNonNegative(value) {
+  return Math.max(0, Number(value) || 0);
+}
+
+function parseGaugeMm(value) {
+  const match = String(value ?? '')
+    .replace(/,/g, '.')
+    .match(/(\d+(?:\.\d+)?)/);
+  if (!match) return null;
+  const next = Number(match[1]);
+  return Number.isFinite(next) ? next : null;
+}
+
+function toPercentVariance(actual, reference) {
+  if (!Number.isFinite(actual) || actual <= 0 || !Number.isFinite(reference) || reference <= 0) {
+    return null;
+  }
+  return ((actual - reference) / reference) * 100;
+}
+
+function appendStockMovementTx(db, payload) {
+  const id = nextId('MV');
+  const atISO = normalizeIso(payload.atISO);
+  db.prepare(
+    `INSERT INTO stock_movements (id, at_iso, type, ref, product_id, qty, detail, date_iso, unit_price_ngn)
+     VALUES (?,?,?,?,?,?,?,?,?)`
+  ).run(
+    id,
+    atISO,
+    payload.type,
+    payload.ref ?? null,
+    payload.productID ?? null,
+    payload.qty ?? null,
+    payload.detail ?? null,
+    String(payload.dateISO ?? atISO).slice(0, 10),
+    payload.unitPriceNgn ?? null
+  );
+  return id;
+}
+
+function adjustProductStockTx(db, productID, delta) {
+  if (!productID) return;
+  const row = db.prepare(`SELECT stock_level FROM products WHERE product_id = ?`).get(productID);
+  if (!row) return;
+  const next = clampNonNegative(Number(row.stock_level) + Number(delta || 0));
+  db.prepare(`UPDATE products SET stock_level = ? WHERE product_id = ?`).run(next, productID);
+}
+
+function coilRow(db, coilNo) {
+  return db.prepare(`SELECT * FROM coil_lots WHERE coil_no = ?`).get(coilNo);
+}
+
+function listJobCoilsForJob(db, jobID) {
+  return db
+    .prepare(`SELECT * FROM production_job_coils WHERE job_id = ? ORDER BY sequence_no ASC, id ASC`)
+    .all(jobID);
+}
+
+function mapProductionJobCoilRow(row) {
+  return {
+    id: row.id,
+    jobID: row.job_id,
+    sequenceNo: Number(row.sequence_no) || 0,
+    coilNo: row.coil_no,
+    productID: row.product_id ?? '',
+    colour: row.colour ?? '',
+    gaugeLabel: row.gauge_label ?? '',
+    openingWeightKg: safeNumber(row.opening_weight_kg),
+    closingWeightKg: safeNumber(row.closing_weight_kg),
+    consumedWeightKg: safeNumber(row.consumed_weight_kg),
+    metersProduced: safeNumber(row.meters_produced),
+    actualConversionKgPerM: positiveNumberOrNull(row.actual_conversion_kg_per_m),
+    allocationStatus: row.allocation_status ?? 'Allocated',
+    note: row.note ?? '',
+    allocatedAtISO: row.allocated_at_iso ?? '',
+  };
+}
+
+/** Coil allocation rows for a single job (read API / snapshot-friendly). */
+export function listProductionJobCoilsForJob(db, jobID) {
+  return listJobCoilsForJob(db, jobID).map(mapProductionJobCoilRow);
+}
+
+function productionJobRow(db, jobID) {
+  return db.prepare(`SELECT * FROM production_jobs WHERE job_id = ?`).get(jobID);
+}
+
+function updateCoilDerivedStateTx(db, coilNo) {
+  const row = coilRow(db, coilNo);
+  if (!row) return;
+  const qtyRemaining = clampNonNegative(row.qty_remaining ?? row.current_weight_kg ?? row.weight_kg ?? row.qty_received);
+  const qtyReserved = clampNonNegative(Math.min(qtyRemaining, row.qty_reserved ?? 0));
+  const currentStatus =
+    qtyRemaining <= 0.0001 ? 'Consumed' : qtyReserved >= qtyRemaining - 0.0001 && qtyReserved > 0 ? 'Reserved' : 'Available';
+  db.prepare(
+    `UPDATE coil_lots
+     SET qty_remaining = ?, qty_reserved = ?, current_weight_kg = ?, current_status = ?
+     WHERE coil_no = ?`
+  ).run(qtyRemaining, qtyReserved, qtyRemaining, currentStatus, coilNo);
+}
+
+function normalizeAllocationInput(payload, index) {
+  const coilNo = String(payload?.coilNo ?? '').trim();
+  const openingWeightKg = positiveNumberOrNull(payload?.openingWeightKg);
+  if (!coilNo) throw new Error(`Allocation line ${index + 1} is missing a coil number.`);
+  if (!openingWeightKg) throw new Error(`Allocation line ${index + 1} must have a reserved opening weight.`);
+  return {
+    coilNo,
+    openingWeightKg,
+    note: String(payload?.note ?? '').trim(),
+  };
+}
+
+function validateUniqueCoils(lines) {
+  const seen = new Set();
+  for (const line of lines) {
+    if (seen.has(line.coilNo)) {
+      throw new Error(`Coil ${line.coilNo} is allocated more than once on the same job.`);
+    }
+    seen.add(line.coilNo);
+  }
+}
+
+function materialTypeRowByName(db, name) {
+  const value = String(name ?? '').trim();
+  if (!value) return null;
+  return (
+    db.prepare(`SELECT * FROM setup_material_types WHERE lower(name) = lower(?) LIMIT 1`).get(value) ||
+    null
+  );
+}
+
+function gaugeRowByLabel(db, label) {
+  const value = String(label ?? '').trim();
+  if (!value) return null;
+  return (
+    db.prepare(`SELECT * FROM setup_gauges WHERE lower(label) = lower(?) LIMIT 1`).get(value) ||
+    null
+  );
+}
+
+function buildReferenceSet(db, coil, actualConversionKgPerM, excludeJobId = null) {
+  const gaugeRow = gaugeRowByLabel(db, coil.gauge_label);
+  const materialRow = materialTypeRowByName(db, coil.material_type_name);
+  const gaugeMm = gaugeRow ? safeNumber(gaugeRow.gauge_mm) : parseGaugeMm(coil.gauge_label);
+  const densityKgPerM3 = materialRow ? safeNumber(materialRow.density_kg_per_m3) : 0;
+  const widthM = materialRow ? safeNumber(materialRow.width_m, 1.2) : 1.2;
+  /** Standard reference: material density × strip width (m) × gauge thickness (m). */
+  const standardConversionKgPerM =
+    gaugeMm && densityKgPerM3 ? densityKgPerM3 * widthM * (gaugeMm / 1000) : null;
+  const supplierConversionKgPerM =
+    positiveNumberOrNull(coil.supplier_conversion_kg_per_m) ||
+    (() => {
+      const supplierExpectedMeters = positiveNumberOrNull(coil.supplier_expected_meters);
+      const coilWeight = positiveNumberOrNull(coil.weight_kg);
+      if (!supplierExpectedMeters || !coilWeight) return null;
+      return coilWeight / supplierExpectedMeters;
+    })();
+  const exJ = excludeJobId ? String(excludeJobId).trim() : '';
+  const gaugeHistoryAvgKgPerM = exJ
+    ? db
+        .prepare(
+          `SELECT AVG(actual_conversion_kg_per_m) AS avg_value
+           FROM production_conversion_checks
+           WHERE gauge_label = ? AND actual_conversion_kg_per_m > 0 AND job_id != ?`
+        )
+        .get(coil.gauge_label, exJ)?.avg_value ?? null
+    : db
+        .prepare(
+          `SELECT AVG(actual_conversion_kg_per_m) AS avg_value
+           FROM production_conversion_checks
+           WHERE gauge_label = ? AND actual_conversion_kg_per_m > 0`
+        )
+        .get(coil.gauge_label)?.avg_value ?? null;
+  const coilHistoryAvgKgPerM = exJ
+    ? db
+        .prepare(
+          `SELECT AVG(actual_conversion_kg_per_m) AS avg_value
+           FROM production_conversion_checks
+           WHERE coil_no = ? AND actual_conversion_kg_per_m > 0 AND job_id != ?`
+        )
+        .get(coil.coil_no, exJ)?.avg_value ?? null
+    : db
+        .prepare(
+          `SELECT AVG(actual_conversion_kg_per_m) AS avg_value
+           FROM production_conversion_checks
+           WHERE coil_no = ? AND actual_conversion_kg_per_m > 0`
+        )
+        .get(coil.coil_no)?.avg_value ?? null;
+  const variances = {
+    standardPct: toPercentVariance(actualConversionKgPerM, standardConversionKgPerM),
+    supplierPct: toPercentVariance(actualConversionKgPerM, supplierConversionKgPerM),
+    gaugeHistoryPct: toPercentVariance(actualConversionKgPerM, gaugeHistoryAvgKgPerM),
+    coilHistoryPct: toPercentVariance(actualConversionKgPerM, coilHistoryAvgKgPerM),
+  };
+  return {
+    gaugeLabel: coil.gauge_label ?? '',
+    materialTypeName: coil.material_type_name ?? '',
+    standardConversionKgPerM,
+    supplierConversionKgPerM,
+    gaugeHistoryAvgKgPerM:
+      Number.isFinite(gaugeHistoryAvgKgPerM) && gaugeHistoryAvgKgPerM > 0 ? gaugeHistoryAvgKgPerM : null,
+    coilHistoryAvgKgPerM:
+      Number.isFinite(coilHistoryAvgKgPerM) && coilHistoryAvgKgPerM > 0 ? coilHistoryAvgKgPerM : null,
+    variances,
+  };
+}
+
+function determineAlertState(actualConversionKgPerM, references) {
+  const referenceValues = [
+    references.standardConversionKgPerM,
+    references.supplierConversionKgPerM,
+    references.gaugeHistoryAvgKgPerM,
+    references.coilHistoryAvgKgPerM,
+  ].filter((value) => Number.isFinite(value) && value > 0);
+  const highBreaches = referenceValues.filter((value) => actualConversionKgPerM > value * 1.1);
+  const lowBreaches = referenceValues.filter((value) => actualConversionKgPerM < value * 0.9);
+  const varianceValues = Object.values(references.variances).filter(
+    (value) => Number.isFinite(value) && value != null
+  );
+  const maxVariance = varianceValues.length
+    ? Math.max(...varianceValues.map((value) => Math.abs(Number(value) || 0)))
+    : 0;
+  if (highBreaches.length >= 2) {
+    return { alertState: 'High', managerReviewRequired: 1 };
+  }
+  if (lowBreaches.length >= 2) {
+    return { alertState: 'Low', managerReviewRequired: 1 };
+  }
+  if (maxVariance >= 6) {
+    return { alertState: 'Watch', managerReviewRequired: 0 };
+  }
+  return { alertState: 'OK', managerReviewRequired: 0 };
+}
+
+function aggregateAlertState(alerts) {
+  if (alerts.includes('High')) return 'High';
+  if (alerts.includes('Low')) return 'Low';
+  if (alerts.includes('Watch')) return 'Watch';
+  return 'OK';
+}
+
+export function listProductionJobCoils(db) {
+  return db
+    .prepare(`SELECT * FROM production_job_coils ORDER BY allocated_at_iso DESC, sequence_no ASC, id ASC`)
+    .all()
+    .map(mapProductionJobCoilRow);
+}
+
+export function listProductionConversionChecks(db) {
+  return db
+    .prepare(
+      `SELECT c.*, j.cutting_list_id AS cutting_list_id_joined
+       FROM production_conversion_checks c
+       LEFT JOIN production_jobs j ON j.job_id = c.job_id
+       ORDER BY c.checked_at_iso DESC, c.job_id DESC, c.coil_no DESC, c.id DESC`
+    )
+    .all()
+    .map((row) => {
+      let varianceSummary = {};
+      try {
+        varianceSummary = JSON.parse(row.variance_summary_json || '{}');
+      } catch {
+        varianceSummary = {};
+      }
+      const variancesNested = varianceSummary.variances;
+      const legacyShape =
+        variancesNested && typeof variancesNested === 'object'
+          ? variancesNested
+          : varianceSummary.standardPct != null ||
+              varianceSummary.supplierPct != null ||
+              varianceSummary.gaugeHistoryPct != null ||
+              varianceSummary.coilHistoryPct != null
+            ? varianceSummary
+            : {};
+      return {
+        id: row.id,
+        jobID: row.job_id,
+        cuttingListId: row.cutting_list_id_joined ?? '',
+        coilNo: row.coil_no,
+        gaugeLabel: row.gauge_label ?? '',
+        materialTypeName: row.material_type_name ?? '',
+        actualConversionKgPerM: positiveNumberOrNull(row.actual_conversion_kg_per_m),
+        standardConversionKgPerM: positiveNumberOrNull(row.standard_conversion_kg_per_m),
+        supplierConversionKgPerM: positiveNumberOrNull(row.supplier_conversion_kg_per_m),
+        gaugeHistoryAvgKgPerM: positiveNumberOrNull(row.gauge_history_avg_kg_per_m),
+        coilHistoryAvgKgPerM: positiveNumberOrNull(row.coil_history_avg_kg_per_m),
+        alertState: row.alert_state ?? 'OK',
+        managerReviewRequired: Boolean(row.manager_review_required),
+        varianceSummary: {
+          ...varianceSummary,
+          variances: legacyShape,
+        },
+        checkedAtISO: row.checked_at_iso ?? '',
+        note: row.note ?? '',
+      };
+    });
+}
+
+export function saveProductionJobAllocations(db, jobID, allocations, opts = {}) {
+  const job = productionJobRow(db, jobID);
+  if (!job) return { ok: false, error: 'Production job not found.' };
+  if ((job.status ?? 'Planned') !== 'Planned') {
+    return { ok: false, error: 'Coil allocation must be completed before the job starts.' };
+  }
+  try {
+    const normalized = (allocations || []).map((line, index) => normalizeAllocationInput(line, index));
+    if (!normalized.length) return { ok: false, error: 'Add at least one coil allocation.' };
+    validateUniqueCoils(normalized);
+    const existing = listJobCoilsForJob(db, jobID);
+    const oldReservedByCoil = new Map(existing.map((row) => [row.coil_no, safeNumber(row.opening_weight_kg)]));
+    const newReservedByCoil = new Map(normalized.map((row) => [row.coilNo, row.openingWeightKg]));
+    db.transaction(() => {
+      for (const coilNo of new Set([...oldReservedByCoil.keys(), ...newReservedByCoil.keys()])) {
+        const coil = coilRow(db, coilNo);
+        if (!coil) throw new Error(`Coil ${coilNo} was not found.`);
+        const previousReserved = oldReservedByCoil.get(coilNo) || 0;
+        const nextReservedForJob = newReservedByCoil.get(coilNo) || 0;
+        const delta = nextReservedForJob - previousReserved;
+        const qtyRemaining = clampNonNegative(
+          coil.qty_remaining ?? coil.current_weight_kg ?? coil.weight_kg ?? coil.qty_received
+        );
+        const qtyReserved = clampNonNegative(coil.qty_reserved);
+        const availableForThisJob = qtyRemaining - (qtyReserved - previousReserved);
+        if (nextReservedForJob > availableForThisJob + 0.0001) {
+          throw new Error(
+            `Coil ${coilNo} only has ${availableForThisJob.toFixed(2)} kg available for allocation.`
+          );
+        }
+        db.prepare(`UPDATE coil_lots SET qty_reserved = ? WHERE coil_no = ?`).run(
+          clampNonNegative(qtyReserved + delta),
+          coilNo
+        );
+        updateCoilDerivedStateTx(db, coilNo);
+      }
+      db.prepare(`DELETE FROM production_job_coils WHERE job_id = ?`).run(jobID);
+      const insertAllocation = db.prepare(
+        `INSERT INTO production_job_coils (
+          id, job_id, sequence_no, coil_no, product_id, colour, gauge_label, opening_weight_kg,
+          closing_weight_kg, consumed_weight_kg, meters_produced, actual_conversion_kg_per_m,
+          allocation_status, note, allocated_at_iso
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      );
+      normalized.forEach((line, index) => {
+        const coil = coilRow(db, line.coilNo);
+        insertAllocation.run(
+          nextId('PJC'),
+          jobID,
+          index + 1,
+          line.coilNo,
+          coil?.product_id ?? null,
+          coil?.colour ?? null,
+          coil?.gauge_label ?? null,
+          line.openingWeightKg,
+          0,
+          0,
+          0,
+          null,
+          'Allocated',
+          line.note || null,
+          nowIso()
+        );
+      });
+      appendAuditLog(db, {
+        actor: opts.actor,
+        action: 'production.allocate_coils',
+        entityKind: 'production_job',
+        entityId: jobID,
+        note: `${normalized.length} coil allocation(s) saved`,
+        details: {
+          jobID,
+          coils: normalized.map((line) => ({ coilNo: line.coilNo, openingWeightKg: line.openingWeightKg })),
+        },
+      });
+    })();
+    return { ok: true, allocations: listProductionJobCoilsForJob(db, jobID) };
+  } catch (error) {
+    return { ok: false, error: String(error.message || error) };
+  }
+}
+
+export function startProductionJob(db, jobID, payload = {}, opts = {}) {
+  const job = productionJobRow(db, jobID);
+  if (!job) return { ok: false, error: 'Production job not found.' };
+  if ((job.status ?? 'Planned') === 'Completed') {
+    return { ok: false, error: 'Completed jobs cannot be started again.' };
+  }
+  const allocations = listJobCoilsForJob(db, jobID);
+  if (!allocations.length) {
+    return { ok: false, error: 'Allocate at least one coil before starting production.' };
+  }
+  const startedAtISO = normalizeIso(payload.startedAtISO || job.start_date_iso || nowIso());
+  try {
+    assertPeriodOpen(db, startedAtISO, 'Production start date');
+    db.transaction(() => {
+      db.prepare(`UPDATE production_jobs SET status = ?, start_date_iso = ? WHERE job_id = ?`).run(
+        'Running',
+        startedAtISO,
+        jobID
+      );
+      db.prepare(`UPDATE production_job_coils SET allocation_status = 'Running' WHERE job_id = ?`).run(jobID);
+      if (job.cutting_list_id) {
+        db.prepare(`UPDATE cutting_lists SET status = 'In production' WHERE id = ?`).run(job.cutting_list_id);
+      }
+      appendAuditLog(db, {
+        actor: opts.actor,
+        action: 'production.start',
+        entityKind: 'production_job',
+        entityId: jobID,
+        note: `Production started on ${jobID}`,
+        details: { startedAtISO, coilCount: allocations.length, by: actorName(opts.actor) },
+      });
+    })();
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: String(error.message || error) };
+  }
+}
+
+function buildVarianceSummaryPayload(row) {
+  return {
+    variances: row.references.variances,
+    actualConversionKgPerM: row.actualConversionKgPerM,
+    references: {
+      standardConversionKgPerM: row.references.standardConversionKgPerM,
+      supplierConversionKgPerM: row.references.supplierConversionKgPerM,
+      gaugeHistoryAvgKgPerM: row.references.gaugeHistoryAvgKgPerM,
+      coilHistoryAvgKgPerM: row.references.coilHistoryAvgKgPerM,
+    },
+  };
+}
+
+/**
+ * Validates completion readings and computes four-reference conversion rows (no DB writes).
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} jobID
+ * @param {{ allocations?: unknown[], completedAtISO?: string }} payload
+ */
+export function computeCompletionConversionRows(db, jobID, payload = {}) {
+  const job = productionJobRow(db, jobID);
+  if (!job) return { ok: false, error: 'Production job not found.' };
+  if ((job.status ?? 'Planned') !== 'Running') {
+    return { ok: false, error: 'Start the production job before completing it.' };
+  }
+  const existingAllocations = listJobCoilsForJob(db, jobID);
+  if (!existingAllocations.length) {
+    return { ok: false, error: 'No coil allocations are linked to this production job.' };
+  }
+  const submittedAllocations = Array.isArray(payload.allocations) ? payload.allocations : [];
+  const submittedByCoil = new Map(
+    submittedAllocations.map((line) => [String(line?.coilNo ?? '').trim(), line])
+  );
+  try {
+    const conversionRows = existingAllocations.map((allocation) => {
+      const submitted = submittedByCoil.get(allocation.coil_no);
+      if (!submitted) {
+        throw new Error(`Provide completion readings for coil ${allocation.coil_no}.`);
+      }
+      const openingWeightKg = safeNumber(allocation.opening_weight_kg);
+      const closingWeightKg = safeNumber(submitted.closingWeightKg);
+      const metersProduced = safeNumber(submitted.metersProduced);
+      if (closingWeightKg < 0 || closingWeightKg > openingWeightKg) {
+        throw new Error(`Coil ${allocation.coil_no} closing kg must be between 0 and ${openingWeightKg}.`);
+      }
+      if (metersProduced <= 0) {
+        throw new Error(`Coil ${allocation.coil_no} must produce a positive number of metres.`);
+      }
+      const consumedWeightKg = openingWeightKg - closingWeightKg;
+      if (consumedWeightKg <= 0) {
+        throw new Error(`Coil ${allocation.coil_no} shows no consumed kg.`);
+      }
+      const actualConversionKgPerM = consumedWeightKg / metersProduced;
+      const coil = coilRow(db, allocation.coil_no);
+      if (!coil) throw new Error(`Coil ${allocation.coil_no} was not found.`);
+      const qtyRemaining = clampNonNegative(
+        coil.qty_remaining ?? coil.current_weight_kg ?? coil.weight_kg ?? coil.qty_received
+      );
+      if (consumedWeightKg > qtyRemaining + 0.0001) {
+        throw new Error(`Coil ${allocation.coil_no} does not have enough remaining kg.`);
+      }
+      const references = buildReferenceSet(db, coil, actualConversionKgPerM, jobID);
+      const alert = determineAlertState(actualConversionKgPerM, references);
+      return {
+        allocationId: allocation.id,
+        coilNo: allocation.coil_no,
+        productID: coil.product_id ?? '',
+        openingWeightKg,
+        closingWeightKg,
+        consumedWeightKg,
+        metersProduced,
+        actualConversionKgPerM,
+        references,
+        alertState: alert.alertState,
+        managerReviewRequired: alert.managerReviewRequired,
+        note: String(submitted.note ?? '').trim(),
+      };
+    });
+    const totalMeters = conversionRows.reduce((sum, row) => sum + row.metersProduced, 0);
+    const totalWeightKg = conversionRows.reduce((sum, row) => sum + row.consumedWeightKg, 0);
+    const aggregatedAlertState = aggregateAlertState(conversionRows.map((row) => row.alertState));
+    const managerReviewRequired = conversionRows.some((row) => row.managerReviewRequired);
+    return {
+      ok: true,
+      conversionRows,
+      totalMeters,
+      totalWeightKg,
+      aggregatedAlertState,
+      managerReviewRequired,
+    };
+  } catch (error) {
+    return { ok: false, error: String(error.message || error) };
+  }
+}
+
+/**
+ * Preview four-reference conversion and alert flags without posting stock or job completion.
+ */
+export function previewProductionConversion(db, jobID, payload = {}) {
+  const r = computeCompletionConversionRows(db, jobID, payload);
+  if (!r.ok) return r;
+  return {
+    ok: true,
+    rows: r.conversionRows.map((row) => ({
+      coilNo: row.coilNo,
+      metersProduced: row.metersProduced,
+      consumedWeightKg: row.consumedWeightKg,
+      actualConversionKgPerM: row.actualConversionKgPerM,
+      standardConversionKgPerM: row.references.standardConversionKgPerM,
+      supplierConversionKgPerM: row.references.supplierConversionKgPerM,
+      gaugeHistoryAvgKgPerM: row.references.gaugeHistoryAvgKgPerM,
+      coilHistoryAvgKgPerM: row.references.coilHistoryAvgKgPerM,
+      variances: row.references.variances,
+      alertState: row.alertState,
+      managerReviewRequired: Boolean(row.managerReviewRequired),
+    })),
+    aggregatedAlertState: r.aggregatedAlertState,
+    managerReviewRequired: r.managerReviewRequired,
+    totalMeters: r.totalMeters,
+    totalWeightKg: r.totalWeightKg,
+  };
+}
+
+export function completeProductionJob(db, jobID, payload = {}, opts = {}) {
+  const job = productionJobRow(db, jobID);
+  if (!job) return { ok: false, error: 'Production job not found.' };
+  const completedAtISO = normalizeIso(payload.completedAtISO || payload.endDateISO || nowIso());
+  try {
+    assertPeriodOpen(db, completedAtISO, 'Production completion date');
+    const computed = computeCompletionConversionRows(db, jobID, payload);
+    if (!computed.ok) return computed;
+    const { conversionRows, totalMeters, totalWeightKg, aggregatedAlertState, managerReviewRequired } = computed;
+    db.transaction(() => {
+      const updateAllocation = db.prepare(
+        `UPDATE production_job_coils
+         SET closing_weight_kg = ?, consumed_weight_kg = ?, meters_produced = ?, actual_conversion_kg_per_m = ?,
+             allocation_status = 'Completed', note = ?
+         WHERE id = ?`
+      );
+      const insertCheck = db.prepare(
+        `INSERT INTO production_conversion_checks (
+          id, job_id, coil_no, gauge_label, material_type_name, actual_conversion_kg_per_m,
+          standard_conversion_kg_per_m, supplier_conversion_kg_per_m, gauge_history_avg_kg_per_m,
+          coil_history_avg_kg_per_m, alert_state, manager_review_required, variance_summary_json,
+          checked_at_iso, note
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      );
+      for (const row of conversionRows) {
+        updateAllocation.run(
+          row.closingWeightKg,
+          row.consumedWeightKg,
+          row.metersProduced,
+          row.actualConversionKgPerM,
+          row.note || null,
+          row.allocationId
+        );
+        insertCheck.run(
+          nextId('PCC'),
+          jobID,
+          row.coilNo,
+          row.references.gaugeLabel || null,
+          row.references.materialTypeName || null,
+          row.actualConversionKgPerM,
+          row.references.standardConversionKgPerM,
+          row.references.supplierConversionKgPerM,
+          row.references.gaugeHistoryAvgKgPerM,
+          row.references.coilHistoryAvgKgPerM,
+          row.alertState,
+          row.managerReviewRequired,
+          JSON.stringify(buildVarianceSummaryPayload(row)),
+          completedAtISO,
+          row.note || null
+        );
+        const coil = coilRow(db, row.coilNo);
+        const qtyRemaining = clampNonNegative(
+          safeNumber(coil?.qty_remaining ?? coil?.current_weight_kg ?? coil?.weight_kg ?? coil?.qty_received) -
+            row.consumedWeightKg
+        );
+        const qtyReserved = clampNonNegative(safeNumber(coil?.qty_reserved) - row.openingWeightKg);
+        db.prepare(
+          `UPDATE coil_lots
+           SET qty_remaining = ?, qty_reserved = ?, current_weight_kg = ?
+           WHERE coil_no = ?`
+        ).run(qtyRemaining, qtyReserved, qtyRemaining, row.coilNo);
+        updateCoilDerivedStateTx(db, row.coilNo);
+        appendStockMovementTx(db, {
+          atISO: completedAtISO,
+          type: 'COIL_CONSUMPTION',
+          ref: jobID,
+          productID: row.productID,
+          qty: -row.consumedWeightKg,
+          detail: `${row.coilNo} consumed for ${row.metersProduced.toFixed(2)} m on ${jobID}`,
+        });
+      }
+      if (job.product_id) {
+        adjustProductStockTx(db, job.product_id, totalMeters);
+        appendStockMovementTx(db, {
+          atISO: completedAtISO,
+          type: 'FINISHED_GOODS_RECEIPT',
+          ref: jobID,
+          productID: job.product_id,
+          qty: totalMeters,
+          detail: `${jobID} completed output (${job.product_name || job.product_id})`,
+        });
+      }
+      db.prepare(
+        `UPDATE production_jobs
+         SET status = ?, end_date_iso = ?, completed_at_iso = ?, actual_meters = ?, actual_weight_kg = ?,
+             conversion_alert_state = ?, manager_review_required = ?
+         WHERE job_id = ?`
+      ).run(
+        'Completed',
+        completedAtISO.slice(0, 10),
+        completedAtISO,
+        totalMeters,
+        totalWeightKg,
+        aggregatedAlertState,
+        managerReviewRequired ? 1 : 0,
+        jobID
+      );
+      if (job.cutting_list_id) {
+        db.prepare(`UPDATE cutting_lists SET status = 'Finished' WHERE id = ?`).run(job.cutting_list_id);
+      }
+      appendAuditLog(db, {
+        actor: opts.actor,
+        action: 'production.complete',
+        entityKind: 'production_job',
+        entityId: jobID,
+        note:
+          aggregatedAlertState === 'OK'
+            ? `Production completed on ${jobID}`
+            : `Production completed on ${jobID} with ${aggregatedAlertState.toLowerCase()} conversion alert`,
+        details: {
+          totalMeters,
+          totalWeightKg,
+          alertState: aggregatedAlertState,
+          managerReviewRequired,
+        },
+      });
+    })();
+    return {
+      ok: true,
+      actualMeters: totalMeters,
+      actualWeightKg: totalWeightKg,
+      alertState: aggregatedAlertState,
+      managerReviewRequired,
+    };
+  } catch (error) {
+    return { ok: false, error: String(error.message || error) };
+  }
+}

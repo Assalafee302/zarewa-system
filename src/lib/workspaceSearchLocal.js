@@ -1,0 +1,116 @@
+/**
+ * Search cached workspace snapshot (offline / degraded) with permission checks.
+ * @param {object} snapshot
+ * @param {string} rawQuery
+ * @param {(p: string) => boolean} hasPermission
+ * @param {number} [limit]
+ */
+export function searchWorkspaceSnapshot(snapshot, rawQuery, hasPermission, limit = 20) {
+  const q = String(rawQuery || '').trim().toLowerCase();
+  if (q.length < 2 || !snapshot) return [];
+
+  const perm = (p) => hasPermission('*') || hasPermission(p);
+  const results = [];
+  const push = (row) => {
+    if (results.length < limit) results.push(row);
+  };
+
+  if (perm('sales.view') || perm('customers.manage')) {
+    for (const c of snapshot.customers || []) {
+      if (results.length >= limit) break;
+      const blob = `${c.customerID} ${c.name} ${c.phoneNumber || ''} ${c.email || ''} ${c.companyName || ''}`.toLowerCase();
+      if (blob.includes(q)) {
+        push({
+          kind: 'customer',
+          id: c.customerID,
+          label: c.name,
+          sublabel: c.customerID,
+          path: `/customers/${encodeURIComponent(c.customerID)}`,
+        });
+      }
+    }
+  }
+
+  if (perm('quotations.manage') || perm('sales.view')) {
+    for (const row of snapshot.quotations || []) {
+      if (results.length >= limit) break;
+      const blob = `${row.id} ${row.customer || ''} ${row.customerID || ''} ${row.projectName || ''}`.toLowerCase();
+      if (blob.includes(q)) {
+        push({
+          kind: 'quotation',
+          id: row.id,
+          label: row.id,
+          sublabel: row.customer,
+          path: '/sales',
+          state: { globalSearchQuery: row.id, focusSalesTab: 'quotations' },
+        });
+      }
+    }
+  }
+
+  if (perm('receipts.post') || perm('finance.view') || perm('sales.view')) {
+    for (const row of snapshot.receipts || []) {
+      if (results.length >= limit) break;
+      const blob = `${row.id} ${row.customer || ''} ${row.customerID || ''} ${row.quotationRef || ''}`.toLowerCase();
+      if (blob.includes(q)) {
+        push({
+          kind: 'receipt',
+          id: row.id,
+          label: row.id,
+          sublabel: row.customer,
+          path: '/sales',
+          state: { globalSearchQuery: row.id, focusSalesTab: 'receipts' },
+        });
+      }
+    }
+  }
+
+  if (perm('procurement.view') || perm('purchase_orders.manage')) {
+    for (const row of snapshot.purchaseOrders || []) {
+      if (results.length >= limit) break;
+      const blob = `${row.poID} ${row.supplierName || ''} ${row.supplierID || ''}`.toLowerCase();
+      if (blob.includes(q)) {
+        push({
+          kind: 'purchase_order',
+          id: row.poID,
+          label: row.poID,
+          sublabel: row.supplierName,
+          path: '/procurement',
+          state: { focusTab: 'purchases' },
+        });
+      }
+    }
+    for (const s of snapshot.suppliers || []) {
+      if (results.length >= limit) break;
+      const blob = `${s.supplierID} ${s.name || ''} ${s.city || ''}`.toLowerCase();
+      if (blob.includes(q)) {
+        push({
+          kind: 'supplier',
+          id: s.supplierID,
+          label: s.name,
+          sublabel: s.supplierID,
+          path: `/procurement/suppliers/${encodeURIComponent(s.supplierID)}`,
+        });
+      }
+    }
+  }
+
+  if (perm('operations.view') || perm('production.manage')) {
+    for (const row of snapshot.cuttingLists || []) {
+      if (results.length >= limit) break;
+      const blob = `${row.id} ${row.customer || ''} ${row.customerID || ''} ${row.quotationRef || ''}`.toLowerCase();
+      if (blob.includes(q)) {
+        push({
+          kind: 'cutting_list',
+          id: row.id,
+          label: row.id,
+          sublabel: row.customer,
+          path: '/operations',
+          state: { focusOpsTab: 'production' },
+        });
+      }
+    }
+  }
+
+  return results;
+}

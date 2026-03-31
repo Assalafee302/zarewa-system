@@ -1,0 +1,146 @@
+import { DEFAULT_BRANCH_ID } from './branches.js';
+import * as write from './writeOps.js';
+
+function markJobCompletedDemo(db, jobID, cuttingListId, actualMeters) {
+  const iso = '2026-03-12T16:00:00.000Z';
+  db.prepare(
+    `UPDATE production_jobs SET status = 'Completed', completed_at_iso = ?, end_date_iso = ?, actual_meters = ?, actual_weight_kg = ?, conversion_alert_state = 'OK', manager_review_required = 0 WHERE job_id = ?`
+  ).run(iso, '2026-03-12', actualMeters, 0, jobID);
+  db.prepare(`UPDATE cutting_lists SET status = 'Finished' WHERE id = ?`).run(cuttingListId);
+}
+
+/**
+ * Idempotent demo chain aligned with seeded data:
+ * - QT-2026-003: paid in full (receipt RC-2026-012) → cutting list + active Planned job for the queue.
+ * - QT-2026-007: paid in full (receipt RC-2026-008) → cutting list + Completed job for read-only viewing.
+ */
+export function seedProductionLineDemo(db) {
+  try {
+    seedActiveJobForQuote003(db);
+    seedCompletedJobForQuote007(db);
+  } catch (e) {
+    console.warn('[seed] production line demo:', e?.message || e);
+  }
+}
+
+function seedActiveJobForQuote003(db) {
+  const clRow = db
+    .prepare(`SELECT id, production_registered FROM cutting_lists WHERE quotation_ref = 'QT-2026-003'`)
+    .get();
+  if (clRow?.production_registered) return;
+
+  if (!clRow) {
+    const cl = write.insertCuttingList(
+      db,
+      {
+      quotationRef: 'QT-2026-003',
+      productID: 'FG-101',
+      productName: 'Longspan thin (Zaidu batch)',
+      dateISO: '2026-03-30',
+      machineName: 'Production line',
+      operatorName: 'Demo',
+      handledBy: 'Seed',
+      lines: [
+        { sheets: 10, lengthM: 12 },
+        { sheets: 5, lengthM: 8 },
+      ],
+    },
+      DEFAULT_BRANCH_ID
+    );
+    if (!cl.ok) return;
+    write.insertProductionJob(
+      db,
+      {
+        jobID: 'PRO-DEMO-ACTIVE',
+        cuttingListId: cl.id,
+        productID: 'FG-101',
+        productName: 'Longspan thin (Zaidu batch)',
+        plannedMeters: 160,
+        plannedSheets: 15,
+        machineName: 'Production line',
+        operatorName: 'Demo operator',
+      },
+      DEFAULT_BRANCH_ID
+    );
+    return;
+  }
+
+  const job = write.insertProductionJob(
+    db,
+    {
+      jobID: 'PRO-DEMO-ACTIVE',
+      cuttingListId: clRow.id,
+      productID: 'FG-101',
+      productName: 'Longspan thin (Zaidu batch)',
+      plannedMeters: 160,
+      plannedSheets: 15,
+      machineName: 'Production line',
+      operatorName: 'Demo operator',
+    },
+    DEFAULT_BRANCH_ID
+  );
+  if (!job.ok) {
+    /* e.g. list already tied to another job */
+  }
+}
+
+function seedCompletedJobForQuote007(db) {
+  const clRow = db
+    .prepare(`SELECT id, production_registered FROM cutting_lists WHERE quotation_ref = 'QT-2026-007'`)
+    .get();
+
+  if (!clRow) {
+    const cl = write.insertCuttingList(
+      db,
+      {
+        quotationRef: 'QT-2026-007',
+        productID: 'FG-101',
+        productName: 'Longspan thin (Grace — demo complete)',
+        dateISO: '2026-03-10',
+        machineName: 'Production line',
+        handledBy: 'Seed',
+        lines: [{ sheets: 4, lengthM: 15 }],
+      },
+      DEFAULT_BRANCH_ID
+    );
+    if (!cl.ok) return;
+    const job = write.insertProductionJob(
+      db,
+      {
+        jobID: 'PRO-DEMO-DONE',
+        cuttingListId: cl.id,
+        productID: 'FG-101',
+        productName: 'Longspan thin (Grace — demo complete)',
+        plannedMeters: 60,
+        plannedSheets: 4,
+        machineName: 'Production line',
+      },
+      DEFAULT_BRANCH_ID
+    );
+    if (!job.ok) return;
+    markJobCompletedDemo(db, job.jobID, cl.id, 60);
+    return;
+  }
+
+  const jobs = db.prepare(`SELECT job_id, status FROM production_jobs WHERE cutting_list_id = ?`).all(clRow.id);
+  if (jobs.some((j) => j.status === 'Completed')) return;
+  if (jobs.length > 0) return;
+
+  if (!clRow.production_registered) {
+    const job = write.insertProductionJob(
+      db,
+      {
+        jobID: 'PRO-DEMO-DONE',
+        cuttingListId: clRow.id,
+        productID: 'FG-101',
+        productName: 'Longspan thin (Grace — demo complete)',
+        plannedMeters: 60,
+        plannedSheets: 4,
+        machineName: 'Production line',
+      },
+      DEFAULT_BRANCH_ID
+    );
+    if (!job.ok) return;
+    markJobCompletedDemo(db, job.jobID, clRow.id, 60);
+  }
+}
