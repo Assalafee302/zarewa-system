@@ -117,6 +117,28 @@ describe('Zarewa API', () => {
     expect(again.body.interactions.some((i) => i.detail === 'Logged interaction')).toBe(true);
   });
 
+  it('DELETE /api/customers/:id returns blockers when customer has dependents', async () => {
+    const res = await agent.delete('/api/customers/CUS-001');
+    expect(res.status).toBe(400);
+    expect(res.body.ok).toBe(false);
+    expect(Array.isArray(res.body.blockers)).toBe(true);
+    expect(res.body.blockers.length).toBeGreaterThan(0);
+    expect(res.body.error).toMatch(/dependent records/i);
+  });
+
+  it('DELETE /api/customers/:id removes customer with no dependents', async () => {
+    const created = await agent.post('/api/customers').send({
+      customerID: 'CUS-DELETE-EMPTY',
+      name: 'Ephemeral Delete Test',
+    });
+    expect(created.status).toBe(201);
+    const del = await agent.delete('/api/customers/CUS-DELETE-EMPTY');
+    expect(del.status).toBe(200);
+    expect(del.body.ok).toBe(true);
+    const get = await agent.get('/api/customers/CUS-DELETE-EMPTY');
+    expect(get.status).toBe(404);
+  });
+
   it('PATCH /api/bank-reconciliation/:lineId updates match status', async () => {
     const boot = await agent.get('/api/bootstrap');
     const line = boot.body.bankReconciliation.find((l) => l.id === 'BR-003');
