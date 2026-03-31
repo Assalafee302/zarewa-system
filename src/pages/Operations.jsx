@@ -637,8 +637,8 @@ const Operations = () => {
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 lg:gap-8">
         <div className="col-span-full w-full">
           <div className="flex flex-col lg:flex-row gap-6 lg:gap-8 lg:items-stretch lg:min-h-[50vh]">
-            <section className="rounded-xl border border-sky-200/90 bg-sky-50/50 shadow-sm overflow-hidden w-full lg:w-1/2 lg:flex-1 min-w-0 flex flex-col min-h-[280px] lg:min-h-0">
-            <div className="h-1 bg-sky-500 shrink-0" />
+            <section className="z-soft-panel overflow-hidden w-full lg:w-1/2 lg:flex-1 min-w-0 flex flex-col min-h-[280px] lg:min-h-0">
+            <div className="h-1 bg-teal-500 shrink-0 opacity-80" />
             <div className="p-4 sm:p-6 flex-1 flex flex-col min-h-0">
               <h3 className="text-[10px] font-semibold text-slate-600 uppercase tracking-widest mb-1 flex items-center gap-2">
                 <Truck size={14} className="text-sky-700" />
@@ -655,7 +655,7 @@ const Operations = () => {
                   {transitOrders.map((p) => (
                     <li
                       key={p.poID}
-                      className="rounded-lg border border-sky-100 bg-white p-4 sm:p-5 shadow-sm"
+                      className="rounded-2xl border border-slate-200/60 bg-white/40 p-4 sm:p-5 shadow-sm backdrop-blur-md"
                     >
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <div className="min-w-0">
@@ -824,8 +824,8 @@ const Operations = () => {
             </div>
           </section>
 
-            <section className="rounded-xl border border-[#134e4a]/20 bg-[#f0fdfa] shadow-sm overflow-hidden w-full lg:w-1/2 lg:flex-1 min-w-0 flex flex-col min-h-[280px] lg:min-h-0">
-              <div className="h-1 bg-[#134e4a] shrink-0" />
+            <section className="z-soft-panel overflow-hidden w-full lg:w-1/2 lg:flex-1 min-w-0 flex flex-col min-h-[280px] lg:min-h-0">
+              <div className="h-1 bg-[#134e4a] shrink-0 opacity-80" />
               <div className="p-4 sm:p-6 flex-1 flex flex-col min-h-0">
                 <h3 className="text-[10px] font-semibold text-slate-600 uppercase tracking-widest mb-1 flex items-center gap-2">
                   <Scale size={14} className="text-[#134e4a]" />
@@ -908,98 +908,118 @@ const Operations = () => {
           </div>
         </div>
 
-        <aside className="lg:col-span-1 space-y-5 order-2 lg:order-1">
-          <div className="rounded-xl border border-slate-200/90 bg-white shadow-sm p-5 border-l-4 border-l-[#134e4a]">
-            <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-1">
-              <Package size={14} /> Total stock (kg)
-            </p>
-            <p className="text-2xl font-bold text-[#134e4a] tabular-nums">
-              {inventoryStats.totalKg.toLocaleString()}{' '}
-              <span className="text-xs font-semibold text-slate-400">kg</span>
-            </p>
-            <ul className="mt-3 space-y-1.5 text-[10px] font-medium text-slate-600 border-t border-slate-100 pt-3">
-              <li className="flex justify-between gap-2">
-                <span>Aluzinc</span>
-                <span className="tabular-nums text-[#134e4a] font-semibold">
-                  {inventoryStats.aluzincKg.toLocaleString()} kg
-                </span>
-              </li>
-              <li className="flex justify-between gap-2">
-                <span>Aluminium</span>
-                <span className="tabular-nums text-[#134e4a] font-semibold">
-                  {inventoryStats.aluminiumKg.toLocaleString()} kg
-                </span>
-              </li>
-              {inventoryStats.otherKg > 0 ? (
-                <li className="flex justify-between gap-2">
-                  <span>Other coil</span>
-                  <span className="tabular-nums text-slate-700 font-semibold">
-                    {inventoryStats.otherKg.toLocaleString()} kg
+        <div className="col-span-full mb-2">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
+            <div className="relative overflow-hidden rounded-[24px] border border-white/40 bg-gradient-to-br from-teal-900 via-[#134e4a] to-[#0f3d39] p-6 shadow-xl backdrop-blur-3xl text-white">
+              <div className="absolute top-0 right-0 -mt-4 -mr-4 h-24 w-24 rounded-full bg-teal-400/20 blur-2xl" />
+              <p className="text-[10px] font-bold text-teal-100 uppercase tracking-widest mb-3 flex items-center gap-1.5 opacity-90">
+                <Package size={14} /> Total Primary Raw Stock
+              </p>
+              <p className="text-4xl font-black tabular-nums tracking-tighter drop-shadow-md">
+                {inventoryStats.totalKg.toLocaleString()} <span className="text-sm font-semibold text-teal-200/60 ml-1">kg</span>
+              </p>
+              <ul className="mt-5 space-y-2 text-[11px] font-medium text-teal-50 border-t border-teal-800/50 pt-4">
+                <li className="flex justify-between items-center bg-black/10 rounded-lg px-3 py-1.5 backdrop-blur-md">
+                  <span>Aluzinc Core</span>
+                  <span className="tabular-nums font-bold text-teal-100">
+                    {inventoryStats.aluzincKg.toLocaleString()} kg
                   </span>
                 </li>
-              ) : null}
-            </ul>
-          </div>
-
-          <div className="rounded-xl border border-slate-200/90 bg-white shadow-sm p-5 relative overflow-hidden">
-            <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-2">
-              Conversion efficiency
-            </p>
-            <div className="flex justify-between items-end text-emerald-600 gap-3">
-              <h3 className="text-xl font-bold tracking-tight tabular-nums">
-                {conversionStats.efficiencyPct != null ? `${conversionStats.efficiencyPct}%` : '—'}
-              </h3>
-              <TrendingUp size={22} className="shrink-0" />
-            </div>
-            <div
-              className="absolute bottom-0 left-0 h-1 rounded-r bg-emerald-500"
-              style={{ width: `${conversionStats.efficiencyPct ?? 0}%` }}
-            />
-            <p className="text-[10px] text-slate-500 mt-2">
-              {conversionStats.total > 0
-                ? `${conversionStats.flagged} flagged · ${conversionStats.watch} watch-band checks`
-                : 'No completed conversion checks yet.'}
-            </p>
-          </div>
-
-          <div className="rounded-xl border border-amber-100 bg-amber-50/60 p-5 border-l-4 border-l-amber-500">
-            <p className="text-[10px] font-semibold text-amber-900 uppercase tracking-widest mb-2 flex items-center gap-1">
-              <AlertTriangle size={14} /> Low stock alert
-            </p>
-            <p className="text-2xl font-bold text-amber-900 tabular-nums">{inventoryStats.lowStock}</p>
-            <p className="text-[10px] text-amber-900/80 mt-2">SKUs below minimum</p>
-            {lowStockRows.length > 0 ? (
-              <ul className="mt-3 space-y-2 border-t border-amber-200/60 pt-3">
-                {lowStockRows.slice(0, 4).map((r) => {
-                  const a = attrsForStockRow(r);
-                  return (
-                    <li key={r.productID} className="text-[10px] text-amber-950/90">
-                      <span className="font-semibold text-[#134e4a]">{a.gauge} mm</span>
-                      <span className="text-amber-800/80"> · {a.materialType}</span>
-                      <span className="block text-amber-800 tabular-nums mt-0.5">
-                        {r.stockLevel.toLocaleString()} {r.unit}
-                      </span>
-                    </li>
-                  );
-                })}
+                <li className="flex justify-between items-center bg-black/10 rounded-lg px-3 py-1.5 backdrop-blur-md">
+                  <span>Aluminium Mix</span>
+                  <span className="tabular-nums font-bold text-teal-100">
+                    {inventoryStats.aluminiumKg.toLocaleString()} kg
+                  </span>
+                </li>
+                {inventoryStats.otherKg > 0 ? (
+                  <li className="flex justify-between items-center bg-black/10 rounded-lg px-3 py-1.5 backdrop-blur-md">
+                    <span className="opacity-80">Remaining Materials</span>
+                    <span className="tabular-nums font-bold text-teal-100/80">
+                      {inventoryStats.otherKg.toLocaleString()} kg
+                    </span>
+                  </li>
+                ) : null}
               </ul>
-            ) : null}
-          </div>
+            </div>
 
-          <div className="rounded-xl border border-slate-200/90 bg-[#134e4a] text-white shadow-sm p-5">
-            <p className="text-[10px] font-semibold text-white/70 uppercase tracking-widest mb-2 flex items-center gap-1">
-              <Award size={14} /> Best performer (stock)
-            </p>
-            <p className="text-lg font-bold text-white leading-tight">
-              {inventoryStats.bestPerforming.gauge} mm · {inventoryStats.bestPerforming.colour}
-            </p>
-            <p className="text-[10px] text-white/65 mt-1 line-clamp-2">
-              {inventoryStats.bestPerforming.material}
-            </p>
-            <p className="text-xl font-black text-[#5eead4] tabular-nums mt-2">
-              {inventoryStats.bestPerforming.kg.toLocaleString()} kg
-            </p>
+            <div className="rounded-[24px] border border-white/60 bg-gradient-to-br from-white/90 to-white/40 shadow-xl backdrop-blur-3xl p-6 relative overflow-hidden group">
+              <div className="absolute right-0 top-0 h-full w-1/3 bg-gradient-to-l from-emerald-500/10 to-transparent pointer-events-none" />
+              <p className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-2 opacity-80">
+                Conversion Efficiency
+              </p>
+              <div className="flex justify-between items-end text-[#134e4a] gap-3 mt-4">
+                <h3 className="text-5xl font-black tracking-tighter tabular-nums drop-shadow-sm group-hover:scale-105 transition-transform origin-left">
+                  {conversionStats.efficiencyPct != null ? `${conversionStats.efficiencyPct}%` : '—'}
+                </h3>
+                <TrendingUp size={32} className="shrink-0 text-emerald-500 opacity-80 pb-1" />
+              </div>
+              <div
+                className="absolute bottom-0 left-0 h-2 bg-gradient-to-r from-emerald-400 to-[#134e4a] shadow-[0_-2px_10px_rgba(16,185,129,0.3)] transition-all duration-1000"
+                style={{ width: `${conversionStats.efficiencyPct ?? 0}%` }}
+              />
+              <p className="text-xs font-medium text-slate-500 mt-5 pt-4 border-t border-slate-200/60 leading-relaxed">
+                {conversionStats.total > 0
+                  ? <><span className="text-emerald-600 font-bold">{conversionStats.flagged} flagged</span> issues caught during watch-band conversions.</>
+                  : 'System waiting for active conversion cycles.'}
+              </p>
+            </div>
+
+            <div className="rounded-[24px] border border-red-200/50 bg-gradient-to-b from-white to-red-50/50 p-6 shadow-xl backdrop-blur-3xl relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-32 h-32 bg-red-500/10 rounded-full blur-3xl -mr-10 -mt-10" />
+              <p className="text-[10px] font-bold text-red-600/90 uppercase tracking-widest mb-3 flex items-center gap-1.5 opacity-90">
+                <AlertTriangle size={14} /> Immediate Restock Alerts
+              </p>
+              <div className="flex items-baseline gap-2 mt-2">
+                <p className="text-6xl font-black text-red-600 tracking-tighter tabular-nums drop-shadow-sm">{inventoryStats.lowStock}</p>
+                <p className="text-sm font-bold text-red-900/60">SKUs empty</p>
+              </div>
+              
+              {lowStockRows.length > 0 ? (
+                <ul className="mt-5 space-y-2.5 border-t border-red-200/40 pt-4 relative z-10">
+                  {lowStockRows.slice(0, 3).map((r) => {
+                    const a = attrsForStockRow(r);
+                    return (
+                      <li key={r.productID} className="text-xs text-red-950 flex justify-between items-center bg-white/60 backdrop-blur-md p-2 rounded-lg border border-red-100/50">
+                        <div>
+                          <span className="font-bold text-red-900">{a.gauge} mm</span>
+                          <span className="text-red-800/80 font-medium"> · {a.materialType}</span>
+                        </div>
+                        <span className="font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-md tabular-nums">
+                          {r.stockLevel.toLocaleString()} {r.unit}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : null}
+            </div>
+
+            <div className="rounded-[24px] border border-teal-200/30 bg-gradient-to-br from-teal-50 to-teal-100/50 p-6 shadow-xl backdrop-blur-3xl relative overflow-hidden group">
+              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 bg-teal-400/20 rounded-full blur-3xl opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none" />
+              <p className="text-[10px] font-bold text-teal-800/70 uppercase tracking-widest mb-3 flex items-center gap-1.5 opacity-90">
+                <Award size={14} /> Flagship Material
+              </p>
+              <div className="mt-3 relative z-10">
+                <p className="text-2xl font-black text-[#134e4a] leading-tight tracking-tight">
+                  {inventoryStats.bestPerforming.gauge} mm <span className="text-teal-600">·</span> {inventoryStats.bestPerforming.colour}
+                </p>
+                <p className="text-xs font-semibold text-teal-800/60 mt-2 bg-teal-200/20 px-3 py-1.5 rounded-lg inline-block">
+                  {inventoryStats.bestPerforming.material}
+                </p>
+              </div>
+              
+              <div className="mt-6 pt-5 border-t border-teal-200/50 space-y-1 relative z-10">
+                <p className="text-[10px] font-bold text-teal-700 uppercase tracking-wide">Volume Lead</p>
+                <p className="text-3xl font-black text-teal-600 tabular-nums drop-shadow-sm">
+                  {inventoryStats.bestPerforming.kg.toLocaleString()} <span className="text-sm font-bold text-teal-600/70">kg</span>
+                </p>
+              </div>
+            </div>
+            
           </div>
+        </div>
+
+        <aside className="lg:col-span-1 space-y-6 order-2 lg:order-1 pt-1">
 
           <div className="z-card-muted">
             <h3 className="z-section-title">Scrap log (iron / steel)</h3>
