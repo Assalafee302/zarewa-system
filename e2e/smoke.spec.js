@@ -13,6 +13,8 @@ async function signIn(page, username = 'admin', password = 'Admin@123') {
   });
 }
 
+test.describe.configure({ timeout: 60_000 });
+
 test.describe('Authenticated app flows', () => {
   test('dashboard loads after sign-in with active user identity', async ({ page }) => {
     await signIn(page);

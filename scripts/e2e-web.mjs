@@ -45,12 +45,11 @@ const api = spawn(process.execPath, ['server/playwrightServer.js'], {
 
 await waitHealth('http://127.0.0.1:8787/api/health', 120_000);
 
-const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-const vite = spawn(npmCmd, ['run', 'dev', '--', '--host', '127.0.0.1', '--port', '5173'], {
+const viteCli = path.join(root, 'node_modules', 'vite', 'bin', 'vite.js');
+const vite = spawn(process.execPath, [viteCli, '--host', '127.0.0.1', '--port', '5173'], {
   cwd: root,
-  env,
+  env: { ...env, NODE_ENV: 'development' },
   stdio: 'inherit',
-  shell: process.platform === 'win32',
 });
 
 function shutdown() {

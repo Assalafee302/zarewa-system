@@ -127,31 +127,31 @@ const Reports = () => {
   const snapshot = ws?.snapshot ?? {};
   const quotations = useMemo(
     () => (ws?.hasWorkspaceData && Array.isArray(snapshot.quotations) ? snapshot.quotations : []),
-    [snapshot.quotations, ws?.hasWorkspaceData]
+    [snapshot.quotations, ws.hasWorkspaceData]
   );
   const receipts = useMemo(
     () => (ws?.hasWorkspaceData && Array.isArray(snapshot.receipts) ? snapshot.receipts : []),
-    [snapshot.receipts, ws?.hasWorkspaceData]
+    [snapshot.receipts, ws.hasWorkspaceData]
   );
   const expenses = useMemo(
     () => (ws?.hasWorkspaceData && Array.isArray(snapshot.expenses) ? snapshot.expenses : []),
-    [snapshot.expenses, ws?.hasWorkspaceData]
+    [snapshot.expenses, ws.hasWorkspaceData]
   );
   const purchaseOrders = useMemo(
     () => (ws?.hasWorkspaceData && Array.isArray(snapshot.purchaseOrders) ? snapshot.purchaseOrders : []),
-    [snapshot.purchaseOrders, ws?.hasWorkspaceData]
+    [snapshot.purchaseOrders, ws.hasWorkspaceData]
   );
   const deliveries = useMemo(
     () => (ws?.hasWorkspaceData && Array.isArray(snapshot.deliveries) ? snapshot.deliveries : []),
-    [snapshot.deliveries, ws?.hasWorkspaceData]
+    [snapshot.deliveries, ws.hasWorkspaceData]
   );
   const treasuryMovements = useMemo(
     () => (ws?.hasWorkspaceData && Array.isArray(snapshot.treasuryMovements) ? snapshot.treasuryMovements : []),
-    [snapshot.treasuryMovements, ws?.hasWorkspaceData]
+    [snapshot.treasuryMovements, ws.hasWorkspaceData]
   );
   const ledgerEntries = useMemo(
     () => (ws?.hasWorkspaceData && Array.isArray(snapshot.ledgerEntries) ? snapshot.ledgerEntries : []),
-    [snapshot.ledgerEntries, ws?.hasWorkspaceData]
+    [snapshot.ledgerEntries, ws.hasWorkspaceData]
   );
 
   const salesKpis = useMemo(() => {

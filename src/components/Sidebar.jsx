@@ -1,5 +1,7 @@
 import React from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { motion } from 'framer-motion';
+import { Button } from './ui';
 import {
   Home,
   ShoppingCart,
@@ -138,27 +140,32 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
               ? p === '/'
               : pathMatches(p, item.path));
           return (
-            <Link
+            <motion.div
               key={item.path}
-              to={item.path}
-              onClick={closeIfMobile}
-              className={linkClass(active)}
-              title={collapsed ? item.label : undefined}
-              aria-label={item.label}
+              whileHover={{ scale: 1.03 }}
+              whileTap={{ scale: 0.97 }}
             >
-              <span
-                className={`transition-transform duration-300 ${
-                  active ? 'scale-110' : 'group-hover:scale-110'
-                }`}
+              <Link
+                to={item.path}
+                onClick={closeIfMobile}
+                className={linkClass(active)}
+                title={collapsed ? item.label : undefined}
+                aria-label={item.label}
               >
-                {item.icon}
-              </span>
-              <span
-                className={`text-[11px] font-bold uppercase tracking-[0.15em] ${collapsed ? 'lg:hidden' : ''}`}
-              >
-                {item.label}
-              </span>
-            </Link>
+                <span
+                  className={`transition-transform duration-300 ${
+                    active ? 'scale-110' : 'group-hover:scale-110'
+                  }`}
+                >
+                  {item.icon}
+                </span>
+                <span
+                  className={`text-[11px] font-bold uppercase tracking-[0.15em] ${collapsed ? 'lg:hidden' : ''}`}
+                >
+                  {item.label}
+                </span>
+              </Link>
+            </motion.div>
           );
         })}
       </nav>
@@ -196,7 +203,8 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
         </div>
       </div>
 
-      <button
+      <Button
+        variant="ghost"
         type="button"
         onClick={async () => {
           if (!window.confirm('Sign out of this workspace?')) return;
@@ -206,15 +214,15 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
         }}
         title="Sign out"
         aria-label="Sign out"
-        className={`flex w-full shrink-0 items-center gap-4 rounded-xl border-t border-white/5 px-4 py-3 pt-6 text-left text-white/30 transition-colors hover:bg-white/5 hover:text-red-400 ${
-          collapsed ? 'lg:justify-center lg:gap-0 lg:px-2 lg:py-3 lg:pt-4' : ''
+        className={`mt-2 flex w-full shrink-0 items-center justify-start gap-4 rounded-xl border-t border-white/5 px-4 py-6 text-left text-white/40 transition-colors hover:bg-white/5 hover:text-red-400 ${
+          collapsed ? 'lg:justify-center lg:gap-0 lg:px-2 lg:py-4' : ''
         }`}
       >
         <LogOut size={18} className="shrink-0" />
         <span className={`text-[11px] font-bold uppercase tracking-widest ${collapsed ? 'lg:hidden' : ''}`}>
           Sign out
         </span>
-      </button>
+      </Button>
     </aside>
   );
 };

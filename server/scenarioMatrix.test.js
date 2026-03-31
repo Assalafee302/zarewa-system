@@ -679,7 +679,7 @@ function buildScenarioMatrix() {
           lines: buildExactLengths(lineCount, totalMeters),
         });
         expect(cutting.cuttingList.totalMeters).toBeCloseTo(totalMeters, 6);
-        const job = await createProductionJob(agent, {
+        await createProductionJob(agent, {
           cuttingListId: cutting.id,
           productID: fgProduct.productID,
           productName: fgProduct.name,

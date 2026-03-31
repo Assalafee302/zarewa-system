@@ -40,7 +40,7 @@ export function CustomersProvider({ children }) {
       setCustomers((prev) => [record, ...prev]);
       return record.customerID;
     },
-    [ws?.canMutate, ws?.refresh]
+    [ws]
   );
 
   const deleteCustomer = useCallback(
@@ -61,7 +61,7 @@ export function CustomersProvider({ children }) {
       }
       setCustomers((prev) => prev.filter((c) => c.customerID !== id));
     },
-    [ws?.canMutate, ws?.refresh]
+    [ws]
   );
 
   const value = useMemo(

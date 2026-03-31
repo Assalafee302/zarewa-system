@@ -104,7 +104,7 @@ function BillingTable({ title, rows }) {
 
 function CuttingCategoryTable({ title, lines, startIndex }) {
   if (!lines?.length) return null;
-  let catM = 0;
+  const catM = lines.reduce((s, line) => s + line.sheets * line.lengthM, 0);
   return (
     <div className="cl-factory-cut-block">
       <div className="cl-factory-cut-title-bar">
@@ -123,7 +123,6 @@ function CuttingCategoryTable({ title, lines, startIndex }) {
         <tbody>
           {lines.map((line, i) => {
             const lineM = line.sheets * line.lengthM;
-            catM += lineM;
             return (
               <tr key={line.id ?? `r-${startIndex + i}`}>
                 <td className="cl-factory-cut-td text-right tabular-nums">{line.lengthM}</td>

@@ -32,7 +32,7 @@ body {
   margin: 0;
   background-color: var(--color-sequence-bg);
   font-family:
-    'Inter',
+    'Plus Jakarta Sans',
     system-ui,
     -apple-system,
     Segoe UI,
@@ -53,8 +53,8 @@ body {
 }
 
 .z-card-muted {
-  @apply bg-white/95 p-6 rounded-zarewa border border-white/80;
-  box-shadow: var(--shadow-zarewa-card);
+  @apply bg-white/60 backdrop-blur-3xl p-6 rounded-zarewa border border-white/80;
+  box-shadow: 0 20px 60px -32px rgba(15, 23, 42, 0.1), 0 10px 24px -18px rgba(20, 83, 45, 0.06);
 }
 
 .z-section-title-dark {
@@ -122,8 +122,8 @@ body {
 }
 
 .z-kpi-card {
-  @apply rounded-[26px] border border-white/80 bg-white/96 p-5 text-left transition-all duration-200;
-  box-shadow: var(--shadow-zarewa-card);
+  @apply rounded-[28px] border border-white/80 bg-white/60 backdrop-blur-3xl p-5 text-left transition-all duration-300;
+  box-shadow: 0 20px 60px -32px rgba(15, 23, 42, 0.1), 0 10px 24px -18px rgba(20, 83, 45, 0.06);
 }
 
 .z-kpi-card:hover {
@@ -131,8 +131,8 @@ body {
 }
 
 .z-soft-panel {
-  @apply rounded-[28px] border border-white/80 bg-white/94;
-  box-shadow: var(--shadow-zarewa-card);
+  @apply rounded-[28px] border border-white/80 bg-white/60 backdrop-blur-3xl;
+  box-shadow: 0 20px 60px -32px rgba(15, 23, 42, 0.1), 0 10px 24px -18px rgba(20, 83, 45, 0.06);
 }
 
 .z-status-pill {
@@ -140,8 +140,8 @@ body {
 }
 
 .z-toolbar-shell {
-  @apply rounded-[26px] border border-white/80 bg-white/88 backdrop-blur-xl;
-  box-shadow: var(--shadow-zarewa-card);
+  @apply rounded-[28px] border border-white/80 bg-white/70 backdrop-blur-2xl;
+  box-shadow: 0 20px 60px -32px rgba(15, 23, 42, 0.1), 0 10px 24px -18px rgba(20, 83, 45, 0.06);
 }
 
 .custom-scrollbar {
@@ -181,8 +181,8 @@ body {
 }
 
 .z-panel-section {
-  @apply rounded-[28px] border border-white/80 bg-white/95 p-6 sm:p-7;
-  box-shadow: var(--shadow-zarewa-card);
+  @apply rounded-[28px] border border-white/80 bg-white/60 backdrop-blur-3xl p-6 sm:p-7;
+  box-shadow: 0 20px 60px -32px rgba(15, 23, 42, 0.1), 0 10px 24px -18px rgba(20, 83, 45, 0.06);
 }
 
 .z-form-actions {
@@ -190,8 +190,8 @@ body {
 }
 
 .z-page-hero {
-  @apply rounded-[28px] border border-white/80 bg-white/95 p-6 sm:p-7 mb-8;
-  box-shadow: var(--shadow-zarewa-card);
+  @apply rounded-[28px] border border-white/80 bg-white/60 backdrop-blur-3xl p-6 sm:p-7 mb-8;
+  box-shadow: 0 20px 60px -32px rgba(15, 23, 42, 0.1), 0 10px 24px -18px rgba(20, 83, 45, 0.06);
 }
 
 /* A4 report preview on screen (inside modal) */
@@ -218,7 +218,7 @@ body {
   margin-right: auto;
   box-sizing: border-box;
   font-family:
-    'Inter',
+    'Plus Jakarta Sans',
     system-ui,
     -apple-system,
     Segoe UI,
@@ -772,7 +772,7 @@ body {
   --cl-border: #e2e8f0;
   --cl-text-muted: #64748b;
   font-family:
-    'Inter',
+    'Plus Jakarta Sans',
     system-ui,
     -apple-system,
     Segoe UI,

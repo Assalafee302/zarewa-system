@@ -9,7 +9,9 @@ import {
   RefreshCw,
   Upload,
   Users,
+  X,
 } from 'lucide-react';
+import { ModalFrame } from '../../components/layout';
 import { useHrWorkspace } from '../../context/HrWorkspaceContext';
 import { useToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/apiBase';
@@ -80,6 +82,7 @@ export default function HrSalaryWelfare() {
     setLoadState('ok');
   }, [canDir]);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- load HR data and mirror snapshot/staff into form fields */
   useEffect(() => {
     if (caps === null) return;
     if (!canDir && !canPay) return;
@@ -90,7 +93,7 @@ export default function HrSalaryWelfare() {
     if (snapshot == null) return;
     setTaxPct(Number(snapshot.taxPercent) || 7.5);
     setPenPct(Number(snapshot.pensionPercent) || 8);
-  }, [snapshot?.taxPercent, snapshot?.pensionPercent]);
+  }, [snapshot]);
 
   const loanByUserId = useMemo(() => {
     const m = {};
@@ -115,6 +118,7 @@ export default function HrSalaryWelfare() {
     setLoanDed(loanByUserId[selectedStaff.userId] || 0);
     setAccrualDraft(selectedStaff.bonusAccrualNote || '');
   }, [selectedStaff, loanByUserId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const netPreview = useMemo(() => {
     const g = Math.max(0, Number(gross) || 0) + Math.max(0, Number(bonus) || 0);
@@ -550,74 +554,95 @@ export default function HrSalaryWelfare() {
         </section>
       )}
 
-      {loanMaint ? (
-        <div
-          className="fixed inset-0 z-[80] flex items-end justify-center bg-slate-900/40 p-4 sm:items-center"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="loan-maint-title"
-        >
-          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-slate-200 bg-white p-6 shadow-xl">
-            <h4 id="loan-maint-title" className="text-sm font-black text-[#7028e6]">
-              {loanCloseOnly ? 'Close loan early' : 'Adjust loan terms'}
-            </h4>
-            <p className="mt-1 text-xs text-slate-600">
-              {loanMaint.staffDisplayName} · {loanMaint.requestId}
-            </p>
-            {loanCloseOnly ? (
-              <label className="mt-4 block text-xs font-bold text-slate-700">
-                Note (audit)
-                <textarea
-                  className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                  rows={3}
-                  value={loanMaintForm.note}
-                  onChange={(e) => setLoanMaintForm((f) => ({ ...f, note: e.target.value }))}
-                  placeholder="Reason for early closure"
-                />
-              </label>
-            ) : (
-              <div className="mt-4 grid gap-3">
-                <label className="text-xs font-bold text-slate-700">
-                  Deduction / month (₦)
-                  <input
-                    type="number"
-                    className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                    value={loanMaintForm.deductionPerMonthNgn}
-                    onChange={(e) => setLoanMaintForm((f) => ({ ...f, deductionPerMonthNgn: e.target.value }))}
-                  />
-                </label>
-                <label className="text-xs font-bold text-slate-700">
-                  Repayment months (0 = open-ended schedule)
-                  <input
-                    type="number"
-                    className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                    value={loanMaintForm.repaymentMonths}
-                    onChange={(e) => setLoanMaintForm((f) => ({ ...f, repaymentMonths: e.target.value }))}
-                  />
-                </label>
-                <label className="text-xs font-bold text-slate-700">
-                  Principal outstanding (₦)
-                  <input
-                    type="number"
-                    className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                    value={loanMaintForm.principalOutstandingNgn}
-                    onChange={(e) => setLoanMaintForm((f) => ({ ...f, principalOutstandingNgn: e.target.value }))}
-                  />
-                </label>
-                <label className="text-xs font-bold text-slate-700">
-                  Note (optional, audit)
-                  <input
-                    className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                    value={loanMaintForm.note}
-                    onChange={(e) => setLoanMaintForm((f) => ({ ...f, note: e.target.value }))}
-                  />
-                </label>
+      <ModalFrame
+        isOpen={Boolean(loanMaint)}
+        onClose={() => {
+          if (loanMaintBusy) return;
+          setLoanMaint(null);
+          setLoanCloseOnly(false);
+        }}
+      >
+        {loanMaint ? (
+          <div className="w-full max-w-lg max-h-[min(90vh,640px)] flex flex-col rounded-[28px] border border-slate-200/90 bg-white shadow-xl overflow-hidden">
+            <div className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-100 bg-violet-600 px-5 py-4 text-white">
+              <div className="min-w-0">
+                <h4 id="loan-maint-title" className="text-sm font-black">
+                  {loanCloseOnly ? 'Close loan early' : 'Adjust loan terms'}
+                </h4>
+                <p className="mt-1 text-xs text-violet-100 truncate" title={`${loanMaint.staffDisplayName} · ${loanMaint.requestId}`}>
+                  {loanMaint.staffDisplayName} · {loanMaint.requestId}
+                </p>
               </div>
-            )}
-            <div className="mt-6 flex flex-wrap justify-end gap-2">
               <button
                 type="button"
-                className="rounded-xl border border-slate-200 px-4 py-2 text-[11px] font-black uppercase text-slate-600"
+                className="shrink-0 rounded-xl p-2 text-white/90 hover:bg-white/10 disabled:opacity-40"
+                aria-label="Close dialog"
+                disabled={loanMaintBusy}
+                onClick={() => {
+                  setLoanMaint(null);
+                  setLoanCloseOnly(false);
+                }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="overflow-y-auto p-5">
+              {loanCloseOnly ? (
+                <label className="block text-xs font-bold text-slate-700">
+                  Note (audit)
+                  <textarea
+                    className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                    rows={3}
+                    value={loanMaintForm.note}
+                    onChange={(e) => setLoanMaintForm((f) => ({ ...f, note: e.target.value }))}
+                    placeholder="Reason for early closure"
+                  />
+                </label>
+              ) : (
+                <div className="grid gap-3">
+                  <label className="text-xs font-bold text-slate-700">
+                    Deduction / month (₦)
+                    <input
+                      type="number"
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                      value={loanMaintForm.deductionPerMonthNgn}
+                      onChange={(e) => setLoanMaintForm((f) => ({ ...f, deductionPerMonthNgn: e.target.value }))}
+                    />
+                  </label>
+                  <label className="text-xs font-bold text-slate-700">
+                    Repayment months (0 = open-ended schedule)
+                    <input
+                      type="number"
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                      value={loanMaintForm.repaymentMonths}
+                      onChange={(e) => setLoanMaintForm((f) => ({ ...f, repaymentMonths: e.target.value }))}
+                    />
+                  </label>
+                  <label className="text-xs font-bold text-slate-700">
+                    Principal outstanding (₦)
+                    <input
+                      type="number"
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                      value={loanMaintForm.principalOutstandingNgn}
+                      onChange={(e) => setLoanMaintForm((f) => ({ ...f, principalOutstandingNgn: e.target.value }))}
+                    />
+                  </label>
+                  <label className="text-xs font-bold text-slate-700">
+                    Note (optional, audit)
+                    <input
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                      value={loanMaintForm.note}
+                      onChange={(e) => setLoanMaintForm((f) => ({ ...f, note: e.target.value }))}
+                    />
+                  </label>
+                </div>
+              )}
+            </div>
+            <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t border-slate-100 bg-slate-50/80 px-5 py-4">
+              <button
+                type="button"
+                className="rounded-xl border border-slate-200 px-4 py-2 text-[11px] font-black uppercase text-slate-600 disabled:opacity-50"
+                disabled={loanMaintBusy}
                 onClick={() => {
                   setLoanMaint(null);
                   setLoanCloseOnly(false);
@@ -659,8 +684,8 @@ export default function HrSalaryWelfare() {
               </button>
             </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
+      </ModalFrame>
 
       {canDir && staff.length > 0 ? (
         <section className="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm overflow-hidden">

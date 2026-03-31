@@ -8,18 +8,27 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+/** Windows: shell:true so PATH resolves npm.cmd; shell:false often yields null status / spawn errors. */
+const spawnOpts = {
+  cwd: root,
+  stdio: 'inherit',
+  shell: true,
+  env: { ...process.env, FORCE_COLOR: '1' },
+};
 
 function run(title, args) {
   console.log(`\n${'='.repeat(72)}\n  ${title}\n${'='.repeat(72)}\n`);
-  const r = spawnSync(npm, args, {
-    cwd: root,
-    stdio: 'inherit',
-    shell: false,
-    env: { ...process.env, FORCE_COLOR: '1' },
-  });
+  const r = spawnSync('npm', args, spawnOpts);
+  if (r.error) {
+    console.error(`\n[verify-complete] FAILED: ${title}\n`, r.error);
+    process.exit(1);
+  }
+  if (r.signal) {
+    console.error(`\n[verify-complete] FAILED: ${title} (signal ${r.signal})\n`);
+    process.exit(1);
+  }
   if (r.status !== 0) {
-    console.error(`\n[verify-complete] FAILED: ${title} (exit ${r.status ?? 'unknown'})\n`);
+    console.error(`\n[verify-complete] FAILED: ${title} (exit ${r.status ?? 1})\n`);
     process.exit(r.status ?? 1);
   }
 }

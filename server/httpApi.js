@@ -77,13 +77,17 @@ import {
   computePayrollRun,
   createHrRequest,
   createPayrollRun,
+  deleteHrRequestDraft,
   exportPayrollTreasuryPackCsv,
+  generateEmploymentLetter,
   getHrMeProfile,
   getPayrollRunById,
   hrListScope,
   hrReviewRequest,
   hrTablesReady,
+  listEmploymentLetters,
   listHrAttendance,
+  listHrRequests,
   listHrStaff,
   listPayrollLines,
   listPayrollRuns,
@@ -91,11 +95,11 @@ import {
   patchHrLoanMaintenance,
   patchHrStaffBonusAccrualNote,
   patchPayrollRun,
+  registerNewStaffWithProfile,
   salaryWelfareSnapshot,
   submitHrRequest,
   upsertHrStaffProfile,
   uploadHrAttendance,
-  listEmploymentLetters,
 } from './hrOps.js';
 
 const loginAttemptBuckets = new Map();
@@ -1879,6 +1883,15 @@ export function registerHttpApi(app, db) {
     res.json({ ok: true, staff });
   });
 
+  app.post('/api/hr/staff/register', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canManageStaff) {
+      return res.status(403).json({ ok: false, error: 'Cannot register staff.' });
+    }
+    const r = registerNewStaffWithProfile(db, req.user.id, req.body || {});
+    res.status(r.ok ? 201 : 400).json(r);
+  });
+
   app.get('/api/hr/staff/:userId', requireAuth, (req, res) => {
     const uid = resolveHrStaffUserIdParam(req);
     if (!uid) return res.status(400).json({ ok: false, error: 'userId required.' });
@@ -1934,6 +1947,31 @@ export function registerHttpApi(app, db) {
     const scope = hrScopeFromReq(req);
     const snap = salaryWelfareSnapshot(db, scope);
     res.json(snap);
+  });
+
+  app.get('/api/hr/requests', requireAuth, (req, res) => {
+    try {
+      if (!hrTablesReady(db)) return res.json({ ok: true, requests: [] });
+      const caps = hrCapsForUser(req.user);
+      const filter = {
+        status: String(req.query.status || '').trim() || undefined,
+        kind: String(req.query.kind || '').trim() || undefined,
+        search: String(req.query.q || '').trim() || undefined,
+      };
+      const canSeeBranchQueue =
+        caps.canHrReview || caps.canFinalApprove || caps.canManageStaff;
+      const requests = canSeeBranchQueue
+        ? listHrRequests(db, hrScopeFromReq(req), filter)
+        : listHrRequests(
+            db,
+            { viewAll: true, branchId: DEFAULT_BRANCH_ID, includeUnassigned: true },
+            { ...filter, userId: req.user.id }
+          );
+      res.json({ ok: true, requests });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ ok: false, error: 'Could not list requests.' });
+    }
   });
 
   app.post('/api/hr/requests', requireAuth, (req, res) => {
@@ -2019,6 +2057,17 @@ export function registerHttpApi(app, db) {
     res.status(r.ok ? 200 : 400).json(r);
   });
 
+  app.delete('/api/hr/requests/:requestId', requireAuth, (req, res) => {
+    try {
+      if (!hrTablesReady(db)) return res.status(503).json({ ok: false, error: 'HR tables missing.' });
+      const r = deleteHrRequestDraft(db, String(req.params.requestId || ''), req.user.id);
+      res.status(r.ok ? 200 : 400).json(r);
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ ok: false, error: 'Could not delete request.' });
+    }
+  });
+
   app.get('/api/hr/payroll-runs', requireAuth, (req, res) => {
     const caps = hrCapsForUser(req.user);
     if (!caps.canPayroll) return res.status(403).json({ ok: false, error: 'No access to payroll.' });
@@ -2098,14 +2147,29 @@ export function registerHttpApi(app, db) {
     '/api/hr/employment-letters',
     requirePermission(['settings.view', 'hr.manage', 'hr.letters.generate']),
     (req, res) => {
+      try {
+        const userId = String(req.query.userId || '').trim();
+        const letters = listEmploymentLetters(db, userId || null);
+        res.json({ ok: true, letters });
+      } catch (e) {
+        console.error(e);
+        res.status(500).json({ ok: false, error: 'Could not list employment letters.' });
+      }
+    }
+  );
+
+  app.post('/api/hr/employment-letters', requireAuth, (req, res) => {
     try {
-      const userId = String(req.query.userId || '').trim();
-      const letters = listEmploymentLetters(db, userId || null);
-      res.json({ ok: true, letters });
+      if (!hrTablesReady(db)) return res.status(503).json({ ok: false, error: 'HR module not initialised.' });
+      const caps = hrCapsForUser(req.user);
+      if (!caps.canIssueLetters) {
+        return res.status(403).json({ ok: false, error: 'Cannot issue letters.' });
+      }
+      const r = generateEmploymentLetter(db, req.user, req.body || {});
+      res.status(r.ok ? 201 : 400).json(r);
     } catch (e) {
       console.error(e);
-      res.status(500).json({ ok: false, error: 'Could not list employment letters.' });
+      res.status(500).json({ ok: false, error: 'Could not generate letter.' });
     }
-  }
-  );
+  });
 }

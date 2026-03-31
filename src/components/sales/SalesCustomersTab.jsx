@@ -115,11 +115,9 @@ export default function SalesCustomersTab({
     }
   };
 
-  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!addOpen) setForm(emptyForm);
   }, [addOpen]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   const filtered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();

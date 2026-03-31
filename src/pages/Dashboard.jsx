@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { motion } from 'framer-motion';
 import {
   Zap,
   PlusCircle,
@@ -107,11 +108,14 @@ function KpiCard({ title, value, sub, onClick, titleAttr, highlight, children })
         ? 'border-l-4 border-l-[#134e4a]'
         : 'border-l-4 border-l-transparent';
   return (
-    <button
+    <motion.button
       type="button"
+      whileHover={{ scale: 1.015 }}
+      whileTap={{ scale: 0.985 }}
+      transition={{ type: 'spring', stiffness: 400, damping: 25 }}
       onClick={onClick}
       title={titleAttr ?? title}
-      className={`z-kpi-card text-left h-full min-h-[8.5rem] transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/20 focus-visible:ring-offset-2 w-full flex flex-col ${accent}`}
+      className={`z-kpi-card text-left h-full min-h-[8.5rem] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/20 focus-visible:ring-offset-2 w-full flex flex-col ${accent}`}
     >
       <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-2">{title}</p>
       <p className="text-2xl font-bold text-[#134e4a] tracking-tight tabular-nums leading-tight">
@@ -126,7 +130,7 @@ function KpiCard({ title, value, sub, onClick, titleAttr, highlight, children })
           <ChevronRight size={12} className="opacity-40 shrink-0 text-slate-400" />
         </p>
       ) : null}
-    </button>
+    </motion.button>
   );
 }
 

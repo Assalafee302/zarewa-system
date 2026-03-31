@@ -73,9 +73,11 @@ export function HrWorkspaceProvider({ children }) {
     }
   }, [hasPermission]);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- initial HR caps fetch on mount */
   useEffect(() => {
     reloadCaps();
   }, [reloadCaps]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const value = useMemo(
     () => ({ caps, capsError, reloadCaps }),

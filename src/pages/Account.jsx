@@ -87,6 +87,30 @@ const createRequestPayLine = (defaultAccountId = '', amount = '') => ({
   reference: '',
 });
 
+const TREASURY_STATEMENT_TYPE_LABEL = {
+  RECEIPT_IN: 'Customer receipt',
+  ADVANCE_IN: 'Advance deposit',
+  INTERNAL_TRANSFER_IN: 'Transfer in',
+  INTERNAL_TRANSFER_OUT: 'Transfer out',
+  EXPENSE: 'Expense',
+  AP_PAYMENT: 'Accounts payable payment',
+  SUPPLIER_PAYMENT: 'Supplier payment',
+  PO_SUPPLIER_PAYMENT: 'Supplier payment',
+  REFUND_PAYOUT: 'Customer refund payout',
+  ADVANCE_REFUND_OUT: 'Advance refund',
+  PAYMENT_REQUEST_OUT: 'Payment request payout',
+  TRANSPORT_PAYMENT: 'Transport / haulage',
+};
+
+function treasuryMovementStatementLabel(m) {
+  const kind = TREASURY_STATEMENT_TYPE_LABEL[m.type] || m.type || 'Treasury movement';
+  const bits = [kind];
+  if (m.counterpartyName) bits.push(m.counterpartyName);
+  if (m.reference) bits.push(`Ref ${m.reference}`);
+  if (m.note) bits.push(m.note);
+  return bits.join(' · ');
+}
+
 const Account = () => {
   const location = useLocation();
   const navigate = useNavigate();
@@ -103,6 +127,7 @@ const Account = () => {
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [showApPaymentModal, setShowApPaymentModal] = useState(false);
   const [showRefundPayModal, setShowRefundPayModal] = useState(false);
+  const [statementAccount, setStatementAccount] = useState(null);
   const [selectedPayment, setSelectedPayment] = useState(null);
   const [selectedAp, setSelectedAp] = useState(null);
   const [refundPayTarget, setRefundPayTarget] = useState(null);
@@ -321,7 +346,22 @@ const Account = () => {
     showPayRequestModal ||
     showTransferModal ||
     showApPaymentModal ||
-    showRefundPayModal;
+    showRefundPayModal ||
+    statementAccount != null;
+
+  const accountStatementLines = useMemo(() => {
+    if (!statementAccount) return [];
+    const id = Number(statementAccount.id);
+    return liveTreasuryMovements
+      .filter((m) => Number(m.treasuryAccountId) === id)
+      .slice()
+      .sort((a, b) => {
+        const ta = String(a.postedAtISO || '');
+        const tb = String(b.postedAtISO || '');
+        if (ta !== tb) return tb.localeCompare(ta);
+        return String(b.id || '').localeCompare(String(a.id || ''));
+      });
+  }, [statementAccount, liveTreasuryMovements]);
 
   const refundsAwaitingPay = useMemo(
     () => approvedRefundsAwaitingPayment(customerRefunds),
@@ -1221,34 +1261,39 @@ const Account = () => {
                   </div>
                 ) : null}
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                   {filteredBankAccounts.length === 0 ? (
-                    <div className="md:col-span-2 z-empty-state py-12">
+                    <div className="sm:col-span-2 lg:col-span-3 z-empty-state py-12">
                       <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">
                         No accounts match your search
                       </p>
                     </div>
                   ) : (
                     filteredBankAccounts.map((acc) => (
-                      <div
+                      <button
                         key={acc.id}
-                        className="p-6 rounded-zarewa border border-gray-100 bg-gray-50/50 hover:bg-white hover:shadow-xl hover:border-teal-100 transition-all group"
+                        type="button"
+                        onClick={() => setStatementAccount(acc)}
+                        className="text-left p-4 rounded-zarewa border border-gray-100 bg-gray-50/50 hover:bg-white hover:shadow-lg hover:border-teal-100 transition-all group cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/30"
                       >
-                        <div className="flex justify-between items-start mb-6">
-                          <div className="p-3 bg-white rounded-xl shadow-sm text-[#134e4a]">
-                            {acc.type === 'Bank' ? <Landmark size={20} /> : <CreditCard size={20} />}
+                        <div className="flex justify-between items-start mb-3">
+                          <div className="p-2 bg-white rounded-lg shadow-sm text-[#134e4a]">
+                            {acc.type === 'Bank' ? <Landmark size={18} /> : <CreditCard size={18} />}
                           </div>
-                          <span className="text-[10px] font-bold text-gray-400 uppercase tracking-tighter">
+                          <span className="text-[9px] font-bold text-gray-400 uppercase tracking-tighter">
                             {acc.accNo}
                           </span>
                         </div>
-                        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">
+                        <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-0.5">
                           {acc.name}
                         </p>
-                        <h4 className="text-2xl font-black text-[#134e4a] italic tracking-tighter">
+                        <h4 className="text-lg font-black text-[#134e4a] italic tracking-tighter">
                           ₦{acc.balance.toLocaleString()}
                         </h4>
-                      </div>
+                        <p className="text-[9px] text-teal-700/80 font-bold mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                          View statement
+                        </p>
+                      </button>
                     ))
                   )}
                 </div>
@@ -1818,6 +1863,72 @@ const Account = () => {
               Post transfer
             </button>
           </form>
+        </div>
+      </ModalFrame>
+
+      <ModalFrame isOpen={statementAccount != null} onClose={() => setStatementAccount(null)}>
+        <div className="z-modal-panel max-w-lg w-full max-h-[min(85vh,640px)] p-6 sm:p-8 overflow-hidden flex flex-col">
+          <div className="flex justify-between items-start gap-3 mb-4 shrink-0">
+            <div className="min-w-0">
+              <h3 className="text-lg sm:text-xl font-bold text-[#134e4a]">Account statement</h3>
+              {statementAccount ? (
+                <p className="text-xs text-gray-600 mt-1 font-semibold truncate" title={statementAccount.name}>
+                  {statementAccount.name}
+                  {statementAccount.bankName ? ` · ${statementAccount.bankName}` : ''}
+                </p>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              onClick={() => setStatementAccount(null)}
+              className="p-2 text-gray-400 hover:text-red-500 rounded-xl shrink-0"
+              aria-label="Close statement"
+            >
+              <X size={22} />
+            </button>
+          </div>
+          {!ws?.hasWorkspaceData ? (
+            <p className="text-xs text-gray-600 leading-relaxed">
+              Connect to the live workspace to load treasury movements. Statements are built from posted receipts,
+              expenses, transfers, and payouts on the server.
+            </p>
+          ) : accountStatementLines.length === 0 ? (
+            <p className="text-xs text-gray-500">No movements recorded for this account yet.</p>
+          ) : (
+            <div className="overflow-y-auto flex-1 min-h-0 -mx-1 px-1 space-y-0 border border-gray-100 rounded-xl bg-white">
+              <div className="grid grid-cols-12 gap-2 px-3 py-2 bg-gray-50 text-[9px] font-bold text-gray-400 uppercase tracking-wider sticky top-0 z-[1] border-b border-gray-100">
+                <div className="col-span-3">Date</div>
+                <div className="col-span-5">Details</div>
+                <div className="col-span-4 text-right">Amount</div>
+              </div>
+              <ul className="divide-y divide-gray-50">
+                {accountStatementLines.map((m) => {
+                  const raw = Number(m.amountNgn) || 0;
+                  const isIn = raw > 0;
+                  const isOut = raw < 0;
+                  const abs = Math.abs(raw);
+                  return (
+                    <li key={m.id} className="grid grid-cols-12 gap-2 px-3 py-2.5 text-[11px] items-start">
+                      <div className="col-span-3 text-gray-500 tabular-nums">
+                        {String(m.postedAtISO || '').slice(0, 10) || '—'}
+                      </div>
+                      <div className="col-span-5 text-gray-800 leading-snug break-words">
+                        {treasuryMovementStatementLabel(m)}
+                      </div>
+                      <div
+                        className={`col-span-4 text-right font-black tabular-nums shrink-0 ${
+                          isIn ? 'text-emerald-600' : isOut ? 'text-red-600' : 'text-gray-500'
+                        }`}
+                      >
+                        {isIn ? '+' : isOut ? '−' : ''}
+                        {formatNgn(abs)}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
         </div>
       </ModalFrame>
 

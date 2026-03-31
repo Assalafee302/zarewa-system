@@ -209,7 +209,7 @@ const CuttingListModal = ({
       }
     }
     return [...base].sort((a, b) => a.id.localeCompare(b.id));
-  }, [quotations, cuttingLists, editData?.id, editData?.quotationRef]);
+  }, [quotations, cuttingLists, editData]);
 
   const selectedQuotation = useMemo(
     () => quotations.find((q) => q.id === quotationRef) ?? null,
@@ -220,7 +220,7 @@ const CuttingListModal = ({
 
   const draftCuttingListId = useMemo(
     () => (editData?.id ? editData.id : nextDraftCuttingListId(cuttingLists)),
-    [editData?.id, cuttingLists]
+    [editData, cuttingLists]
   );
 
   const paidOnQuote = selectedQuotation ? Number(selectedQuotation.paidNgn) || 0 : 0;

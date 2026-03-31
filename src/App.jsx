@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, useNavigate, Link } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, useNavigate, Link, useParams } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
 import Sales from './pages/Sales';
@@ -22,6 +22,11 @@ import HrPayroll from './pages/hr/HrPayroll';
 import HrTime from './pages/hr/HrTime';
 import HrTalent from './pages/hr/HrTalent';
 import LoginScreen from './components/auth/LoginScreen';
+
+function HrStaffProfileRoute() {
+  const { userId } = useParams();
+  return <StaffProfile key={userId} />;
+}
 import { Search, Bell, Command, Menu, UserCircle } from 'lucide-react';
 import { CustomersProvider } from './context/CustomersContext';
 import { InventoryProvider } from './context/InventoryContext';
@@ -401,7 +406,7 @@ function AppShell() {
               <Route index element={<HrHome />} />
               <Route path="salary-welfare" element={<HrSalaryWelfare />} />
               <Route path="staff" element={<HrStaffList />} />
-              <Route path="staff/:userId" element={<StaffProfile />} />
+              <Route path="staff/:userId" element={<HrStaffProfileRoute />} />
               <Route path="payroll" element={<HrPayroll />} />
               <Route path="time" element={<HrTime />} />
               <Route path="talent" element={<HrTalent />} />

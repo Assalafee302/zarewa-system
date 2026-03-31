@@ -1,5 +1,6 @@
 import React from 'react';
 import { Printer, X } from 'lucide-react';
+import { ZAREWA_LOGO_SRC } from '../../Data/companyQuotation';
 import { ModalFrame } from '../layout';
 
 const ACCENT = '#134e4a';

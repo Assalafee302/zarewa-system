@@ -1,10 +1,12 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, Navigate } from 'react-router-dom';
-import { RefreshCw } from 'lucide-react';
-import { MainPanel, PageHeader, PageShell } from '../../components/layout';
+import { Download, Pencil, RefreshCw, X } from 'lucide-react';
+import { MainPanel, ModalFrame, PageHeader } from '../../components/layout';
 import { useHrWorkspace } from '../../context/HrWorkspaceContext';
 import { useToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/apiBase';
+import { downloadPayrollTreasuryPack } from '../../lib/hrDownload';
+import { formatNgn } from '../../hr/hrFormat';
 import HrCapsLoading from './hrCapsLoading';
 
 export default function HrPayroll() {
@@ -12,6 +14,10 @@ export default function HrPayroll() {
   const { show: showToast } = useToast();
   const [runs, setRuns] = useState([]);
   const [busy, setBusy] = useState(false);
+  const [detailRun, setDetailRun] = useState(null);
+  const [detailLines, setDetailLines] = useState([]);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [draftEdit, setDraftEdit] = useState({ taxPercent: '', pensionPercent: '', notes: '' });
   const [period, setPeriod] = useState(() => {
     const d = new Date();
     return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`;
@@ -26,9 +32,32 @@ export default function HrPayroll() {
   }, []);
 
   useEffect(() => {
-    if (caps === null) return;
-    if (caps.canPayroll) load();
+    if (caps === null || !caps.canPayroll) return;
+    const id = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(id);
   }, [caps, load]);
+
+  const openDetail = async (id) => {
+    setDetailRun({ id, periodYyyymm: '', status: '', taxPercent: 0, pensionPercent: 0, notes: null });
+    setDetailLines([]);
+    setDetailLoading(true);
+    const { ok, data } = await apiFetch(`/api/hr/payroll-runs/${encodeURIComponent(id)}`);
+    setDetailLoading(false);
+    if (ok && data?.ok && data.run) {
+      setDetailRun(data.run);
+      setDetailLines(data.lines || []);
+      setDraftEdit({
+        taxPercent: String(data.run.taxPercent ?? ''),
+        pensionPercent: String(data.run.pensionPercent ?? ''),
+        notes: data.run.notes ?? '',
+      });
+    } else {
+      showToast(data?.error || 'Could not load run.', { variant: 'error' });
+      setDetailRun(null);
+    }
+  };
 
   const createRun = async (e) => {
     e.preventDefault();
@@ -61,6 +90,9 @@ export default function HrPayroll() {
       return;
     }
     showToast('Payroll recomputed from current staff and attendance.');
+    if (detailRun?.id === id) {
+      setDetailLines(data.lines || []);
+    }
     load();
   };
 
@@ -77,16 +109,59 @@ export default function HrPayroll() {
     }
     showToast('Run updated.');
     load();
+    if (detailRun?.id === id) {
+      openDetail(id);
+    }
+  };
+
+  const saveDraftMeta = async () => {
+    if (!detailRun || detailRun.status !== 'draft') return;
+    setBusy(true);
+    const { ok, data } = await apiFetch(`/api/hr/payroll-runs/${encodeURIComponent(detailRun.id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        taxPercent: Number(draftEdit.taxPercent),
+        pensionPercent: Number(draftEdit.pensionPercent),
+        notes: draftEdit.notes,
+      }),
+    });
+    setBusy(false);
+    if (!ok || !data?.ok) {
+      showToast(data?.error || 'Could not save.', { variant: 'error' });
+      return;
+    }
+    showToast('Draft settings saved.');
+    openDetail(detailRun.id);
+    load();
+  };
+
+  const totals = useMemo(() => {
+    let net = 0;
+    let gross = 0;
+    for (const l of detailLines) {
+      net += Math.round(Number(l.netNgn) || 0);
+      gross += Math.round(Number(l.grossNgn) || 0);
+    }
+    return { net, gross, count: detailLines.length };
+  }, [detailLines]);
+
+  const treasuryDownload = async (id) => {
+    try {
+      await downloadPayrollTreasuryPack(id);
+      showToast('Treasury CSV downloaded.');
+    } catch (e) {
+      showToast(String(e.message || e), { variant: 'error' });
+    }
   };
 
   if (caps === null) return <HrCapsLoading />;
   if (!caps.canPayroll) return <Navigate to="/hr" replace />;
 
   return (
-    <PageShell>
+    <>
       <PageHeader
         title="Payroll runs"
-        subtitle="Draft → recompute → lock when ready for treasury. Paid is terminal."
+        subtitle="Draft → recompute → lock for treasury export → mark paid when complete."
         actions={
           <button
             type="button"
@@ -100,7 +175,10 @@ export default function HrPayroll() {
         }
       />
       <MainPanel>
-        <form onSubmit={createRun} className="mb-8 flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 p-4">
+        <form
+          onSubmit={createRun}
+          className="mb-8 flex flex-wrap items-end gap-3 rounded-2xl border border-slate-200/90 bg-white p-4 shadow-[var(--shadow-zarewa-card)]"
+        >
           <label className="text-xs font-bold text-slate-700">
             New period (YYYYMM)
             <input
@@ -116,73 +194,122 @@ export default function HrPayroll() {
           >
             Create draft
           </button>
-          <Link to="/hr/salary-welfare" className="text-[11px] font-black uppercase text-slate-500 no-underline hover:underline">
+          <Link
+            to="/hr/salary-welfare"
+            className="text-[11px] font-black uppercase text-slate-500 no-underline hover:underline"
+          >
             Salary &amp; welfare →
+          </Link>
+          <Link
+            to="/hr/time"
+            className="text-[11px] font-black uppercase text-slate-500 no-underline hover:underline"
+          >
+            Attendance →
           </Link>
         </form>
 
         {runs.length === 0 ? (
-          <p className="text-sm text-slate-600">No payroll runs yet.</p>
+          <p className="text-sm text-slate-600">No payroll runs yet. Create a draft for the period you want to pay.</p>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-slate-200">
+          <div className="overflow-x-auto rounded-2xl border border-slate-200/90 bg-white shadow-sm">
             <table className="min-w-full text-left text-sm">
               <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-500">
                 <tr>
-                  <th className="px-3 py-2">Period</th>
-                  <th className="px-3 py-2">Status</th>
-                  <th className="px-3 py-2">Tax %</th>
-                  <th className="px-3 py-2">Pension %</th>
-                  <th className="px-3 py-2">Actions</th>
+                  <th className="px-4 py-3">Period</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Tax %</th>
+                  <th className="px-4 py-3">Pension %</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {runs.map((r) => (
-                  <tr key={r.id} className="border-t border-slate-100">
-                    <td className="px-3 py-2 font-semibold">{r.periodYyyymm}</td>
-                    <td className="px-3 py-2 capitalize">{r.status}</td>
-                    <td className="px-3 py-2">{r.taxPercent}</td>
-                    <td className="px-3 py-2">{r.pensionPercent}</td>
-                    <td className="px-3 py-2 space-x-2 whitespace-nowrap">
-                      {r.status === 'draft' ? (
-                        <>
+                  <tr key={r.id} className="border-t border-slate-100 hover:bg-violet-50/40">
+                    <td className="px-4 py-3 font-semibold text-slate-900">{r.periodYyyymm}</td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={`inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-bold capitalize ${
+                          r.status === 'paid'
+                            ? 'bg-emerald-100 text-emerald-900'
+                            : r.status === 'locked'
+                              ? 'bg-amber-100 text-amber-950'
+                              : 'bg-slate-100 text-slate-700'
+                        }`}
+                      >
+                        {r.status}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 tabular-nums">{r.taxPercent}</td>
+                    <td className="px-4 py-3 tabular-nums">{r.pensionPercent}</td>
+                    <td className="px-4 py-3 text-right">
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-black uppercase text-[#7028e6]"
+                          onClick={() => openDetail(r.id)}
+                        >
+                          View lines
+                        </button>
+                        {r.status === 'draft' ? (
+                          <>
+                            <button
+                              type="button"
+                              className="text-[11px] font-black uppercase text-[#7028e6] disabled:opacity-50"
+                              disabled={busy}
+                              onClick={() => recompute(r.id)}
+                            >
+                              Recompute
+                            </button>
+                            <button
+                              type="button"
+                              className="text-[11px] font-black uppercase text-slate-600 disabled:opacity-50"
+                              disabled={busy}
+                              onClick={() => setStatus(r.id, 'locked')}
+                            >
+                              Lock
+                            </button>
+                          </>
+                        ) : null}
+                        {r.status === 'locked' ? (
+                          <>
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1 text-[11px] font-black uppercase text-emerald-800 disabled:opacity-50"
+                              disabled={busy}
+                              onClick={() => treasuryDownload(r.id)}
+                            >
+                              <Download size={12} />
+                              CSV
+                            </button>
+                            <button
+                              type="button"
+                              className="text-[11px] font-black uppercase text-emerald-800 disabled:opacity-50"
+                              disabled={busy}
+                              onClick={() => setStatus(r.id, 'paid')}
+                            >
+                              Mark paid
+                            </button>
+                            <button
+                              type="button"
+                              className="text-[11px] font-black uppercase text-slate-600 disabled:opacity-50"
+                              disabled={busy}
+                              onClick={() => setStatus(r.id, 'draft')}
+                            >
+                              Unlock
+                            </button>
+                          </>
+                        ) : null}
+                        {r.status === 'paid' ? (
                           <button
                             type="button"
-                            className="text-[11px] font-black uppercase text-[#7028e6]"
-                            disabled={busy}
-                            onClick={() => recompute(r.id)}
+                            className="inline-flex items-center gap-1 text-[11px] font-black uppercase text-slate-600"
+                            onClick={() => treasuryDownload(r.id)}
                           >
-                            Recompute
+                            <Download size={12} />
+                            CSV
                           </button>
-                          <button
-                            type="button"
-                            className="text-[11px] font-black uppercase text-slate-600"
-                            disabled={busy}
-                            onClick={() => setStatus(r.id, 'locked')}
-                          >
-                            Lock
-                          </button>
-                        </>
-                      ) : null}
-                      {r.status === 'locked' ? (
-                        <>
-                          <button
-                            type="button"
-                            className="text-[11px] font-black uppercase text-emerald-800"
-                            disabled={busy}
-                            onClick={() => setStatus(r.id, 'paid')}
-                          >
-                            Mark paid
-                          </button>
-                          <button
-                            type="button"
-                            className="text-[11px] font-black uppercase text-slate-600"
-                            disabled={busy}
-                            onClick={() => setStatus(r.id, 'draft')}
-                          >
-                            Unlock to draft
-                          </button>
-                        </>
-                      ) : null}
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -191,6 +318,140 @@ export default function HrPayroll() {
           </div>
         )}
       </MainPanel>
-    </PageShell>
+
+      <ModalFrame isOpen={Boolean(detailRun)} onClose={() => setDetailRun(null)}>
+        <div className="w-full max-w-4xl rounded-[28px] border border-slate-200/90 bg-white shadow-xl overflow-hidden">
+          <div className="flex items-start justify-between gap-4 border-b border-slate-100 bg-gradient-to-r from-violet-600 to-violet-700 px-6 py-4 text-white">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-violet-200">Payroll run</p>
+              <h2 className="text-lg font-black">
+                {detailLoading ? 'Loading…' : detailRun?.periodYyyymm || '—'}
+              </h2>
+              {!detailLoading && detailRun ? (
+                <p className="mt-1 text-xs text-violet-100 capitalize">Status: {detailRun.status}</p>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              className="rounded-xl p-2 text-white/90 hover:bg-white/10"
+              aria-label="Close"
+              onClick={() => setDetailRun(null)}
+            >
+              <X size={22} />
+            </button>
+          </div>
+
+          <div className="max-h-[min(70vh,640px)] overflow-y-auto p-6">
+            {detailLoading ? (
+              <p className="text-sm text-slate-500">Loading lines…</p>
+            ) : detailRun?.status === 'draft' ? (
+              <div className="mb-6 rounded-xl border border-slate-200 bg-slate-50/80 p-4">
+                <h3 className="flex items-center gap-2 text-xs font-black uppercase text-[#7028e6]">
+                  <Pencil size={14} />
+                  Draft settings
+                </h3>
+                <p className="mt-1 text-xs text-slate-500">Adjust tax and pension before recomputing lines.</p>
+                <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                  <label className="text-xs font-bold text-slate-700">
+                    Tax %
+                    <input
+                      type="number"
+                      step="0.1"
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                      value={draftEdit.taxPercent}
+                      onChange={(e) => setDraftEdit((d) => ({ ...d, taxPercent: e.target.value }))}
+                    />
+                  </label>
+                  <label className="text-xs font-bold text-slate-700">
+                    Pension %
+                    <input
+                      type="number"
+                      step="0.1"
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                      value={draftEdit.pensionPercent}
+                      onChange={(e) => setDraftEdit((d) => ({ ...d, pensionPercent: e.target.value }))}
+                    />
+                  </label>
+                  <label className="text-xs font-bold text-slate-700 sm:col-span-3">
+                    Notes
+                    <input
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                      value={draftEdit.notes}
+                      onChange={(e) => setDraftEdit((d) => ({ ...d, notes: e.target.value }))}
+                    />
+                  </label>
+                </div>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={saveDraftMeta}
+                  className="mt-3 rounded-xl bg-[#7028e6] px-4 py-2 text-[11px] font-black uppercase text-white disabled:opacity-50"
+                >
+                  Save settings
+                </button>
+              </div>
+            ) : null}
+
+            {!detailLoading && detailRun ? (
+              <div className="mb-4 flex flex-wrap gap-4 text-sm">
+                <div className="rounded-xl border border-violet-100 bg-violet-50/50 px-4 py-2">
+                  <span className="text-[10px] font-black uppercase text-violet-800">Employees</span>
+                  <p className="font-black tabular-nums text-violet-950">{totals.count}</p>
+                </div>
+                <div className="rounded-xl border border-slate-200 px-4 py-2">
+                  <span className="text-[10px] font-black uppercase text-slate-500">Total gross</span>
+                  <p className="font-semibold tabular-nums">₦{formatNgn(totals.gross)}</p>
+                </div>
+                <div className="rounded-xl border border-slate-200 px-4 py-2">
+                  <span className="text-[10px] font-black uppercase text-slate-500">Total net</span>
+                  <p className="font-black tabular-nums text-[#7028e6]">₦{formatNgn(totals.net)}</p>
+                </div>
+              </div>
+            ) : null}
+
+            {!detailLoading && detailLines.length > 0 ? (
+              <div className="overflow-x-auto rounded-xl border border-slate-200">
+                <table className="min-w-full text-left text-xs">
+                  <thead className="bg-slate-50 font-black uppercase text-slate-500">
+                    <tr>
+                      <th className="px-3 py-2">Name</th>
+                      <th className="px-3 py-2 text-right">Gross</th>
+                      <th className="px-3 py-2 text-right">Attend.</th>
+                      <th className="px-3 py-2 text-right">Loans</th>
+                      <th className="px-3 py-2 text-right">Tax</th>
+                      <th className="px-3 py-2 text-right">Pension</th>
+                      <th className="px-3 py-2 text-right">Net</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detailLines.map((l) => (
+                      <tr key={l.userId} className="border-t border-slate-100">
+                        <td className="px-3 py-2 font-medium text-slate-800">{l.displayName}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">₦{formatNgn(l.grossNgn)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-amber-900">
+                          ₦{formatNgn(l.attendanceDeductionNgn)}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-rose-800">
+                          ₦{formatNgn(l.otherDeductionNgn)}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">₦{formatNgn(l.taxNgn)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">₦{formatNgn(l.pensionNgn)}</td>
+                        <td className="px-3 py-2 text-right font-semibold tabular-nums text-[#7028e6]">
+                          ₦{formatNgn(l.netNgn)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+
+            {!detailLoading && detailRun && detailLines.length === 0 ? (
+              <p className="text-sm text-slate-600">No lines yet — use Recompute on a draft run.</p>
+            ) : null}
+          </div>
+        </div>
+      </ModalFrame>
+    </>
   );
 }
