@@ -7,6 +7,7 @@ import RefundModal from './RefundModal.jsx';
 vi.mock('../context/CustomersContext', () => ({
   useCustomers: () => ({
     customers: [{ customerID: 'CUS-001', name: 'Acme Roofing' }],
+    deleteCustomer: vi.fn(),
   }),
 }));
 

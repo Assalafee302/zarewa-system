@@ -12,21 +12,13 @@ export default defineConfig({
     trace: 'on-first-retry',
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
-  webServer: [
-    {
-      command: 'node server/playwrightServer.js',
-      url: 'http://127.0.0.1:8787/api/health',
-      env: {
-        ZAREWA_DB: 'data/playwright.sqlite',
-      },
-      reuseExistingServer: process.env.CI !== 'true',
-      timeout: 120_000,
+  webServer: {
+    command: 'node scripts/e2e-web.mjs',
+    url: 'http://127.0.0.1:5173',
+    env: {
+      ZAREWA_DB: 'data/playwright.sqlite',
     },
-    {
-      command: 'npm run dev -- --host 127.0.0.1 --port 5173',
-      url: 'http://127.0.0.1:5173',
-      reuseExistingServer: process.env.CI !== 'true',
-      timeout: 120_000,
-    },
-  ],
+    reuseExistingServer: process.env.CI !== 'true',
+    timeout: 180_000,
+  },
 });

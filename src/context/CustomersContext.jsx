@@ -43,13 +43,35 @@ export function CustomersProvider({ children }) {
     [ws?.canMutate, ws?.refresh]
   );
 
+  const deleteCustomer = useCallback(
+    async (customerID) => {
+      const id = String(customerID ?? '').trim();
+      if (!id) throw new Error('Customer id required.');
+      if (ws?.canMutate) {
+        const { ok, data } = await apiFetch(`/api/customers/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+        });
+        if (!ok || !data?.ok) {
+          const err = new Error(data?.error || 'Delete customer failed');
+          err.blockers = data?.blockers;
+          throw err;
+        }
+        await ws.refresh();
+        return;
+      }
+      setCustomers((prev) => prev.filter((c) => c.customerID !== id));
+    },
+    [ws?.canMutate, ws?.refresh]
+  );
+
   const value = useMemo(
     () => ({
       customers,
       setCustomers,
       addCustomer,
+      deleteCustomer,
     }),
-    [customers, addCustomer]
+    [customers, addCustomer, deleteCustomer]
   );
 
   return <CustomersContext.Provider value={value}>{children}</CustomersContext.Provider>;

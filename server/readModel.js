@@ -1,3 +1,5 @@
+import { branchPredicate } from './branchSql.js';
+
 /** @param {import('better-sqlite3').Database} db */
 
 function hasColumn(db, table, column) {
@@ -687,10 +689,16 @@ export function listPaymentRequests(db) {
     }));
 }
 
-export function listAccountsPayable(db) {
+export function listAccountsPayable(db, branchScope = 'ALL') {
+  const b = branchPredicate(db, 'purchase_orders', branchScope, 'po');
   return db
-    .prepare(`SELECT * FROM accounts_payable ORDER BY due_date_iso DESC`)
-    .all()
+    .prepare(
+      `SELECT ap.* FROM accounts_payable ap
+       LEFT JOIN purchase_orders po ON po.po_id = ap.po_ref
+       WHERE 1=1${b.sql}
+       ORDER BY ap.due_date_iso DESC`
+    )
+    .all(...b.args)
     .map((row) => ({
       apID: row.ap_id,
       supplierName: row.supplier_name,
@@ -894,6 +902,37 @@ export function computeProductionMetricsRollup(db, branchScope = 'ALL') {
     totalPlannedMeters,
     totalActualMeters,
     completedActualMeters,
+  };
+}
+
+/**
+ * Branch-scoped aggregate counts for reports (no row payloads).
+ * @param {import('better-sqlite3').Database} db
+ * @param {string | import('./branchScope.js').BranchScope} [branchScope]
+ */
+export function workspaceReportAggregateCounts(db, branchScope = 'ALL') {
+  const countWhere = (table) => {
+    const b = branchWhere(db, table, branchScope);
+    const row = db.prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE 1=1${b.sql}`).get(...b.args);
+    return Number(row?.c) || 0;
+  };
+  const countAll = (table) => Number(db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get()?.c) || 0;
+  return {
+    customersTotal: countAll('customers'),
+    suppliersTotal: countAll('suppliers'),
+    productsTotal: countAll('products'),
+    quotationsTotal: countWhere('quotations'),
+    receiptsTotal: countWhere('sales_receipts'),
+    purchaseOrdersTotal: countWhere('purchase_orders'),
+    deliveriesTotal: countWhere('deliveries'),
+    cuttingListsTotal: countWhere('cutting_lists'),
+    ledgerEntriesTotal: countWhere('ledger_entries'),
+    refundsTotal: countWhere('customer_refunds'),
+    expensesTotal: countWhere('expenses'),
+    productionJobsTotal: countWhere('production_jobs'),
+    coilLotsTotal: countWhere('coil_lots'),
+    stockMovementsTotal: countWhere('stock_movements'),
+    treasuryMovementsTotal: countAll('treasury_movements'),
   };
 }
 

@@ -12,10 +12,12 @@ import {
   TrendingUp,
   Ruler,
   Moon,
+  Trash2,
 } from 'lucide-react';
 import { ModalFrame } from '../layout';
 import { useCustomers } from '../../context/CustomersContext';
 import { useToast } from '../../context/ToastContext';
+import { useWorkspace } from '../../context/WorkspaceContext';
 import { formatNgn } from '../../Data/mockData';
 
 const TODAY_ISO = '2026-03-28';
@@ -82,9 +84,36 @@ export default function SalesCustomersTab({
   cuttingLists = [],
   liveMode = false,
 }) {
-  const { customers, addCustomer } = useCustomers();
+  const { customers, addCustomer, deleteCustomer } = useCustomers();
   const { show: showToast } = useToast();
+  const ws = useWorkspace();
+  const canDeleteCustomer = Boolean(ws?.hasPermission?.('customers.manage') && ws?.canMutate);
   const [form, setForm] = useState(emptyForm);
+  const [deletingId, setDeletingId] = useState(null);
+
+  const handleDeleteCustomer = async (c) => {
+    if (
+      !window.confirm(
+        `Delete ${c.name} (${c.customerID})? This cannot be undone if the server allows it.`
+      )
+    ) {
+      return;
+    }
+    setDeletingId(c.customerID);
+    try {
+      await deleteCustomer(c.customerID);
+      showToast('Customer deleted.');
+    } catch (e) {
+      const blockers = e?.blockers;
+      let msg = e?.message || 'Could not delete customer.';
+      if (Array.isArray(blockers) && blockers.length) {
+        msg += ` ${blockers.map((b) => `${b.count} in ${b.table}`).join('; ')}`;
+      }
+      showToast(msg, { variant: 'error' });
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -286,6 +315,17 @@ export default function SalesCustomersTab({
                   <span className="text-[9px] font-bold uppercase px-2 py-1 rounded-full bg-[#134e4a]/10 text-[#134e4a]">
                     {c.tier}
                   </span>
+                  {canDeleteCustomer ? (
+                    <button
+                      type="button"
+                      disabled={deletingId === c.customerID}
+                      onClick={() => handleDeleteCustomer(c)}
+                      className="mt-1 inline-flex items-center gap-1 rounded-lg border border-red-200 bg-white px-2 py-1 text-[9px] font-black uppercase tracking-wide text-red-700 hover:bg-red-50 disabled:opacity-50"
+                    >
+                      <Trash2 size={12} />
+                      {deletingId === c.customerID ? '…' : 'Delete'}
+                    </button>
+                  ) : null}
                 </div>
               </div>
 

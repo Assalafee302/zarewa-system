@@ -1,6 +1,6 @@
 import { actorName } from './auth.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
-import { appendAuditLog, assertPeriodOpen } from './controlOps.js';
+import { appendAuditLog, assertPeriodOpen, insertPaymentRequest } from './controlOps.js';
 
 function nextLedgerId() {
   return `LE-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -323,6 +323,155 @@ export function insertCustomer(db, row) {
     String(row.crmProfileNotes ?? '').trim()
   );
   return id;
+}
+
+function countWhere(db, sql, id) {
+  return Number(db.prepare(sql).get(id)?.c ?? 0);
+}
+
+/** Pre-check before DELETE customer — returns human-readable blockers when FK would fail. */
+export function getCustomerDeleteBlockers(db, customerID) {
+  const id = String(customerID ?? '').trim();
+  if (!id) return { ok: false, error: 'Customer id required.', blockers: [] };
+  if (!db.prepare(`SELECT 1 FROM customers WHERE customer_id = ?`).get(id)) {
+    return { ok: false, error: 'Customer not found.', blockers: [] };
+  }
+  const blockers = [];
+  const push = (table, n) => {
+    if (n > 0) blockers.push({ table, count: n });
+  };
+  push('quotations', countWhere(db, `SELECT COUNT(*) AS c FROM quotations WHERE customer_id = ?`, id));
+  push('ledger_entries', countWhere(db, `SELECT COUNT(*) AS c FROM ledger_entries WHERE customer_id = ?`, id));
+  push('sales_receipts', countWhere(db, `SELECT COUNT(*) AS c FROM sales_receipts WHERE customer_id = ?`, id));
+  push('cutting_lists', countWhere(db, `SELECT COUNT(*) AS c FROM cutting_lists WHERE customer_id = ?`, id));
+  push('customer_refunds', countWhere(db, `SELECT COUNT(*) AS c FROM customer_refunds WHERE customer_id = ?`, id));
+  push('deliveries', countWhere(db, `SELECT COUNT(*) AS c FROM deliveries WHERE customer_id = ?`, id));
+  push('advance_in_events', countWhere(db, `SELECT COUNT(*) AS c FROM advance_in_events WHERE customer_id = ?`, id));
+  if (db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='production_jobs'`).get()) {
+    push('production_jobs', countWhere(db, `SELECT COUNT(*) AS c FROM production_jobs WHERE customer_id = ?`, id));
+  }
+  return { ok: true, blockers };
+}
+
+export function deleteCustomerIfAllowed(db, customerID) {
+  const check = getCustomerDeleteBlockers(db, customerID);
+  if (!check.ok) return { ...check, blockers: check.blockers ?? [] };
+  if (check.blockers.length > 0) {
+    return {
+      ok: false,
+      error: 'Cannot delete customer while dependent records exist. Remove or reassign them first.',
+      blockers: check.blockers.map((b) => `${b.count} in ${b.table}`),
+    };
+  }
+  const id = String(customerID ?? '').trim();
+  db.prepare(`DELETE FROM customers WHERE customer_id = ?`).run(id);
+  return { ok: true };
+}
+
+function parseHrLoanPayloadJson(raw) {
+  try {
+    const v = JSON.parse(String(raw || ''));
+    return v && typeof v === 'object' ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+function syncStaffLoanDisbursementOnFullPay(db, paymentRequestId, paidAtISO) {
+  const prId = String(paymentRequestId || '').trim();
+  if (!prId) return;
+  const day = String(paidAtISO || '').trim().slice(0, 10) || new Date().toISOString().slice(0, 10);
+  const rows = db
+    .prepare(`SELECT id, payload_json FROM hr_requests WHERE kind = 'loan' AND status = 'approved'`)
+    .all();
+  for (const r of rows) {
+    const p = parseHrLoanPayloadJson(r.payload_json);
+    if (String(p.financePaymentRequestId || '') !== prId) continue;
+    const amountNgn = roundMoney(p.amountNgn);
+    const merged = {
+      ...p,
+      loanDisbursedAtIso: day,
+      deductionsActive: true,
+      disbursementQueueStatus: 'Paid',
+      principalOutstandingNgn:
+        Number.isFinite(Number(p.principalOutstandingNgn)) && Number(p.principalOutstandingNgn) >= 0
+          ? roundMoney(p.principalOutstandingNgn)
+          : amountNgn > 0
+            ? amountNgn
+            : 0,
+    };
+    db.prepare(`UPDATE hr_requests SET payload_json = ? WHERE id = ?`).run(JSON.stringify(merged), r.id);
+    return;
+  }
+}
+
+/**
+ * When executive approval completes on a staff loan, create expense + payment request and link on the HR row.
+ * @param {import('better-sqlite3').Database} db
+ * @param {object} actor
+ * @param {{ id: string; kind: string; title?: string; branch_id?: string; payload_json?: string }} requestRow
+ */
+export function provisionStaffLoanForFinanceQueue(db, actor, requestRow) {
+  if (!requestRow || String(requestRow.kind) !== 'loan') {
+    return { ok: false, error: 'Not a loan request.' };
+  }
+  const payload = parseHrLoanPayloadJson(requestRow.payload_json);
+  if (payload.financePaymentRequestId) {
+    return { ok: true, requestID: payload.financePaymentRequestId, already: true };
+  }
+  const amountNgn = roundMoney(payload.amountNgn);
+  if (amountNgn <= 0) return { ok: false, error: 'Loan amount is missing or invalid.' };
+
+  const hrId = String(requestRow.id);
+  const expenseId = `EXP-HR-LOAN-${hrId}`;
+  const bid = String(requestRow.branch_id || DEFAULT_BRANCH_ID).trim();
+  const today = new Date().toISOString().slice(0, 10);
+  let paymentReqId;
+
+  try {
+    db.transaction(() => {
+      assertPeriodOpen(db, today, 'Staff loan disbursement queue');
+      const ex = db.prepare(`SELECT 1 FROM expenses WHERE expense_id = ?`).get(expenseId);
+      if (!ex) {
+        db.prepare(
+          `INSERT INTO expenses (expense_id, expense_type, amount_ngn, date, category, payment_method, reference, branch_id)
+           VALUES (?,?,?,?,?,?,?,?)`
+        ).run(
+          expenseId,
+          'Staff loan disbursement',
+          amountNgn,
+          today,
+          'HR — staff loan',
+          'Pending',
+          hrId,
+          bid
+        );
+      }
+      const pr = insertPaymentRequest(
+        db,
+        {
+          expenseID: expenseId,
+          amountRequestedNgn: amountNgn,
+          requestDate: today,
+          description: `Staff loan: ${String(requestRow.title || hrId)}`,
+        },
+        actor
+      );
+      if (!pr.ok) throw new Error(pr.error);
+      paymentReqId = pr.requestID;
+      const merged = {
+        ...payload,
+        financePaymentRequestId: paymentReqId,
+        disbursementQueueStatus: 'Pending',
+        financeRejectionNote: null,
+      };
+      db.prepare(`UPDATE hr_requests SET payload_json = ? WHERE id = ?`).run(JSON.stringify(merged), hrId);
+    })();
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+
+  return { ok: true, requestID: paymentReqId };
 }
 
 /** @param {import('better-sqlite3').Database} db */
@@ -2135,6 +2284,10 @@ export function payPaymentRequest(db, requestID, payload) {
          SET paid_amount_ngn = ?, paid_at_iso = ?, paid_by = ?, payment_note = ?
          WHERE request_id = ?`
       ).run(nextPaid, paidAtISO, paidBy, paymentNote, requestID);
+
+      if (nextPaid >= requested) {
+        syncStaffLoanDisbursementOnFullPay(db, requestID, paidAtISO);
+      }
 
       appendAuditLog(db, {
         actor: payload.actor,

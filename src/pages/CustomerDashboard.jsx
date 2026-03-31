@@ -26,6 +26,7 @@ import {
   Activity,
   Scissors,
   RotateCcw,
+  Trash2,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -131,7 +132,7 @@ const emptyEdit = (c) => ({
 const CustomerDashboard = () => {
   const { customerId } = useParams();
   const navigate = useNavigate();
-  const { customers, setCustomers } = useCustomers();
+  const { customers, setCustomers, deleteCustomer } = useCustomers();
   const { show: showToast } = useToast();
   const ws = useWorkspace();
 
@@ -621,6 +622,28 @@ const CustomerDashboard = () => {
     showToast('Customer profile updated.');
   };
 
+  const handleDeleteCustomerProfile = async () => {
+    if (
+      !window.confirm(
+        `Permanently delete ${customer.name} (${customerId})? This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+    try {
+      await deleteCustomer(customerId);
+      showToast('Customer removed.');
+      navigate('/sales', { state: { focusSalesTab: 'customers' } });
+    } catch (e) {
+      const blockers = e?.blockers;
+      let msg = e?.message || 'Could not delete customer.';
+      if (Array.isArray(blockers) && blockers.length) {
+        msg += ` — ${blockers.map((b) => `${b.count} in ${b.table}`).join('; ')}`;
+      }
+      showToast(msg, { variant: 'error' });
+    }
+  };
+
   const downloadReport = (kind) => {
     const lines = [];
     lines.push(`Zarewa — Customer report (${kind})`);
@@ -859,6 +882,29 @@ const CustomerDashboard = () => {
                   {customer.crmProfileNotes}
                 </p>
               ) : null}
+            </section>
+          ) : null}
+
+          {ws?.hasPermission?.('customers.manage') && ws?.canMutate ? (
+            <section
+              className="mb-8 rounded-2xl border border-red-100 bg-red-50/50 px-4 py-4"
+              aria-label="Delete customer"
+            >
+              <p className="text-[10px] font-black uppercase tracking-widest text-red-800 mb-1">
+                Danger zone
+              </p>
+              <p className="text-xs text-red-900/85 mb-3 max-w-xl">
+                Remove this customer only when they have no quotations, receipts, ledger entries, or other
+                linked records. The server will list any blockers if delete is not allowed.
+              </p>
+              <button
+                type="button"
+                onClick={handleDeleteCustomerProfile}
+                className="inline-flex items-center gap-2 rounded-xl border border-red-200 bg-white px-4 py-2 text-xs font-bold text-red-800 hover:bg-red-100/80"
+              >
+                <Trash2 size={16} />
+                Delete customer
+              </button>
             </section>
           ) : null}
 

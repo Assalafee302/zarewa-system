@@ -526,6 +526,8 @@ export function InventoryProvider({ children }) {
         return { ok: true, coilNos: data.coilNos || [] };
       }
 
+      /* Offline / demo GRN (no API): synthetic coil IDs (CL-2026-####) from a local counter only.
+         The live server assigns coil numbers when POST /api/purchase-orders/:id/grn succeeds — do not expect IDs to match. */
       const coilNumbers = [];
 
       setCoilLots((prevLots) => {
