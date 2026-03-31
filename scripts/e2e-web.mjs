@@ -50,6 +50,7 @@ const vite = spawn(npmCmd, ['run', 'dev', '--', '--host', '127.0.0.1', '--port',
   cwd: root,
   env,
   stdio: 'inherit',
+  shell: process.platform === 'win32',
 });
 
 function shutdown() {

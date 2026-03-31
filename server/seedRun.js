@@ -22,6 +22,7 @@ import { DEFAULT_BRANCH_ID } from './branches.js';
 import { seedAuthUsers } from './auth.js';
 import { seedMasterData } from './masterData.js';
 import { seedProductionLineDemo } from './seedProductionLineDemo.js';
+import { seedHrIfEmpty } from './hrOps.js';
 
 /**
  * Idempotent seed: fills empty tables. Safe on existing DBs after migrations.
@@ -384,4 +385,5 @@ export function seedEverything(db) {
   }
 
   seedProductionLineDemo(db);
+  seedHrIfEmpty(db);
 }

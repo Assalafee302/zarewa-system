@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { FileSpreadsheet, FileText, Package, ShoppingCart, Landmark, Printer } from 'lucide-react';
 import { PageHeader, PageShell, MainPanel } from '../components/layout';
@@ -7,6 +7,7 @@ import { formatNgn } from '../Data/mockData';
 import { useToast } from '../context/ToastContext';
 import { useInventory } from '../context/InventoryContext';
 import { useWorkspace } from '../context/WorkspaceContext';
+import { apiFetch } from '../lib/apiBase';
 import {
   deliveryPerformanceSummary,
   filterQuotationsInRange,
@@ -91,6 +92,35 @@ const Reports = () => {
   const { show: showToast } = useToast();
   const { movements, products: liveProducts } = useInventory();
   const ws = useWorkspace();
+  const [aggregateSummary, setAggregateSummary] = useState(null);
+  const [summaryErr, setSummaryErr] = useState(null);
+
+  const countOnlyOverview =
+    ws.hasPermission('reports.view') &&
+    !ws.canAccessModule('sales') &&
+    !ws.canAccessModule('procurement') &&
+    !ws.canAccessModule('operations') &&
+    !ws.canAccessModule('finance');
+
+  useEffect(() => {
+    if (!countOnlyOverview || !ws.hasWorkspaceData) return undefined;
+    let cancelled = false;
+    (async () => {
+      const { ok, data } = await apiFetch('/api/reports/summary');
+      if (cancelled) return;
+      if (!ok || !data?.ok) {
+        setSummaryErr(data?.error || 'Could not load summary');
+        setAggregateSummary(null);
+        return;
+      }
+      setAggregateSummary(data.counts);
+      setSummaryErr(null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [countOnlyOverview, ws.hasWorkspaceData, ws.refreshEpoch]);
+
   const today = new Date().toISOString().slice(0, 10);
   const [startDate, setStartDate] = useState('2026-03-01');
   const [endDate, setEndDate] = useState(today);
@@ -345,6 +375,47 @@ const Reports = () => {
 
       <MainPanel className="!p-0 overflow-hidden sm:!p-0">
         <div className="p-6 sm:p-8 space-y-10">
+        {countOnlyOverview && (
+          <div className={`${PANEL} border-teal-100/80 bg-teal-50/30`}>
+            <h3 className={SUBHDR}>Count-only overview</h3>
+            <p className="text-sm font-medium text-slate-600 mb-4">
+              Branch-scoped totals for your role. Detailed exports need Sales, Procurement, Operations, or Finance
+              access.
+            </p>
+            {summaryErr && <p className="text-sm font-semibold text-red-600 mb-3">{summaryErr}</p>}
+            {!aggregateSummary && !summaryErr && (
+              <p className="text-sm font-medium text-slate-500">Loading summary…</p>
+            )}
+            {aggregateSummary && (
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+                {[
+                  ['Customers', aggregateSummary.customersTotal],
+                  ['Quotations', aggregateSummary.quotationsTotal],
+                  ['Receipts', aggregateSummary.receiptsTotal],
+                  ['Purchase orders', aggregateSummary.purchaseOrdersTotal],
+                  ['Deliveries', aggregateSummary.deliveriesTotal],
+                  ['Cutting lists', aggregateSummary.cuttingListsTotal],
+                  ['Ledger lines', aggregateSummary.ledgerEntriesTotal],
+                  ['Refunds', aggregateSummary.refundsTotal],
+                  ['Products (SKUs)', aggregateSummary.productsTotal],
+                  ['Suppliers', aggregateSummary.suppliersTotal],
+                  ['Treasury movements', aggregateSummary.treasuryMovementsTotal],
+                ].map(([label, n]) => (
+                  <div
+                    key={label}
+                    className="rounded-2xl border border-slate-100 bg-white/90 px-3 py-2.5 shadow-sm"
+                  >
+                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">{label}</p>
+                    <p className="text-lg font-black text-[#134e4a] tabular-nums mt-0.5">{Number(n) || 0}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {!countOnlyOverview && (
+        <>
         <div className="z-page-hero grid grid-cols-1 lg:grid-cols-2 gap-8 lg:gap-10 !mb-0">
           <div>
             <h3 className={SUBHDR}>Sales report parameters</h3>
@@ -620,6 +691,8 @@ const Reports = () => {
             })}
           </div>
         </div>
+        </>
+        )}
         </div>
       </MainPanel>
     </PageShell>

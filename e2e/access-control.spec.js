@@ -6,7 +6,7 @@ async function signIn(page, username, password) {
     timeout: 15_000,
   });
   await page.getByLabel('Username').fill(username);
-  await page.getByPlaceholder('Your password').fill(password);
+  await page.getByLabel('Password').fill(password);
   await page.getByRole('button', { name: /enter workspace/i }).click();
   await expect(page.getByRole('navigation', { name: 'Modules' })).toBeVisible({ timeout: 15_000 });
 }

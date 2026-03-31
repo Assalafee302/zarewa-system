@@ -164,6 +164,13 @@ const DEFAULT_USERS = [
     roleKey: 'operations_officer',
     password: 'Ops@123',
   },
+  {
+    id: 'USR-VIEW',
+    username: 'viewer',
+    displayName: 'Read-only viewer',
+    roleKey: 'viewer',
+    password: 'Viewer@123456!',
+  },
 ];
 
 function nowIso() {

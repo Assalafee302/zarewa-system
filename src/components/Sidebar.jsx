@@ -11,6 +11,7 @@ import {
   Settings,
   ChevronLeft,
   ChevronRight,
+  Users,
 } from 'lucide-react';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { ZAREWA_LOGO_SRC } from '../Data/companyQuotation';
@@ -72,6 +73,13 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
       label: 'Reports',
       path: '/reports',
       visible: ws?.canAccessModule?.('reports') ?? true,
+    },
+    {
+      icon: <Users size={18} />,
+      label: 'HR',
+      path: '/hr',
+      active: pathMatches(p, '/hr'),
+      visible: ws?.canAccessModule?.('hr') ?? true,
     },
     {
       icon: <Settings size={18} />,

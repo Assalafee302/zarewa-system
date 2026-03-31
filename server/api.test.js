@@ -1255,4 +1255,139 @@ describe('Zarewa API', () => {
     const afterDel = await agent.get('/api/setup');
     expect(afterDel.body.masterData.colours.length).toBe(beforeCount);
   });
+
+  it('HR: caps, payroll recompute, treasury CSV when locked', async () => {
+    const fin = request.agent(app);
+    await loginAs(fin, 'finance.manager', 'Finance@123');
+
+    const caps = await fin.get('/api/hr/caps');
+    expect(caps.status).toBe(200);
+    expect(caps.body.ok).toBe(true);
+    expect(caps.body.enabled).toBe(true);
+    expect(caps.body.canPayroll).toBe(true);
+
+    const created = await fin.post('/api/hr/payroll-runs').send({ periodYyyymm: '209901' });
+    expect(created.status).toBe(201);
+    expect(created.body.ok).toBe(true);
+    const runId = created.body.id;
+    expect(runId).toBeTruthy();
+
+    const badTreasury = await fin.get(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/treasury-pack`);
+    expect(badTreasury.status).toBe(400);
+
+    const rec = await fin.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/recompute`).send({});
+    expect(rec.status).toBe(200);
+    expect(rec.body.ok).toBe(true);
+    expect(Array.isArray(rec.body.lines)).toBe(true);
+    expect(rec.body.lines.length).toBeGreaterThan(0);
+
+    const lock = await fin.patch(`/api/hr/payroll-runs/${encodeURIComponent(runId)}`).send({ status: 'locked' });
+    expect(lock.status).toBe(200);
+    expect(lock.body.ok).toBe(true);
+
+    const csv = await fin.get(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/treasury-pack`);
+    expect(csv.status).toBe(200);
+    expect(String(csv.headers['content-type'] || '')).toMatch(/csv/i);
+    expect(csv.text).toContain('209901');
+
+    const linesOnly = await fin.get(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/lines`);
+    expect(linesOnly.status).toBe(200);
+    expect(linesOnly.body.lines.length).toBe(rec.body.lines.length);
+
+    const snap = await fin.get('/api/hr/salary-welfare/snapshot');
+    expect(snap.status).toBe(200);
+    expect(snap.body.ok).toBe(true);
+  });
+
+  it('HR staff loan: approve, pay disbursement, principal + payroll deduction', async () => {
+    const adminAgent = request.agent(app);
+    await loginAs(adminAgent);
+
+    const staffList = await adminAgent.get('/api/hr/staff');
+    expect(staffList.status).toBe(200);
+    const staffUser = staffList.body.staff.find((s) => s.username === 'sales.staff');
+    expect(staffUser?.userId).toBeTruthy();
+
+    const staffAgent = request.agent(app);
+    await loginAs(staffAgent, 'sales.staff', 'Sales@123');
+
+    const loanTitle = `API loan ${Date.now()}`;
+    const createLoan = await staffAgent.post('/api/hr/requests').send({
+      kind: 'loan',
+      title: loanTitle,
+      body: 'Integration test',
+      payload: {
+        amountNgn: 120_000,
+        repaymentMonths: 2,
+        deductionPerMonthNgn: 7_500,
+      },
+    });
+    expect(createLoan.status).toBe(201);
+    const loanId = createLoan.body.request?.id;
+    expect(loanId).toBeTruthy();
+
+    const sub = await staffAgent.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/submit`).send({});
+    expect(sub.status).toBe(200);
+
+    const hrRev = await adminAgent.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/hr-review`).send({
+      approve: true,
+      note: 'ok',
+    });
+    expect(hrRev.status).toBe(200);
+
+    const finAgent = request.agent(app);
+    await loginAs(finAgent, 'finance.manager', 'Finance@123');
+
+    const mgrRev = await finAgent.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/manager-review`).send({
+      approve: true,
+      note: 'ok',
+    });
+    expect(mgrRev.status).toBe(200);
+
+    const boot = await adminAgent.get('/api/bootstrap');
+    expect(boot.status).toBe(200);
+    const pr = boot.body.paymentRequests.find((p) => String(p.description || '').includes(loanTitle));
+    expect(pr).toBeTruthy();
+
+    const dec = await finAgent.post(`/api/payment-requests/${encodeURIComponent(pr.requestID)}/decision`).send({
+      status: 'Approved',
+      note: 'ok',
+      actedAtISO: '2026-03-29',
+    });
+    expect(dec.status).toBe(200);
+
+    const cash = boot.body.treasuryAccounts[0];
+    expect(cash?.id).toBeTruthy();
+
+    const pay = await finAgent.post(`/api/payment-requests/${encodeURIComponent(pr.requestID)}/pay`).send({
+      treasuryAccountId: cash.id,
+      amountNgn: 120_000,
+      paidAtISO: '2026-03-29',
+    });
+    expect(pay.status).toBe(201);
+    expect(pay.body.fullyPaid).toBe(true);
+
+    const snap = await adminAgent.get('/api/hr/salary-welfare/snapshot');
+    expect(snap.status).toBe(200);
+    const ln = snap.body.approvedLoans.find((l) => l.requestId === loanId);
+    expect(ln).toBeTruthy();
+    expect(ln.deductionsActive).toBe(true);
+    expect(ln.principalOutstandingNgn).toBe(120_000);
+
+    const run = await adminAgent.post('/api/hr/payroll-runs').send({ periodYyyymm: '209910' });
+    expect(run.status).toBe(201);
+    const runId = run.body.id;
+    const comp = await adminAgent.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/recompute`).send({});
+    expect(comp.status).toBe(200);
+    const staffLine = comp.body.lines.find((l) => l.userId === staffUser.userId);
+    expect(staffLine?.otherDeductionNgn).toBe(7_500);
+
+    const paid = await adminAgent.patch(`/api/hr/payroll-runs/${encodeURIComponent(runId)}`).send({ status: 'paid' });
+    expect(paid.status).toBe(200);
+
+    const snap2 = await adminAgent.get('/api/hr/salary-welfare/snapshot');
+    const ln2 = snap2.body.approvedLoans.find((l) => l.requestId === loanId);
+    expect(ln2.principalOutstandingNgn).toBe(112_500);
+    expect(ln2.repaymentMonthsRemaining).toBe(1);
+  });
 });

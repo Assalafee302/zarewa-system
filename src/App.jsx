@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, useNavigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, useNavigate, Link } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
 import Sales from './pages/Sales';
@@ -22,7 +22,7 @@ import HrPayroll from './pages/hr/HrPayroll';
 import HrTime from './pages/hr/HrTime';
 import HrTalent from './pages/hr/HrTalent';
 import LoginScreen from './components/auth/LoginScreen';
-import { Search, Bell, Command, Menu } from 'lucide-react';
+import { Search, Bell, Command, Menu, UserCircle } from 'lucide-react';
 import { CustomersProvider } from './context/CustomersContext';
 import { InventoryProvider } from './context/InventoryContext';
 import { ToastProvider } from './context/ToastContext';
@@ -351,6 +351,16 @@ function AppShell() {
                 ) : null}
               </div>
 
+              {ws?.canAccessModule?.('hr') ? (
+                <Link
+                  to="/hr/staff/me"
+                  className="hidden sm:inline-flex items-center gap-2 rounded-2xl border border-gray-100/90 bg-white/95 px-3 py-2 text-[11px] font-bold uppercase tracking-wide text-[#134e4a] shadow-sm transition hover:border-teal-200 hover:shadow-md"
+                  title="Open your HR staff profile"
+                >
+                  <UserCircle size={18} className="text-gray-400" aria-hidden />
+                  <span>My profile</span>
+                </Link>
+              ) : null}
               <button
                 type="button"
                 onClick={() => navigate('/settings')}
