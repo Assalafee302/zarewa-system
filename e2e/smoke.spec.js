@@ -16,7 +16,9 @@ async function signIn(page, username = 'admin', password = 'Admin@123') {
 test.describe('Authenticated app flows', () => {
   test('dashboard loads after sign-in with active user identity', async ({ page }) => {
     await signIn(page);
-    await expect(page.getByRole('button', { name: /zarewa admin administrator/i })).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: /signed in as zarewa admin/i })
+    ).toBeVisible();
   });
 
   test('sidebar navigates through protected modules', async ({ page }) => {
@@ -54,6 +56,7 @@ test.describe('Authenticated app flows', () => {
     await expect(main.getByText(/^zarewa admin$/i).first()).toBeVisible();
     await expect(main.getByText(/^administrator$/i)).toBeVisible();
 
+    await page.getByRole('tab', { name: /controls & audit/i }).click();
     await page.locator('input[type="month"]').fill('2099-12');
     await page.getByPlaceholder(/month-end close completed/i).fill('Playwright period lock');
     await page.getByRole('button', { name: /lock period/i }).click();
@@ -82,16 +85,19 @@ test.describe('Authenticated app flows', () => {
   test('settings master data workspace can add a colour', async ({ page }) => {
     await signIn(page);
     await page.getByRole('navigation', { name: 'Modules' }).getByRole('link', { name: 'Settings' }).click();
-    await expect(page.getByRole('heading', { name: /master data workspace/i })).toBeVisible();
+    await page.getByRole('tab', { name: /data & pricing/i }).click();
+    await expect(page.getByRole('heading', { name: /master lists/i })).toBeVisible();
     const colourName = `Playwright colour ${Date.now()}`;
-    await page.getByRole('heading', { name: /master data workspace/i }).scrollIntoViewIfNeeded();
-    const coloursSection = page
-      .locator('section.rounded-3xl')
-      .filter({ has: page.getByRole('heading', { name: 'Colours', exact: true }) });
-    await coloursSection.getByText('Colour name', { exact: true }).locator('..').getByRole('textbox').first().fill(colourName);
-    await coloursSection.getByPlaceholder(/HMB \/ IV \/ TB/i).fill('PW');
-    await coloursSection.getByRole('button', { name: /^save$/i }).click();
-    await expect(coloursSection.getByText(`${colourName} (PW)`, { exact: true })).toBeVisible({ timeout: 15_000 });
+    await page.getByRole('heading', { name: /master lists/i }).scrollIntoViewIfNeeded();
+    const coloursForm = page
+      .locator('#main-content form')
+      .filter({ has: page.getByText('Colour name', { exact: true }) });
+    await coloursForm.getByText('Colour name', { exact: true }).locator('..').getByRole('textbox').first().fill(colourName);
+    await coloursForm.getByPlaceholder(/HMB \/ IV \/ TB/i).fill('PW');
+    await coloursForm.getByRole('button', { name: /^save$/i }).click();
+    await expect(
+      page.getByRole('paragraph').filter({ hasText: `${colourName} (PW)` }).first()
+    ).toBeVisible({ timeout: 15_000 });
   });
 
   test('sales refunds tab opens request modal with preview and payout guidance', async ({ page }) => {

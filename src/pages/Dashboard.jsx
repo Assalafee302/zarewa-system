@@ -790,15 +790,26 @@ const Dashboard = () => {
               >
                 <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-1">
                   Mill output (7 days)
-                  <button
-                    type="button"
-                    onClick={() => setMillHelpOpen(true)}
-                    className="inline-flex rounded-full p-0.5 text-slate-400 hover:text-[#134e4a] hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/30"
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setMillHelpOpen(true);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setMillHelpOpen(true);
+                      }
+                    }}
+                    className="inline-flex rounded-full p-0.5 text-slate-400 hover:text-[#134e4a] hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/30 cursor-pointer"
                     aria-label="What is mill output?"
                     title="Explain this metric"
                   >
                     <HelpCircle size={14} />
-                  </button>
+                  </span>
                 </p>
                 <p className="text-3xl font-bold tracking-tight text-[#134e4a] tabular-nums">
                   {pulse.millOutput7d.toLocaleString()}

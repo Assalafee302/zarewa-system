@@ -772,13 +772,13 @@ describe('Zarewa API', () => {
 
     const changed = await financeAgent.post('/api/session/change-password').send({
       currentPassword: 'Finance@123',
-      newPassword: 'Finance@456',
+      newPassword: 'Finance@New456!',
     });
     expect(changed.status).toBe(200);
 
     const relogin = await request(app).post('/api/session/login').send({
       username: 'finance.manager',
-      password: 'Finance@456',
+      password: 'Finance@New456!',
     });
     expect(relogin.status).toBe(200);
   });

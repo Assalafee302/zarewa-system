@@ -1,0 +1,60 @@
+import { test, expect } from '@playwright/test';
+
+async function signIn(page, username, password) {
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: /open your workspace/i })).toBeVisible({
+    timeout: 15_000,
+  });
+  await page.getByLabel('Username').fill(username);
+  await page.getByPlaceholder('Your password').fill(password);
+  await page.getByRole('button', { name: /enter workspace/i }).click();
+  await expect(page.getByRole('navigation', { name: 'Modules' })).toBeVisible({ timeout: 15_000 });
+}
+
+test.describe('Role-based access (API + UI)', () => {
+  test('viewer: customers API forbidden; reports summary allowed', async ({ page }) => {
+    await signIn(page, 'viewer', 'Viewer@123456!');
+    const customers = await page.request.get('/api/customers');
+    expect(customers.status()).toBe(403);
+    const body = await customers.json();
+    expect(body.code).toBe('FORBIDDEN');
+
+    const summary = await page.request.get('/api/reports/summary');
+    expect(summary.status()).toBe(200);
+    const sumJson = await summary.json();
+    expect(sumJson.ok).toBe(true);
+    expect(sumJson.counts).toBeTruthy();
+    expect(typeof sumJson.counts.customersTotal).toBe('number');
+  });
+
+  test('viewer: employment letters API forbidden', async ({ page }) => {
+    await signIn(page, 'viewer', 'Viewer@123456!');
+    const res = await page.request.get('/api/hr/employment-letters');
+    expect(res.status()).toBe(403);
+  });
+
+  test('viewer: Reports shows count-only overview', async ({ page }) => {
+    await signIn(page, 'viewer', 'Viewer@123456!');
+    await page.getByRole('navigation', { name: 'Modules' }).getByRole('link', { name: 'Reports' }).click();
+    await expect(page).toHaveURL(/\/reports$/);
+    await expect(page.getByText(/count-only overview/i)).toBeVisible({ timeout: 15_000 });
+  });
+
+  test('procurement: customers forbidden; suppliers allowed', async ({ page }) => {
+    await signIn(page, 'procurement', 'Procure@123');
+    const customers = await page.request.get('/api/customers');
+    expect(customers.status()).toBe(403);
+
+    const suppliers = await page.request.get('/api/suppliers');
+    expect(suppliers.status()).toBe(200);
+    const body = await suppliers.json();
+    expect(body.ok).toBe(true);
+    expect(Array.isArray(body.suppliers)).toBe(true);
+  });
+
+  test('procurement: ledger endpoint forbidden', async ({ page }) => {
+    await signIn(page, 'procurement', 'Procure@123');
+    const ledger = await page.request.get('/api/ledger');
+    expect(ledger.status()).toBe(403);
+  });
+});

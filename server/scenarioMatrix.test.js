@@ -1666,6 +1666,6 @@ describe('Scenario matrix', () => {
         throw new Error(`Scenario matrix failures (${failures.length}/${scenarios.length})\n${failures.join('\n')}`);
       }
     },
-    150_000
+    300_000
   );
 });

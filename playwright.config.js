@@ -19,13 +19,13 @@ export default defineConfig({
       env: {
         ZAREWA_DB: 'data/playwright.sqlite',
       },
-      reuseExistingServer: false,
+      reuseExistingServer: process.env.CI !== 'true',
       timeout: 120_000,
     },
     {
       command: 'npm run dev -- --host 127.0.0.1 --port 5173',
       url: 'http://127.0.0.1:5173',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: process.env.CI !== 'true',
       timeout: 120_000,
     },
   ],

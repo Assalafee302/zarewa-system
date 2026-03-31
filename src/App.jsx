@@ -13,6 +13,14 @@ import Deliveries from './pages/Deliveries';
 import Reports from './pages/Reports';
 import Settings from './pages/Settings';
 import NotFound from './pages/NotFound';
+import HrLayout from './pages/hr/HrLayout';
+import HrHome from './pages/hr/HrHome';
+import HrStaffList from './pages/hr/HrStaffList';
+import StaffProfile from './pages/hr/StaffProfile';
+import HrSalaryWelfare from './pages/hr/HrSalaryWelfare';
+import HrPayroll from './pages/hr/HrPayroll';
+import HrTime from './pages/hr/HrTime';
+import HrTalent from './pages/hr/HrTalent';
 import LoginScreen from './components/auth/LoginScreen';
 import { Search, Bell, Command, Menu } from 'lucide-react';
 import { CustomersProvider } from './context/CustomersContext';
@@ -379,6 +387,15 @@ function AppShell() {
             <Route path="/accounts" element={<Account />} />
             <Route path="/reports" element={<Reports />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/hr" element={<HrLayout />}>
+              <Route index element={<HrHome />} />
+              <Route path="salary-welfare" element={<HrSalaryWelfare />} />
+              <Route path="staff" element={<HrStaffList />} />
+              <Route path="staff/:userId" element={<StaffProfile />} />
+              <Route path="payroll" element={<HrPayroll />} />
+              <Route path="time" element={<HrTime />} />
+              <Route path="talent" element={<HrTalent />} />
+            </Route>
             <Route path="*" element={<NotFound />} />
           </Routes>
         </main>

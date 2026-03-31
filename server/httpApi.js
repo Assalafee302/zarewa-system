@@ -65,6 +65,23 @@ import {
 } from './readModel.js';
 import { insertLedgerRows } from './writeOps.js';
 import * as write from './writeOps.js';
+import {
+  computePayrollRun,
+  createPayrollRun,
+  getHrMeProfile,
+  getPayrollRunById,
+  hrListScope,
+  listHrAttendance,
+  listHrStaff,
+  listPayrollLines,
+  listPayrollRuns,
+  patchHrLoanMaintenance,
+  patchHrStaffBonusAccrualNote,
+  patchPayrollRun,
+  salaryWelfareSnapshot,
+  upsertHrStaffProfile,
+  uploadHrAttendance,
+} from './hrOps.js';
 
 const loginAttemptBuckets = new Map();
 const forgotPasswordBuckets = new Map();
@@ -116,6 +133,32 @@ function normalizeTreasuryLines(body) {
 
 function totalTreasuryLines(lines) {
   return (lines || []).reduce((sum, line) => sum + (Number(line.amountNgn) || 0), 0);
+}
+
+function hrCapsForUser(user) {
+  const has = (p) => userHasPermission(user, p);
+  return {
+    ok: true,
+    canViewDirectory:
+      has('*') || has('hr.view_directory') || has('settings.view') || has('audit.view'),
+    canPayroll: has('*') || has('hr.payroll') || has('finance.pay'),
+    canManageStaff: has('*') || has('hr.manage') || has('settings.view'),
+    canUploadAttendance: has('*') || has('hr.attendance') || has('operations.manage'),
+    canLoanMaint: has('*') || has('hr.loan_maintain') || has('finance.approve'),
+  };
+}
+
+function hrScopeFromReq(req) {
+  return hrListScope({
+    user: req.user,
+    workspaceBranchId: req.workspaceBranchId,
+    workspaceViewAll: req.workspaceViewAll,
+  });
+}
+
+function resolveHrStaffUserIdParam(req) {
+  const raw = String(req.params.userId || '').trim();
+  return raw === 'me' ? req.user.id : raw;
 }
 
 /**
@@ -1757,5 +1800,155 @@ export function registerHttpApi(app, db) {
       console.error(e);
       res.status(500).json({ ok: false, error: 'Failed to reverse advance' });
     }
+  });
+
+  /* ——— HR ——— */
+  app.get('/api/hr/caps', requireAuth, (req, res) => {
+    res.json(hrCapsForUser(req.user));
+  });
+
+  app.get('/api/hr/me', requireAuth, (req, res) => {
+    const payload = getHrMeProfile(db, req.user.id);
+    res.json({ ok: true, ...payload });
+  });
+
+  app.get('/api/hr/staff', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canViewDirectory) {
+      return res.status(403).json({ ok: false, error: 'No access to staff directory.' });
+    }
+    const scope = hrScopeFromReq(req);
+    const staff = listHrStaff(db, scope);
+    res.json({ ok: true, staff });
+  });
+
+  app.get('/api/hr/staff/:userId', requireAuth, (req, res) => {
+    const uid = resolveHrStaffUserIdParam(req);
+    if (!uid) return res.status(400).json({ ok: false, error: 'userId required.' });
+    const caps = hrCapsForUser(req.user);
+
+    if (uid === req.user.id) {
+      const payload = getHrMeProfile(db, req.user.id);
+      return res.json({ ok: true, mode: 'self', ...payload });
+    }
+    if (!caps.canViewDirectory) {
+      return res.status(403).json({ ok: false, error: 'No access to this profile.' });
+    }
+    const scope = hrScopeFromReq(req);
+    const staff = listHrStaff(db, scope);
+    const profile = staff.find((s) => s.userId === uid);
+    if (!profile) return res.status(404).json({ ok: false, error: 'Staff member not found in your scope.' });
+    return res.json({ ok: true, mode: 'hr', profile });
+  });
+
+  app.patch('/api/hr/staff/:userId', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canManageStaff) {
+      return res.status(403).json({ ok: false, error: 'Cannot edit staff files.' });
+    }
+    const uid = resolveHrStaffUserIdParam(req);
+    if (!uid) return res.status(400).json({ ok: false, error: 'userId required.' });
+    const scope = hrScopeFromReq(req);
+    const staff = listHrStaff(db, scope);
+    if (!staff.some((s) => s.userId === uid)) {
+      return res.status(404).json({ ok: false, error: 'Staff member not found.' });
+    }
+    const body = { ...req.body, userId: uid };
+    const r = upsertHrStaffProfile(db, req.user.id, body);
+    res.status(r.ok ? 200 : 400).json(r);
+  });
+
+  app.patch('/api/hr/staff/:userId/bonus-accrual-note', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canManageStaff) {
+      return res.status(403).json({ ok: false, error: 'Cannot edit staff files.' });
+    }
+    const uid = resolveHrStaffUserIdParam(req);
+    const note = req.body?.note;
+    const r = patchHrStaffBonusAccrualNote(db, req.user.id, uid, note);
+    res.status(r.ok ? 200 : 400).json(r);
+  });
+
+  app.get('/api/hr/salary-welfare/snapshot', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canViewDirectory && !caps.canPayroll) {
+      return res.status(403).json({ ok: false, error: 'No access.' });
+    }
+    const scope = hrScopeFromReq(req);
+    const snap = salaryWelfareSnapshot(db, scope);
+    res.json(snap);
+  });
+
+  app.patch('/api/hr/requests/:requestId/loan-maintenance', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canLoanMaint) {
+      return res.status(403).json({ ok: false, error: 'Loan maintenance not permitted.' });
+    }
+    const requestId = String(req.params.requestId || '').trim();
+    const r = patchHrLoanMaintenance(db, requestId, req.user.id, req.body || {});
+    if (r.ok) {
+      appendAuditLog(db, {
+        actor: req.user,
+        action: 'hr.loan_maintenance',
+        entityKind: 'hr_request',
+        entityId: requestId,
+        note: String(req.body?.note || '').trim() || 'Loan maintenance',
+      });
+    }
+    res.status(r.ok ? 200 : 400).json(r);
+  });
+
+  app.get('/api/hr/payroll-runs', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canPayroll) return res.status(403).json({ ok: false, error: 'No access to payroll.' });
+    res.json({ ok: true, runs: listPayrollRuns(db) });
+  });
+
+  app.post('/api/hr/payroll-runs', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canPayroll) return res.status(403).json({ ok: false, error: 'No access to payroll.' });
+    const r = createPayrollRun(db, req.user, req.body || {});
+    res.status(r.ok ? 201 : 400).json(r);
+  });
+
+  app.get('/api/hr/payroll-runs/:runId', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canPayroll) return res.status(403).json({ ok: false, error: 'No access to payroll.' });
+    const run = getPayrollRunById(db, String(req.params.runId || ''));
+    if (!run) return res.status(404).json({ ok: false, error: 'Run not found.' });
+    const lines = listPayrollLines(db, run.id);
+    res.json({ ok: true, run, lines });
+  });
+
+  app.patch('/api/hr/payroll-runs/:runId', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canPayroll) return res.status(403).json({ ok: false, error: 'No access to payroll.' });
+    const r = patchPayrollRun(db, String(req.params.runId || ''), req.body || {});
+    res.status(r.ok ? 200 : 400).json(r);
+  });
+
+  app.post('/api/hr/payroll-runs/:runId/recompute', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canPayroll) return res.status(403).json({ ok: false, error: 'No access to payroll.' });
+    const r = computePayrollRun(db, String(req.params.runId || ''));
+    res.status(r.ok ? 200 : 400).json(r);
+  });
+
+  app.get('/api/hr/attendance', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canUploadAttendance && !caps.canPayroll && !caps.canViewDirectory) {
+      return res.status(403).json({ ok: false, error: 'No access.' });
+    }
+    const scope = hrScopeFromReq(req);
+    res.json({ ok: true, uploads: listHrAttendance(db, scope) });
+  });
+
+  app.post('/api/hr/attendance/upload', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canUploadAttendance && !caps.canPayroll) {
+      return res.status(403).json({ ok: false, error: 'Cannot upload attendance.' });
+    }
+    const r = uploadHrAttendance(db, req.user, req.body || {});
+    res.status(r.ok ? 201 : 400).json(r);
   });
 }

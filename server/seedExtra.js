@@ -158,6 +158,39 @@ export const PURCHASE_ORDERS_SEED = [
       },
     ],
   },
+  {
+    po: {
+      poID: 'PO-2026-003',
+      supplierID: 'SUP-003',
+      supplierName: 'MetalMark West Africa',
+      orderDateISO: '2026-03-22',
+      expectedDeliveryISO: '2026-03-28',
+      status: 'Approved',
+      invoiceNo: 'INV-MM-2201',
+      invoiceDateISO: '2026-03-23',
+      deliveryDateISO: '',
+      transportAgentId: '',
+      transportAgentName: '',
+      transportPaid: false,
+      transportPaidAtISO: '',
+      supplierPaidNgn: 1_000_000,
+    },
+    lines: [
+      {
+        lineKey: 'L0-MM-102',
+        productID: 'PRD-102',
+        productName: 'Aluzinc coil (kg)',
+        color: 'TB',
+        gauge: '0.28',
+        metersOffered: 800,
+        conversionKgPerM: 2.65,
+        unitPricePerKgNgn: 2050,
+        qtyOrdered: 1800,
+        unitPriceNgn: 2050,
+        qtyReceived: 0,
+      },
+    ],
+  },
 ];
 
 export const DELIVERIES_SEED = [

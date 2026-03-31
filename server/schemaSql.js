@@ -642,4 +642,115 @@ CREATE TABLE IF NOT EXISTS quotation_lines (
 CREATE INDEX IF NOT EXISTS idx_po_lines_po ON purchase_order_lines(po_id);
 CREATE INDEX IF NOT EXISTS idx_quotation_lines_q ON quotation_lines(quotation_id);
 CREATE INDEX IF NOT EXISTS idx_coil_lots_po ON coil_lots(po_id);
+
+CREATE TABLE IF NOT EXISTS hr_staff_profiles (
+  user_id TEXT PRIMARY KEY,
+  branch_id TEXT,
+  employee_no TEXT,
+  job_title TEXT,
+  department TEXT,
+  employment_type TEXT,
+  date_joined_iso TEXT,
+  probation_end_iso TEXT,
+  bank_account_name TEXT,
+  bank_name TEXT,
+  bank_account_no_masked TEXT,
+  tax_id TEXT,
+  pension_rsa_pin TEXT,
+  next_of_kin_json TEXT,
+  base_salary_ngn INTEGER NOT NULL DEFAULT 0,
+  housing_allowance_ngn INTEGER NOT NULL DEFAULT 0,
+  transport_allowance_ngn INTEGER NOT NULL DEFAULT 0,
+  bonus_accrual_note TEXT,
+  minimum_qualification TEXT,
+  academic_qualification TEXT,
+  promotion_grade TEXT,
+  welfare_notes TEXT,
+  training_summary TEXT,
+  profile_extra_json TEXT,
+  updated_at_iso TEXT,
+  updated_by_user_id TEXT,
+  FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS hr_requests (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  branch_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT,
+  payload_json TEXT,
+  created_at_iso TEXT NOT NULL,
+  submitted_at_iso TEXT,
+  hr_reviewer_user_id TEXT,
+  hr_reviewer_note TEXT,
+  hr_reviewed_at_iso TEXT,
+  manager_reviewer_user_id TEXT,
+  manager_note TEXT,
+  manager_reviewed_at_iso TEXT,
+  FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_hr_requests_branch ON hr_requests(branch_id);
+CREATE INDEX IF NOT EXISTS idx_hr_requests_user ON hr_requests(user_id);
+
+CREATE TABLE IF NOT EXISTS hr_payroll_runs (
+  id TEXT PRIMARY KEY,
+  period_yyyymm TEXT NOT NULL,
+  status TEXT NOT NULL,
+  tax_percent REAL NOT NULL,
+  pension_percent REAL NOT NULL,
+  notes TEXT,
+  created_at_iso TEXT NOT NULL,
+  created_by_user_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS hr_payroll_lines (
+  run_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  gross_ngn INTEGER NOT NULL,
+  bonus_ngn INTEGER NOT NULL,
+  attendance_deduction_ngn INTEGER NOT NULL,
+  other_deduction_ngn INTEGER NOT NULL,
+  tax_ngn INTEGER NOT NULL,
+  pension_ngn INTEGER NOT NULL,
+  net_ngn INTEGER NOT NULL,
+  PRIMARY KEY (run_id, user_id),
+  FOREIGN KEY (run_id) REFERENCES hr_payroll_runs(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES app_users(id)
+);
+
+CREATE TABLE IF NOT EXISTS hr_payroll_line_loans (
+  run_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  hr_request_id TEXT NOT NULL,
+  period_yyyymm TEXT NOT NULL,
+  amount_ngn INTEGER NOT NULL,
+  loan_title TEXT,
+  computed_at_iso TEXT,
+  PRIMARY KEY (run_id, hr_request_id),
+  FOREIGN KEY (run_id) REFERENCES hr_payroll_runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS hr_attendance_uploads (
+  id TEXT PRIMARY KEY,
+  branch_id TEXT NOT NULL,
+  period_yyyymm TEXT NOT NULL,
+  uploaded_by_user_id TEXT,
+  notes TEXT,
+  rows_json TEXT NOT NULL,
+  created_at_iso TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS hr_employment_letters (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  letter_kind TEXT NOT NULL,
+  content_text TEXT NOT NULL,
+  issued_at_iso TEXT NOT NULL,
+  issued_by_user_id TEXT,
+  FOREIGN KEY (user_id) REFERENCES app_users(id)
+);
 `;

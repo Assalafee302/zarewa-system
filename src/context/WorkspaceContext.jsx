@@ -186,6 +186,15 @@ export function WorkspaceProvider({ children }) {
           return hasPermission('reports.view');
         case 'settings':
           return hasPermission('settings.view') || hasPermission('audit.view') || hasPermission('period.manage');
+        case 'hr':
+          return (
+            hasPermission('*') ||
+            hasPermission('settings.view') ||
+            hasPermission('finance.pay') ||
+            hasPermission('finance.view') ||
+            hasPermission('operations.manage') ||
+            hasPermission('audit.view')
+          );
         default:
           return true;
       }
