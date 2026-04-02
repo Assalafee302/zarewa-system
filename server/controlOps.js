@@ -158,13 +158,13 @@ export function unlockAccountingPeriod(db, periodKey, actor, reason = '') {
   return { ok: true };
 }
 
-function nextPaymentRequestId(_db) {
+function nextPaymentRequestId() {
   const year = new Date().getFullYear();
   const salt = Math.random().toString(36).slice(2, 8).toUpperCase();
   return `PREQ-${year}-${Date.now()}-${salt}`;
 }
 
-function nextRefundId(_db) {
+function nextRefundId() {
   const year = new Date().getFullYear();
   const salt = Math.random().toString(36).slice(2, 8).toUpperCase();
   return `RF-${year}-${Date.now()}-${salt}`;

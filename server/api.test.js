@@ -15,6 +15,20 @@ describe('Zarewa API', () => {
     return res;
   }
 
+  async function acceptAllRequiredPolicies(client, signatureName = 'Test User') {
+    const reqs = await client.get('/api/hr/policy-requirements');
+    expect(reqs.status).toBe(200);
+    for (const p of reqs.body.missing || []) {
+      const ack = await client.post('/api/hr/policy-acknowledgements').send({
+        policyKey: p.key,
+        policyVersion: p.version,
+        signatureName,
+        context: { channel: 'api.test' },
+      });
+      expect(ack.status).toBe(201);
+    }
+  }
+
   beforeEach(async () => {
     db = createDatabase(':memory:');
     app = createApp(db);
@@ -1605,7 +1619,8 @@ describe('Zarewa API', () => {
 
   it('HR: caps, payroll recompute, treasury CSV when locked', async () => {
     const fin = request.agent(app);
-    await loginAs(fin, 'finance.manager', 'Finance@123');
+    await loginAs(fin, 'hr.manager', 'HrManager@12345!');
+    await acceptAllRequiredPolicies(fin, 'HR Manager');
 
     const caps = await fin.get('/api/hr/caps');
     expect(caps.status).toBe(200);

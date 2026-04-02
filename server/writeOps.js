@@ -1536,7 +1536,7 @@ export function replaceTreasuryAccounts(db, accounts) {
   return { ok: true };
 }
 
-export function nextPoIdFromDb(_db) {
+export function nextPoIdFromDb() {
   const year = new Date().getFullYear();
   const salt = Math.random().toString(36).slice(2, 8).toUpperCase();
   return `PO-${year}-${Date.now()}-${salt}`;
