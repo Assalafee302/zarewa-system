@@ -1,12 +1,11 @@
 import { test, expect } from '@playwright/test';
-import { acceptRequiredHrPoliciesViaApi, signInViaUi } from './helpers/auth';
+import { signInViaUi } from './helpers/auth';
 
 test.describe.configure({ timeout: 60_000 });
 
 test.describe('Settings data catalog', () => {
   test('modal filter narrows tables and resets when reopening', async ({ page }) => {
     await signInViaUi(page, 'admin', 'Admin@123');
-    await acceptRequiredHrPoliciesViaApi(page);
     await page.goto('/settings/data');
     await expect(page).toHaveURL(/\/settings\/data/);
     await expect(page.getByText(/master lists/i).first()).toBeVisible({ timeout: 15_000 });
@@ -33,7 +32,6 @@ test.describe('Settings data catalog', () => {
 
   test('price book catalog opens from second group', async ({ page }) => {
     await signInViaUi(page, 'admin', 'Admin@123');
-    await acceptRequiredHrPoliciesViaApi(page);
     await page.goto('/settings/data');
     await expect(page).toHaveURL(/\/settings\/data/);
     const openBtn = page.getByRole('button', { name: /open catalog/i }).nth(1);

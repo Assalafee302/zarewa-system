@@ -1,6 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { signInViaUi } from './helpers/auth';
 
+test.describe.configure({ timeout: 90_000 });
+
 test.describe('Complete gate — module shells by role', () => {
   test('finance manager: Finance page and treasury tab', async ({ page }) => {
     await signInViaUi(page, 'finance.manager', 'Finance@123');

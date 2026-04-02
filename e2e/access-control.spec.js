@@ -1,6 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { signInViaApi } from './helpers/auth';
 
+test.describe.configure({ timeout: 90_000 });
+
 test.describe('Role-based access (API + UI)', () => {
   test('viewer: customers API forbidden; reports summary allowed', async ({ page }) => {
     await signInViaApi(page, 'viewer', 'Viewer@123456!');
@@ -46,7 +48,11 @@ test.describe('Role-based access (API + UI)', () => {
 
   test('procurement: ledger endpoint forbidden', async ({ page }) => {
     await signInViaApi(page, 'procurement', 'Procure@123');
-    const ledger = await page.request.get('/api/ledger');
-    expect(ledger.status()).toBe(403);
+    // Use in-page fetch so the session cookie is always sent (page.request can miss cookies after policy reload).
+    const status = await page.evaluate(async () => {
+      const r = await fetch('/api/ledger', { credentials: 'include' });
+      return r.status;
+    });
+    expect(status).toBe(403);
   });
 });

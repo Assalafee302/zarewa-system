@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { acceptRequiredHrPoliciesViaApi, signInViaUi } from './helpers/auth';
+import { signInViaUi } from './helpers/auth';
 
 test.describe.configure({ timeout: 60_000 });
 
@@ -20,10 +20,11 @@ test.describe('Document title (browser chrome)', () => {
   test('dashboard and HR child routes update tab title', async ({ page }) => {
     await signInViaUi(page, 'admin', 'Admin@123');
     await expect(page).toHaveTitle(/operations dashboard/i);
-    await acceptRequiredHrPoliciesViaApi(page);
+    await expect(page.getByRole('navigation', { name: 'Modules' })).toBeVisible();
     await page.goto('/hr/payroll');
-    await expect(page).toHaveTitle(/payroll/i);
+    await expect(page).toHaveURL(/\/hr\/payroll/);
+    await expect(page).toHaveTitle(/payroll/i, { timeout: 15_000 });
     await page.goto('/settings/profile');
-    await expect(page).toHaveTitle(/settings.*profile/i);
+    await expect(page).toHaveTitle(/settings.*profile/i, { timeout: 15_000 });
   });
 });

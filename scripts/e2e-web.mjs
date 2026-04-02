@@ -11,10 +11,12 @@ import path from 'node:path';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 process.chdir(root);
 
+const apiPort = process.env.E2E_API_PORT || process.env.PORT || '8788';
 const env = {
   ...process.env,
   ZAREWA_DB: process.env.ZAREWA_DB || 'data/playwright.sqlite',
-  PORT: process.env.E2E_API_PORT || process.env.PORT || '8788',
+  PORT: apiPort,
+  E2E_API_PORT: apiPort,
 };
 
 function waitHealth(url, maxMs) {
@@ -37,21 +39,22 @@ function waitHealth(url, maxMs) {
   });
 }
 
-const apiPort = String(env.PORT || '8788');
+const apiPortStr = String(env.PORT || '8788');
+// Do not inherit stdin: on Windows a closed pipe can end the child while the suite still runs.
 const api = spawn(process.execPath, ['server/playwrightServer.js'], {
   cwd: root,
   env,
-  stdio: 'inherit',
+  stdio: ['ignore', 'inherit', 'inherit'],
 });
 
-await waitHealth(`http://127.0.0.1:${apiPort}/api/health`, 120_000);
+await waitHealth(`http://127.0.0.1:${apiPortStr}/api/health`, 120_000);
 
 const viteCli = path.join(root, 'node_modules', 'vite', 'bin', 'vite.js');
 const uiPort = String(process.env.E2E_UI_PORT || '5180');
 const vite = spawn(process.execPath, [viteCli, '--host', '127.0.0.1', '--port', uiPort], {
   cwd: root,
   env: { ...env, NODE_ENV: 'development' },
-  stdio: 'inherit',
+  stdio: ['ignore', 'inherit', 'inherit'],
 });
 
 function shutdown() {
