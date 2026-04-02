@@ -67,8 +67,20 @@ export function buildScenario(n) {
   let payFraction = n % 5 === 0 ? 0.55 : n % 9 === 0 ? 0.8 : 1;
   const doRefund = n % 8 === 0;
   if (doRefund) payFraction = 1;
+  const doRefundRejectOnly = n % 23 === 0 && !doRefund;
+  if (doRefundRejectOnly) payFraction = 1;
   const poSupplierPay = n % 6 === 0;
   const day = 1 + (n % 27);
+  /** Multiple rows on the cutting list (different lengths, same total meters when possible). */
+  const multiLengthCut = n % 3 === 0;
+  /** Drive conversion-preview alerts: normal OK, high/low trigger manager review. */
+  let conversionStress = 'normal';
+  if (n % 17 === 0) conversionStress = 'high';
+  else if (n % 19 === 0) conversionStress = 'low';
+  /** Partial pay: post a customer advance first, then receipt for the remainder (same quotation). */
+  const advanceThenReceipt = payFraction < 1 && n % 6 === 2;
+  const includeAccessories = n % 4 === 0;
+  const coilRequestFlow = n % 5 === 0;
 
   return {
     index: n,
@@ -84,8 +96,14 @@ export function buildScenario(n) {
     coilMode,
     payFraction,
     doRefund,
+    doRefundRejectOnly,
     poSupplierPay,
     supplierLabel: `ST50 ${slug} Steel & Coils`,
+    multiLengthCut,
+    conversionStress,
+    advanceThenReceipt,
+    includeAccessories,
+    coilRequestFlow,
   };
 }
 

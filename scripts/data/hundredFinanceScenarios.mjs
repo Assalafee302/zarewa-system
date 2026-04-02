@@ -68,7 +68,16 @@ const PROJECTS = [
   'Logistics bay canopy',
 ];
  
-const EXPENSE_CATS = ['Diesel', 'Maintenance', 'Security', 'Haulage', 'Repairs', 'Office', 'Internet'];
+/** Must match `shared/expenseCategories.js` — API rejects free-text categories. */
+const EXPENSE_CATS = [
+  'Operational — rent & utilities',
+  'Maintenance — plant & equipment',
+  'Logistics & haulage',
+  'Marketing & business development',
+  'COGS — consumables & supplies',
+  'Other — misc operating',
+  'Bank & finance charges',
+];
  
 /** @param {number} n 0..99 */
 export function buildScenario(n) {

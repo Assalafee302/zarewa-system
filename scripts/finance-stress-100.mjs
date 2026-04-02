@@ -309,7 +309,7 @@ async function runScenario(session, scenario, telemetry) {
     // Step 4: refund request/approve/pay (treasury outflow)
     if (scenario.doRefund && row.amounts.refundNgn > 0 && ids.quotationId) {
       const refundID = `RF-${RUN_KEY}-${slug}`;
-      const rf = await call('refunds.create', '/api/refunds', {
+      const rf = await call('refunds.request', '/api/refunds', {
         method: 'POST',
         body: {
           customerID,
@@ -500,7 +500,7 @@ async function rampPhase(session, telemetry, { targets }) {
         expenseType: `Ramp expense step ${i}`,
         amountNgn: scaled(2500 + i * 200),
         date: '2026-04-02',
-        category: 'Office',
+        category: 'Other — misc operating',
         paymentMethod: 'Transfer',
         treasuryAccountId: a0.id,
         reference: `FIN100-RAMP-${RUN_KEY}-${i}`,

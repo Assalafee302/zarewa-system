@@ -19,6 +19,12 @@ coverage
 playwright-report
 test-results
 playwright/.cache
+test_output.txt
+
+# Generated stress / export reports (keep *.mjs utilities tracked)
+scripts/output/*.json
+scripts/output/*.csv
+scripts/output/*.tsv
 
 # Editor directories and files
 .vscode/*
