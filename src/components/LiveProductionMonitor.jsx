@@ -253,14 +253,6 @@ export function LiveProductionMonitor({
     });
   }, [draftAllocations, selectedJob?.jobID, selectedJob?.status]);
 
-  const conversionPreviewKey = useMemo(() => {
-    if (!canRunConversionPreview || !selectedJob?.jobID) return '';
-    return JSON.stringify({
-      job: selectedJob.jobID,
-      lines: draftAllocations.map((row) => completionLineFromDraft(row)),
-    });
-  }, [canRunConversionPreview, draftAllocations, selectedJob]);
-
   const conversionPreviewTimerRef = useRef(null);
   const conversionPreviewSeqRef = useRef(0);
   const [conversionPreview, setConversionPreview] = useState(null);
@@ -302,6 +294,74 @@ export function LiveProductionMonitor({
     setSignoffRemark('');
   }, [selectedJob?.jobID]);
 
+  const quotedAccessoryLines = useMemo(() => {
+    const ref = selectedJob?.quotationRef;
+    if (!ref || !Array.isArray(ws?.snapshot?.quotations)) return [];
+    const q = ws.snapshot.quotations.find((x) => x.id === ref);
+    const acc = q?.quotationLines?.accessories;
+    if (!Array.isArray(acc)) return [];
+    return acc
+      .filter((r) => {
+        const n = String(r?.name ?? '').trim();
+        const qn = Number(String(r?.qty ?? '').replace(/,/g, '')) || 0;
+        return n && qn > 0;
+      })
+      .map((r) => ({
+        quoteLineId: String(r.id ?? '').trim(),
+        name: String(r.name ?? '').trim(),
+        ordered: Number(String(r.qty ?? '').replace(/,/g, '')) || 0,
+      }));
+  }, [selectedJob?.quotationRef, ws?.snapshot?.quotations]);
+
+  const [accessoryCompletionDraft, setAccessoryCompletionDraft] = useState([]);
+
+  useEffect(() => {
+    const ref = selectedJob?.quotationRef;
+    const jobId = selectedJob?.jobID;
+    if (!ref || !jobId || !quotedAccessoryLines.length) {
+      setAccessoryCompletionDraft([]);
+      return;
+    }
+    const usage = (ws?.snapshot?.productionJobAccessoryUsage || []).filter((u) => u.quotationRef === ref);
+    const next = quotedAccessoryLines.map((line) => {
+      const stableKey = line.quoteLineId || `name:${line.name}`;
+      let prior = 0;
+      for (const u of usage) {
+        if (u.jobID === jobId) continue;
+        if (String(u.quoteLineId || '') === stableKey) prior += Number(u.suppliedQty) || 0;
+      }
+      const remaining = Math.max(0, line.ordered - prior);
+      return {
+        key: stableKey,
+        quoteLineId: line.quoteLineId,
+        name: line.name,
+        ordered: line.ordered,
+        priorSupplied: prior,
+        suppliedThisJob: remaining,
+      };
+    });
+    setAccessoryCompletionDraft(next);
+  }, [selectedJob?.jobID, selectedJob?.quotationRef, quotedAccessoryLines, ws?.snapshot?.productionJobAccessoryUsage]);
+
+  const accessoriesSuppliedForApi = useMemo(
+    () =>
+      accessoryCompletionDraft.map((r) => ({
+        quoteLineId: r.quoteLineId,
+        name: r.name,
+        suppliedQty: Number(String(r.suppliedThisJob).replace(/,/g, '')) || 0,
+      })),
+    [accessoryCompletionDraft]
+  );
+
+  const conversionPreviewKey = useMemo(() => {
+    if (!canRunConversionPreview || !selectedJob?.jobID) return '';
+    return JSON.stringify({
+      job: selectedJob.jobID,
+      lines: draftAllocations.map((row) => completionLineFromDraft(row)),
+      accessoriesSupplied: accessoriesSuppliedForApi,
+    });
+  }, [canRunConversionPreview, draftAllocations, selectedJob, accessoriesSuppliedForApi]);
+
   useEffect(() => {
     if (conversionPreviewTimerRef.current) {
       clearTimeout(conversionPreviewTimerRef.current);
@@ -324,7 +384,10 @@ export function LiveProductionMonitor({
         const previewPath = `/api/production-jobs/${encodeURIComponent(parsed.job)}/conversion-preview`;
         const { ok, data } = await apiFetch(previewPath, {
           method: 'POST',
-          body: JSON.stringify({ allocations: parsed.lines }),
+          body: JSON.stringify({
+            allocations: parsed.lines,
+            accessoriesSupplied: parsed.accessoriesSupplied || [],
+          }),
         });
         if (seq !== conversionPreviewSeqRef.current) return;
         setConversionPreviewLoading(false);
@@ -467,6 +530,7 @@ export function LiveProductionMonitor({
   const buildCompleteBody = () => ({
     completedAtISO: new Date().toISOString().slice(0, 10),
     allocations: draftAllocations.map((row) => completionLineFromDraft(row)),
+    accessoriesSupplied: accessoriesSuppliedForApi,
   });
 
   const persist = async (type) => {
@@ -862,6 +926,82 @@ export function LiveProductionMonitor({
               <p className="mt-0.5 text-[9px] text-slate-500">{formatKg(recordedConsumedKg)} consumed so far</p>
             </div>
           </div>
+
+          {canCaptureRun && accessoryCompletionDraft.length > 0 ? (
+            <div className="rounded-xl border border-teal-200/80 bg-teal-50/40 p-3 sm:p-4 space-y-2">
+              <p className="text-[9px] font-black uppercase tracking-widest text-[#134e4a]">
+                Accessories issued (this completion)
+              </p>
+              <p className="text-[10px] text-slate-600 leading-snug">
+                Ordered on the quote vs already posted from other completed jobs. Adjust &ldquo;This job&rdquo; to match
+                what leaves stock; shortfalls can be refunded under Accessory shortfall.
+              </p>
+              <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+                <table className="w-full min-w-[520px] text-left text-[10px]">
+                  <thead className="border-b border-slate-200 bg-slate-50 text-[8px] font-black uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="px-2 py-2">Item</th>
+                      <th className="px-2 py-2 text-right">Ordered</th>
+                      <th className="px-2 py-2 text-right">Prior jobs</th>
+                      <th className="px-2 py-2 text-right">Remaining</th>
+                      <th className="px-2 py-2 text-right">This job</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {accessoryCompletionDraft.map((row) => {
+                      const remaining = Math.max(0, row.ordered - row.priorSupplied);
+                      return (
+                        <tr key={row.key} className="border-b border-slate-100 last:border-0">
+                          <td className="px-2 py-2 font-semibold text-slate-800">{row.name}</td>
+                          <td className="px-2 py-2 text-right tabular-nums text-slate-600">{row.ordered}</td>
+                          <td className="px-2 py-2 text-right tabular-nums text-slate-600">
+                            {row.priorSupplied}
+                          </td>
+                          <td className="px-2 py-2 text-right tabular-nums text-slate-600">{remaining}</td>
+                          <td className="px-2 py-2 text-right">
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              value={row.suppliedThisJob}
+                              onChange={(e) =>
+                                setAccessoryCompletionDraft((prev) =>
+                                  prev.map((r) =>
+                                    r.key === row.key ? { ...r, suppliedThisJob: e.target.value } : r
+                                  )
+                                )
+                              }
+                              className="w-20 rounded-md border border-slate-200 bg-white px-2 py-1 text-right font-mono text-[10px] font-bold text-[#134e4a] outline-none focus:ring-2 focus:ring-teal-500/20"
+                              aria-label={`Supplied this job for ${row.name}`}
+                            />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+
+          {readOnly &&
+          selectedJob?.status === 'Completed' &&
+          (ws?.snapshot?.productionJobAccessoryUsage || []).some((u) => u.jobID === selectedJob.jobID) ? (
+            <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-3 sm:p-4 space-y-2">
+              <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">Accessories posted</p>
+              <ul className="space-y-1 text-[10px] text-slate-700">
+                {(ws?.snapshot?.productionJobAccessoryUsage || [])
+                  .filter((u) => u.jobID === selectedJob.jobID)
+                  .map((u) => (
+                    <li key={u.id} className="flex justify-between gap-2">
+                      <span className="font-semibold">{u.name}</span>
+                      <span className="font-mono tabular-nums">
+                        supplied {u.suppliedQty} / ordered {u.orderedQty}
+                      </span>
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          ) : null}
 
           {selectedJob.status === 'Completed' && selectedJob.managerReviewSignedAtISO ? (
             <div className="rounded-2xl border border-emerald-200 bg-emerald-50/90 px-4 py-3 text-sm text-emerald-950">

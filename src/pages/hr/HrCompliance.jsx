@@ -80,7 +80,11 @@ export default function HrCompliance() {
   if (!canAccess) {
     return (
       <MainPanel>
-        <PageHeader title="Compliance & audits" subtitle="Handbook sign-off and who changed what in HR" />
+        <PageHeader
+          eyebrow="Human resources"
+          title="Compliance & audits"
+          subtitle="Handbook sign-off and who changed what in HR"
+        />
         <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
           You do not have compliance access for this module.
         </div>
@@ -91,6 +95,7 @@ export default function HrCompliance() {
   return (
     <MainPanel>
       <PageHeader
+        eyebrow="Human resources"
         title="Compliance & audits"
         subtitle="Who signed the handbook, recent HR audit events, and (for admins) go-live checklist status."
       />

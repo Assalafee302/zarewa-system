@@ -22,6 +22,8 @@ import { formatNgn } from '../Data/mockData';
 import { apiFetch } from '../lib/apiBase';
 import { treasuryAccountsFromSnapshot } from '../lib/treasuryAccountsStore';
 import { ReceiptPrintQuick, ReceiptPrintFull } from './receipt/ReceiptPrintViews';
+import QuotationPrintView, { normalizeQuotationLinesForPrint } from './QuotationPrintView';
+import { ZAREWA_COMPANY_ACCOUNT_NAME } from '../Data/companyQuotation';
 
 function newLineId() {
   return `pl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -77,12 +79,21 @@ const ReceiptModal = ({
 
   const defaultAccountId = treasuryList[0]?.id ?? '';
 
+  const [qSearch, setQSearch] = useState('');
+  const [showQSearch, setShowQSearch] = useState(false);
+
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!isOpen) return;
     const le = editData?._ledgerEntry;
     const isLedgerRow = editData?.source === 'ledger' && le;
     const isRc = editData?.id && String(editData.id).startsWith('RC-');
+    /** New receipt opened from a quotation row: object has `id` (QT-…) but not `quotationRef`. */
+    const initialQuotationRef =
+      editData?.quotationRef ??
+      (!isRc && !isLedgerRow && editData?.id && !String(editData.id).startsWith('RC-')
+        ? String(editData.id)
+        : '');
     const vd = isRc
       ? editData.dateISO ?? new Date().toISOString().slice(0, 10)
       : isLedgerRow
@@ -90,8 +101,10 @@ const ReceiptModal = ({
         : new Date().toISOString().slice(0, 10);
     setVoucherDate(vd);
     setRemarks(isLedgerRow ? (le.bankReference || le.note || '') : '');
-    setQuotationRef(editData?.quotationRef ?? '');
+    setQuotationRef(initialQuotationRef);
+    setQSearch(initialQuotationRef);
     setShowPrint(false);
+    setShowQSearch(false);
 
     if (isRc) {
       setPaymentLines([
@@ -135,6 +148,17 @@ const ReceiptModal = ({
     () => quotations.find((q) => q.id === quotationRef) ?? null,
     [quotations, quotationRef]
   );
+
+  const filteredQSearch = useMemo(() => {
+    if (!qSearch.trim()) return quotations.slice(0, 10);
+    const s = qSearch.toLowerCase();
+    return quotations.filter(
+      (qt) =>
+        qt.id.toLowerCase().includes(s) ||
+        qt.customer.toLowerCase().includes(s) ||
+        (qt.customerID || '').toLowerCase().includes(s)
+    ).slice(0, 15);
+  }, [quotations, qSearch]);
 
   const customerID = selectedQuotation?.customerID ?? '';
   const customerName = useMemo(() => {
@@ -304,12 +328,30 @@ const ReceiptModal = ({
 
   const receiptIdPreview = isEdit ? editData.id : `RC-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-NEW`;
 
+  const payAccountForOfficial = useMemo(() => {
+    const acc = treasuryList.find((a) => a.accNo && String(a.accNo).trim() && a.accNo !== 'N/A');
+    if (!acc) return null;
+    return {
+      bankName: acc.bankName?.trim() || acc.name,
+      accNo: acc.accNo,
+      accountName: ZAREWA_COMPANY_ACCOUNT_NAME,
+    };
+  }, [treasuryList]);
+
+  const officialReceiptLines = useMemo(
+    () => normalizeQuotationLinesForPrint(selectedQuotation?.quotationLines),
+    [selectedQuotation?.quotationLines]
+  );
+
+  const receiptPaidPreviewNgn = displayPaid + lineTotalNgn;
+  const receiptBalancePreviewNgn = Math.max(0, displayTotal - receiptPaidPreviewNgn);
+
   const openPrint = (kind) => {
     if (!quotationRef) {
       showToast('Select a quotation before printing.', { variant: 'error' });
       return;
     }
-    if (lineTotalNgn <= 0) {
+    if (kind !== 'official' && lineTotalNgn <= 0) {
       showToast('Enter payment amounts to print.', { variant: 'error' });
       return;
     }
@@ -391,20 +433,72 @@ const ReceiptModal = ({
                   />
                 </div>
                 <div className="relative sm:col-span-2">
-                  <label className={label}>Link quotation (required)</label>
-                  <select
-                    value={quotationRef}
-                    onChange={(e) => setQuotationRef(e.target.value)}
-                    className={`${field} appearance-none cursor-pointer pr-8`}
-                  >
-                    <option value="">Select quotation…</option>
-                    {quotations.map((qt) => (
-                      <option key={qt.id} value={qt.id}>
-                        {qt.id} · {qt.customer} · {formatNgn(qt.totalNgn)} · {qt.paymentStatus}
-                      </option>
-                    ))}
-                  </select>
-                  <ChevronDown size={14} className="absolute right-3 bottom-2.5 text-slate-300 pointer-events-none" />
+                  <label className={label}>Link quotation (search ID, customer, etc.)</label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={qSearch}
+                      onChange={(e) => {
+                        setQSearch(e.target.value);
+                        setShowQSearch(true);
+                      }}
+                      onFocus={() => setShowQSearch(true)}
+                      placeholder="Type to search quotations…"
+                      className={`${field} pr-10`}
+                    />
+                    {qSearch && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setQSearch('');
+                          setQuotationRef('');
+                        }}
+                        className="absolute right-8 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600"
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
+                    <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" />
+                  </div>
+                  {showQSearch && (
+                    <div className="absolute z-10 left-0 right-0 mt-1 max-h-[220px] overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-xl custom-scrollbar p-1">
+                      {filteredQSearch.length === 0 ? (
+                        <div className="p-3 text-center text-[10px] font-semibold text-slate-400 uppercase">
+                          No quotations found
+                        </div>
+                      ) : (
+                        filteredQSearch.map((qt) => (
+                          <button
+                            key={qt.id}
+                            type="button"
+                            onClick={() => {
+                              setQuotationRef(qt.id);
+                              setQSearch(qt.id);
+                              setShowQSearch(false);
+                            }}
+                            className={`flex w-full flex-col p-2.5 text-left transition-colors rounded-md border border-transparent hover:border-emerald-100 hover:bg-emerald-50 ${
+                              quotationRef === qt.id ? 'bg-emerald-50 border-emerald-100' : ''
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-xs font-bold text-[#134e4a]">{qt.id}</span>
+                              <span className="text-[10px] font-bold text-emerald-700">{formatNgn(qt.totalNgn)}</span>
+                            </div>
+                            <div className="flex items-center justify-between gap-2 mt-0.5">
+                              <span className="text-[11px] font-semibold text-slate-800 truncate">{qt.customer}</span>
+                              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-tighter shrink-0">{qt.paymentStatus}</span>
+                            </div>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
+                  {showQSearch && (
+                    <div
+                      className="fixed inset-0 z-0"
+                      onClick={() => setShowQSearch(false)}
+                    />
+                  )}
                 </div>
                 {selectedQuotation ? (
                   <div className="sm:col-span-2 rounded-lg border border-emerald-100 bg-emerald-50/40 p-3 text-[10px] text-slate-700 leading-relaxed">
@@ -598,6 +692,13 @@ const ReceiptModal = ({
             >
               <Printer size={14} className="inline mr-1" /> Full (A5 landscape)
             </button>
+            <button
+              type="button"
+              onClick={() => openPrint('official')}
+              className="bg-white text-emerald-900 px-3 py-2.5 rounded-lg text-[9px] font-semibold uppercase tracking-wide shadow-sm ring-1 ring-white/40"
+            >
+              <Printer size={14} className="inline mr-1" /> Company A4
+            </button>
           </div>
         </div>
       </form>
@@ -614,10 +715,40 @@ const ReceiptModal = ({
             />
             <div className="no-print fixed inset-0 z-[10001] overflow-y-auto p-4 sm:p-8 pointer-events-none">
               <div
-                className={`pointer-events-auto mx-auto pb-16 ${printKind === 'quick' ? 'max-w-[88mm]' : 'max-w-[min(100%,220mm)]'}`}
+                className={`pointer-events-auto mx-auto pb-16 ${
+                  printKind === 'quick'
+                    ? 'max-w-[88mm]'
+                    : printKind === 'official'
+                      ? 'max-w-[210mm]'
+                      : 'max-w-[min(100%,220mm)]'
+                }`}
               >
-                <div className="receipt-print-root overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl print:rounded-none print:border-0 print:shadow-none">
-                  {printKind === 'quick' ? (
+                <div
+                  className={`overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl print:rounded-none print:border-0 print:shadow-none ${
+                    printKind === 'official' ? 'quotation-print-root' : 'receipt-print-root'
+                  }`}
+                >
+                  {printKind === 'official' ? (
+                    <QuotationPrintView
+                      documentKind="receipt"
+                      quotationId={selectedQuotation?.id ?? '—'}
+                      receiptRef={receiptIdPreview}
+                      linkedQuotationId={quotationRef || ''}
+                      dateStr={formatDisplayDate(voucherDate)}
+                      customerName={customerName || '—'}
+                      customerPhone={customerPhone}
+                      terms="100%"
+                      gauge={selectedQuotation?.materialGauge || '—'}
+                      design={selectedQuotation?.materialDesign || '—'}
+                      color={selectedQuotation?.materialColor || '—'}
+                      payAccount={payAccountForOfficial}
+                      lines={officialReceiptLines}
+                      salesperson={handledByLabel}
+                      projectName={selectedQuotation?.projectName?.trim() || '—'}
+                      amountPaidNgn={receiptPaidPreviewNgn}
+                      balanceDueNgn={receiptBalancePreviewNgn}
+                    />
+                  ) : printKind === 'quick' ? (
                     <ReceiptPrintQuick
                       receiptId={receiptIdPreview}
                       dateStr={formatDisplayDate(voucherDate)}

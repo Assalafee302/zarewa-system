@@ -1,12 +1,18 @@
 import React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 
 /**
  * Full-viewport modal shell rendered via Radix Portal.
  * Handles accessible focus-trapping, escape-to-close, and Framer Motion layout transitions.
  */
 export function ModalFrame({ isOpen, onClose, children, title = 'Dialog', description }) {
+  const reduceMotion = useReducedMotion();
+  const overlayTransition = reduceMotion ? { duration: 0 } : { duration: 0.3 };
+  const contentTransition = reduceMotion
+    ? { duration: 0 }
+    : { type: 'spring', bounce: 0, duration: 0.45 };
+
   return (
     <DialogPrimitive.Root open={isOpen} onOpenChange={(open) => { if (!open) onClose?.(); }}>
       <AnimatePresence>
@@ -17,7 +23,7 @@ export function ModalFrame({ isOpen, onClose, children, title = 'Dialog', descri
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                transition={{ duration: 0.3 }}
+                transition={overlayTransition}
                 className="fixed inset-0 z-[1060] bg-[#0f172a]/60 backdrop-blur-md"
               />
             </DialogPrimitive.Overlay>
@@ -28,10 +34,10 @@ export function ModalFrame({ isOpen, onClose, children, title = 'Dialog', descri
                   {description ?? 'Modal dialog content.'}
                 </DialogPrimitive.Description>
                 <motion.div
-                  initial={{ opacity: 0, scale: 0.96, y: 20 }}
+                  initial={reduceMotion ? false : { opacity: 0, scale: 0.96, y: 20 }}
                   animate={{ opacity: 1, scale: 1, y: 0 }}
-                  exit={{ opacity: 0, scale: 0.96, y: 10 }}
-                  transition={{ type: 'spring', bounce: 0, duration: 0.45 }}
+                  exit={reduceMotion ? undefined : { opacity: 0, scale: 0.96, y: 10 }}
+                  transition={contentTransition}
                   className="relative z-10 w-full max-w-[min(100%,1200px)] flex justify-center items-start min-h-0 outline-none rounded-[32px] shadow-[0_28px_80px_-36px_rgba(15,23,42,0.45)]"
                 >
                   {children}

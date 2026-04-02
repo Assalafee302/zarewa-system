@@ -1,4 +1,10 @@
 import { amountDueOnQuotationFromEntries } from '../src/lib/customerLedgerCore.js';
+import { isAllowedExpenseCategory } from '../shared/expenseCategories.js';
+import {
+  tryPostCustomerAdvanceReversalGl,
+  tryPostCustomerReceiptReversalGl,
+  tryPostGrnInventoryJournal,
+} from './glOps.js';
 import { normalizeCustomerEmailKey, normalizeCustomerPhoneKey } from '../shared/customerPhoneKey.js';
 import { actorName } from './auth.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
@@ -62,6 +68,24 @@ export function insertLedgerRows(db, planRows, branchId = null) {
   const run = db.transaction((rows) => {
     const saved = [];
     for (const r of rows) {
+      if (r.quotationRef) {
+        const q = db.prepare(`SELECT manager_cleared_at_iso, manager_flagged_at_iso FROM quotations WHERE id = ?`).get(r.quotationRef);
+        if (q) {
+          if (q.manager_cleared_at_iso) {
+             throw new Error(`Quotation ${r.quotationRef} has been cleared by manager and is closed for further payments.`);
+          }
+          if (q.manager_flagged_at_iso) {
+             throw new Error(`Quotation ${r.quotationRef} is flagged by manager for review and is closed for further payments.`);
+          }
+        }
+        
+        // Also check for refunds
+        const ref = db.prepare(`SELECT refund_id FROM customer_refunds WHERE quotation_ref = ? AND status IN ('Pending', 'Approved')`).get(r.quotationRef);
+        if (ref) {
+          throw new Error(`Quotation ${r.quotationRef} has an active refund request (${ref.refund_id}) and is closed for further payments.`);
+        }
+      }
+
       const id = nextLedgerId();
       const atIso = r.atISO || new Date().toISOString();
       const bid = r.branchId != null && String(r.branchId).trim() ? String(r.branchId).trim() : branchId;
@@ -108,8 +132,8 @@ function appendMovementTx(db, entry) {
   const id = nextMvId();
   const atISO = new Date().toISOString().slice(0, 19);
   db.prepare(
-    `INSERT INTO stock_movements (id, at_iso, type, ref, product_id, qty, detail, date_iso, unit_price_ngn)
-     VALUES (?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO stock_movements (id, at_iso, type, ref, product_id, qty, detail, date_iso, unit_price_ngn, value_ngn)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`
   ).run(
     id,
     atISO,
@@ -119,7 +143,8 @@ function appendMovementTx(db, entry) {
     entry.qty ?? null,
     entry.detail ?? null,
     entry.dateISO ?? atISO.slice(0, 10),
-    entry.unitPriceNgn ?? null
+    entry.unitPriceNgn ?? null,
+    entry.valueNgn ?? null
   );
   return { id, atISO, ...entry };
 }
@@ -914,6 +939,22 @@ function findPoLine(poRows, entry) {
   return poRows.find((l) => l.product_id === entry.productID);
 }
 
+/** PO line pricing → landed NGN and per-kg unit cost for a GRN line. */
+export function coilLineReceiptEconomics(line, qtyReceived, effectiveWeightKg, supplierExpectedMeters) {
+  const upkg = Math.round(Number(line.unit_price_per_kg_ngn ?? line.unitPricePerKgNgn) || 0);
+  const up = Math.round(Number(line.unit_price_ngn ?? line.unitPriceNgn) || 0);
+  const w = Number(effectiveWeightKg) || 0;
+  const q = Number(qtyReceived) || 0;
+  const meters = Number(supplierExpectedMeters);
+  let landed = 0;
+  if (upkg > 0 && w > 0) landed = Math.round(w * upkg);
+  else if (up > 0 && Number.isFinite(meters) && meters > 0) landed = Math.round(meters * up);
+  else if (up > 0 && q > 0) landed = Math.round(q * up);
+  const baseKg = w > 0 ? w : q > 0 ? q : 0;
+  const unitCost = landed > 0 && baseKg > 0 ? Math.round(landed / baseKg) : null;
+  return { landedCostNgn: landed > 0 ? landed : null, unitCostNgnPerKg: unitCost };
+}
+
 function conversionRelDiff(a, b) {
   const x = Number(a);
   const y = Number(b);
@@ -999,13 +1040,16 @@ export function confirmGrn(
 
   const coilBranch =
     String(po.branch_id || '').trim() || String(branchFallback || DEFAULT_BRANCH_ID).trim();
+  const grnDateISO = new Date().toISOString().slice(0, 10);
+  const glUserId = opts?.actor?.id != null ? String(opts.actor.id) : null;
 
   const insLot = db.prepare(`
     INSERT INTO coil_lots (
       coil_no, product_id, line_key, qty_received, weight_kg, colour, gauge_label, material_type_name,
       supplier_expected_meters, supplier_conversion_kg_per_m, qty_remaining, qty_reserved, current_weight_kg,
-      current_status, location, po_id, supplier_id, supplier_name, received_at_iso, branch_id
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      current_status, location, po_id, supplier_id, supplier_name, received_at_iso, branch_id,
+      landed_cost_ngn, unit_cost_ngn_per_kg
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `);
   const updLine = db.prepare(
     `UPDATE purchase_order_lines SET qty_received = qty_received + ? WHERE po_id = ? AND line_key = ?`
@@ -1036,6 +1080,12 @@ export function confirmGrn(
         e.supplierConversionKgPerM != null && e.supplierConversionKgPerM !== ''
           ? Number(e.supplierConversionKgPerM)
           : line.conversion_kg_per_m;
+      const econ = coilLineReceiptEconomics(
+        line,
+        qty,
+        effectiveWeightKg,
+        supplierExpectedMeters != null && !Number.isNaN(supplierExpectedMeters) ? supplierExpectedMeters : null
+      );
       insLot.run(
         coilNo,
         e.productID,
@@ -1055,8 +1105,10 @@ export function confirmGrn(
         poID,
         sid,
         sname,
-        new Date().toISOString().slice(0, 10),
-        coilBranch
+        grnDateISO,
+        coilBranch,
+        econ.landedCostNgn,
+        econ.unitCostNgnPerKg
       );
       updLine.run(qty, poID, line.line_key);
       appendMovementTx(db, {
@@ -1065,7 +1117,20 @@ export function confirmGrn(
         productID: e.productID,
         qty,
         detail: `${coilNo} · ${e.location || 'main store'}`,
+        dateISO: grnDateISO,
+        unitPriceNgn: econ.unitCostNgnPerKg ?? null,
+        valueNgn: econ.landedCostNgn ?? null,
       });
+      const glR = tryPostGrnInventoryJournal(db, {
+        entryDateISO: grnDateISO,
+        coilNo,
+        landedCostNgn: econ.landedCostNgn,
+        branchId: coilBranch,
+        createdByUserId: glUserId,
+      });
+      if (econ.landedCostNgn && glR && glR.ok === false) {
+        throw new Error(glR.error || 'Could not post GRN to general ledger.');
+      }
     }
 
     const refreshed = db.prepare(`SELECT * FROM purchase_order_lines WHERE po_id = ?`).all(poID);
@@ -1258,14 +1323,21 @@ export function splitCoilLot(db, payload = {}, opts = {}) {
 
   const parentNewRem = qtyRem - splitKg;
   const originNote = [note, `split from ${parentCoilNo}`].filter(Boolean).join(' · ').slice(0, 2000);
+  const parentLanded = Math.round(Number(parent.landed_cost_ngn) || 0);
+  const parentUnit = Math.round(Number(parent.unit_cost_ngn_per_kg) || 0);
+  const volBefore = qtyRem + splitKg;
+  let childLanded = null;
+  let parentNewLanded = parentLanded;
+  if (parentLanded > 0 && volBefore > 0) {
+    childLanded = Math.round((splitKg / volBefore) * parentLanded);
+    parentNewLanded = Math.max(0, parentLanded - childLanded);
+  }
 
   try {
     db.transaction(() => {
-      db.prepare(`UPDATE coil_lots SET qty_remaining = ?, current_weight_kg = ? WHERE coil_no = ?`).run(
-        parentNewRem,
-        parentNewRem,
-        parentCoilNo
-      );
+      db.prepare(
+        `UPDATE coil_lots SET qty_remaining = ?, current_weight_kg = ?, landed_cost_ngn = ? WHERE coil_no = ?`
+      ).run(parentNewRem, parentNewRem, parentNewLanded, parentCoilNo);
       finalizeCoilLotStateTx(db, parentCoilNo);
 
       db.prepare(
@@ -1273,8 +1345,8 @@ export function splitCoilLot(db, payload = {}, opts = {}) {
           coil_no, product_id, line_key, qty_received, weight_kg, colour, gauge_label, material_type_name,
           supplier_expected_meters, supplier_conversion_kg_per_m, qty_remaining, qty_reserved, current_weight_kg,
           current_status, location, po_id, supplier_id, supplier_name, received_at_iso, branch_id,
-          parent_coil_no, material_origin_note
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+          parent_coil_no, material_origin_note, landed_cost_ngn, unit_cost_ngn_per_kg
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       ).run(
         newCoilNo,
         parent.product_id,
@@ -1297,7 +1369,9 @@ export function splitCoilLot(db, payload = {}, opts = {}) {
         dateISO,
         parent.branch_id || DEFAULT_BRANCH_ID,
         parentCoilNo,
-        originNote || null
+        originNote || null,
+        childLanded,
+        parentUnit || null
       );
 
       appendMovementTx(db, {
@@ -1681,10 +1755,18 @@ export function replacePaymentRequests(db, list) {
   const ins = db.prepare(
     `INSERT INTO payment_requests (
       request_id, expense_id, amount_requested_ngn, request_date, approval_status, description,
-      approved_by, approved_at_iso, approval_note
-    ) VALUES (?,?,?,?,?,?,?,?,?)`
+      approved_by, approved_at_iso, approval_note,
+      paid_amount_ngn, paid_at_iso, paid_by, payment_note,
+      request_reference, line_items_json, attachment_name, attachment_mime, attachment_data_b64
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   );
   for (const p of list || []) {
+    const lineJson =
+      typeof p.lineItemsJson === 'string'
+        ? p.lineItemsJson
+        : Array.isArray(p.lineItems)
+          ? JSON.stringify(p.lineItems)
+          : '';
     ins.run(
       p.requestID,
       p.expenseID,
@@ -1694,7 +1776,16 @@ export function replacePaymentRequests(db, list) {
       p.description,
       p.approvedBy ?? '',
       p.approvedAtISO ?? '',
-      p.approvalNote ?? ''
+      p.approvalNote ?? '',
+      p.paidAmountNgn ?? 0,
+      p.paidAtISO ?? '',
+      p.paidBy ?? '',
+      p.paymentNote ?? '',
+      p.requestReference ?? '',
+      lineJson || null,
+      p.attachmentName ?? '',
+      p.attachmentMime ?? '',
+      p.attachmentDataB64 ?? ''
     );
   }
 }
@@ -1721,11 +1812,82 @@ export function replaceAccountsPayable(db, list) {
 export function replaceBankReconciliation(db, list) {
   db.prepare(`DELETE FROM bank_reconciliation_lines`).run();
   const ins = db.prepare(
-    `INSERT INTO bank_reconciliation_lines (id, bank_date_iso, description, amount_ngn, system_match, status) VALUES (?,?,?,?,?,?)`
+    `INSERT INTO bank_reconciliation_lines (id, bank_date_iso, description, amount_ngn, system_match, status, branch_id) VALUES (?,?,?,?,?,?,?)`
   );
   for (const b of list || []) {
-    ins.run(b.id, b.bankDateISO, b.description, b.amountNgn, b.systemMatch, b.status);
+    const bid = String(b.branchId ?? DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID;
+    ins.run(b.id, b.bankDateISO, b.description, b.amountNgn, b.systemMatch, b.status, bid);
   }
+}
+
+/**
+ * When status is Matched and system match starts with RC-, require a real sales receipt (same branch when both set).
+ * @param {import('better-sqlite3').Database} db
+ */
+function validateBankReconMatchedReceipt(db, systemMatch, lineBranchId) {
+  const raw = String(systemMatch ?? '').trim();
+  if (!raw) return { ok: true };
+  const token = String(raw.split(/\s+/)[0] || '')
+    .split('·')[0]
+    .trim();
+  if (!/^RC-/i.test(token)) return { ok: true };
+  const r = db.prepare(`SELECT id, branch_id FROM sales_receipts WHERE id = ?`).get(token);
+  if (!r) {
+    return {
+      ok: false,
+      error: `No sales receipt found for id "${token}". Use a valid receipt id or leave system match blank until identified.`,
+    };
+  }
+  const lb = String(lineBranchId || DEFAULT_BRANCH_ID).trim();
+  const rb = String(r.branch_id || '').trim();
+  if (lb && rb && rb !== lb) {
+    return { ok: false, error: `Receipt "${token}" belongs to another branch.` };
+  }
+  return { ok: true };
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {object} payload
+ * @param {string} [branchId]
+ */
+export function insertBankReconciliationLine(db, payload, branchId = DEFAULT_BRANCH_ID) {
+  const bankDateISO = String(payload.bankDateISO ?? '').trim();
+  const description = String(payload.description ?? '').trim();
+  const amountNgn = roundMoney(payload.amountNgn);
+  if (!bankDateISO || !/^\d{4}-\d{2}-\d{2}$/.test(bankDateISO)) {
+    return { ok: false, error: 'Valid bank date (YYYY-MM-DD) is required.' };
+  }
+  if (!description) return { ok: false, error: 'Bank description is required.' };
+  if (!Number.isFinite(amountNgn) || amountNgn === 0) {
+    return {
+      ok: false,
+      error:
+        'Amount must be a non-zero whole naira value (negative for bank debits/charges, positive for credits).',
+    };
+  }
+  const systemMatch = payload.systemMatch !== undefined ? String(payload.systemMatch ?? '').trim() : '';
+  let status = String(payload.status ?? 'Review').trim();
+  if (!['Matched', 'Review', 'Excluded'].includes(status)) status = 'Review';
+  const bid = String(branchId || DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID;
+  if (status === 'Matched') {
+    const v = validateBankReconMatchedReceipt(db, systemMatch, bid);
+    if (!v.ok) return v;
+  }
+  const id = `BR-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  db.prepare(
+    `INSERT INTO bank_reconciliation_lines (id, bank_date_iso, description, amount_ngn, system_match, status, branch_id) VALUES (?,?,?,?,?,?,?)`
+  ).run(id, bankDateISO, description, amountNgn, systemMatch || null, status, bid);
+  appendAuditLog(db, {
+    actor: payload.actor,
+    action: 'bank_reconciliation.create',
+    entityKind: 'bank_reconciliation_line',
+    entityId: id,
+    note: description.slice(0, 120),
+    status: 'success',
+    details: { bankDateISO, amountNgn, status, branchId: bid },
+  });
+  return { ok: true, id };
 }
 
 /** @param {import('better-sqlite3').Database} db */
@@ -1739,6 +1901,11 @@ export function updateBankReconciliationLine(db, lineId, payload, actor) {
   const status = payload.status !== undefined ? String(payload.status ?? '').trim() : row.status;
   if (!['Matched', 'Review', 'Excluded'].includes(status)) {
     return { ok: false, error: 'Status must be Matched, Review, or Excluded.' };
+  }
+  const lineBranchId = row.branch_id != null && String(row.branch_id).trim() ? row.branch_id : DEFAULT_BRANCH_ID;
+  if (status === 'Matched') {
+    const v = validateBankReconMatchedReceipt(db, systemMatch, lineBranchId);
+    if (!v.ok) return v;
   }
   db.prepare(
     `UPDATE bank_reconciliation_lines SET system_match = ?, status = ? WHERE id = ?`
@@ -1919,6 +2086,17 @@ export function reverseReceiptEntry(db, entryId, note = '', actor = null) {
       )[0];
       db.prepare(`UPDATE sales_receipts SET status = 'Reversed' WHERE id = ? OR ledger_entry_id = ?`).run(entryId, entryId);
       reverseTreasurySourceTx(db, 'LEDGER_RECEIPT', entryId, 'RECEIPT_REVERSAL_OUT', reversalNote, actor);
+      const glRev = tryPostCustomerReceiptReversalGl(db, {
+        originalReceiptLedgerId: entryId,
+        reversalLedgerId: reversal?.id,
+        amountNgn: target.amount_ngn,
+        entryDateISO: reversalDateISO,
+        branchId: target.branch_id || null,
+        createdByUserId: actor?.id ?? null,
+      });
+      if (!glRev.ok && !glRev.skipped) {
+        throw new Error(glRev.error || 'GL reversal failed for receipt.');
+      }
       appendAuditLog(db, {
         actor,
         action: 'ledger.reverse_receipt',
@@ -1975,6 +2153,17 @@ export function reverseAdvanceEntry(db, entryId, note = '', actor = null) {
       db.prepare(`DELETE FROM advance_in_events WHERE ledger_entry_id = ?`).run(entryId);
       if (target.type === 'ADVANCE_IN') {
         reverseTreasurySourceTx(db, 'LEDGER_ADVANCE', entryId, 'ADVANCE_REVERSAL_OUT', reversalNote, actor);
+      }
+      const glAdvRev = tryPostCustomerAdvanceReversalGl(db, {
+        originalAdvanceLedgerId: entryId,
+        reversalLedgerId: reversal?.id,
+        amountNgn: target.amount_ngn,
+        entryDateISO: reversalDateISO,
+        branchId: target.branch_id || null,
+        createdByUserId: actor?.id ?? null,
+      });
+      if (!glAdvRev.ok && !glAdvRev.skipped) {
+        throw new Error(glAdvRev.error || 'GL reversal failed for advance.');
       }
       appendAuditLog(db, {
         actor,
@@ -2507,6 +2696,9 @@ export function insertExpenseEntry(db, payload, branchId = DEFAULT_BRANCH_ID) {
   const category = String(payload.category ?? '').trim();
   const amountNgn = roundMoney(payload.amountNgn);
   if (!category) return { ok: false, error: 'Expense category is required.' };
+  if (!isAllowedExpenseCategory(category)) {
+    return { ok: false, error: 'Expense category must be chosen from the standard list.' };
+  }
   if (amountNgn <= 0) return { ok: false, error: 'Expense amount must be positive.' };
   try {
     assertPeriodOpen(db, payload.date || new Date().toISOString().slice(0, 10), 'Expense date');

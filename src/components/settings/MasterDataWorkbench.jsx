@@ -1,10 +1,11 @@
 import React, { useMemo, useState } from 'react';
-import { Pencil, Plus, Save, Trash2, X } from 'lucide-react';
+import { LayoutGrid, Pencil, Plus, Save, Search, Trash2, X } from 'lucide-react';
+import { ModalFrame } from '../layout';
 import { apiFetch } from '../../lib/apiBase';
 import { useToast } from '../../context/ToastContext';
 import { useWorkspace } from '../../context/WorkspaceContext';
 
-/** Logical clusters for the Data & pricing settings tab (smaller type, clearer scan). */
+/** Logical clusters for the Data & catalog tab — each opens a modal with tables. */
 const WORKBENCH_GROUPS = [
   {
     id: 'quotation',
@@ -50,6 +51,33 @@ function formFromRow(fields, row) {
           : field.defaultValue ?? '';
     return acc;
   }, {});
+}
+
+function rowMatchesSearch(row, query, rowSummary, tableFields) {
+  const q = String(query ?? '').trim().toLowerCase();
+  if (!q) return true;
+  try {
+    if (String(rowSummary(row)).toLowerCase().includes(q)) return true;
+    if (String(row.id ?? '').toLowerCase().includes(q)) return true;
+    for (const f of tableFields) {
+      if (String(renderCellValue(f, row)).toLowerCase().includes(q)) return true;
+    }
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
+function renderCellValue(field, row) {
+  const v = row?.[field.key];
+  if (field.type === 'checkbox') return v ? 'Yes' : 'No';
+  if (field.type === 'select') {
+    const opt = (field.options || []).find((o) => String(o.value) === String(v));
+    if (opt) return opt.label;
+    return v != null && v !== '' ? String(v) : '—';
+  }
+  if (v == null || v === '') return '—';
+  return String(v);
 }
 
 function renderFieldInput(field, value, onChange, disabled) {
@@ -118,12 +146,24 @@ function SetupCollectionCard({
   fields,
   rowSummary,
   onSeedValue,
+  tableLayout = false,
+  filterQuery = '',
 }) {
   const ws = useWorkspace();
   const { show: showToast } = useToast();
   const [editingId, setEditingId] = useState('');
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState(() => emptyForm(fields));
+
+  const tableFields = useMemo(
+    () => fields.filter((f) => f.type !== 'textarea').slice(0, 6),
+    [fields]
+  );
+
+  const visibleRows = useMemo(() => {
+    if (!filterQuery.trim()) return rows;
+    return rows.filter((row) => rowMatchesSearch(row, filterQuery, rowSummary, tableFields));
+  }, [rows, filterQuery, rowSummary, tableFields]);
 
   const resetForm = () => {
     setEditingId('');
@@ -186,8 +226,12 @@ function SetupCollectionCard({
     });
   };
 
+  const sectionShell = tableLayout
+    ? 'border-b border-slate-200/80 pb-5 mb-5 last:mb-0 last:border-0 last:pb-0'
+    : 'rounded-xl border border-slate-200/90 bg-white p-4 shadow-sm';
+
   return (
-    <section className="rounded-xl border border-slate-200/90 bg-white p-4 shadow-sm">
+    <section className={sectionShell}>
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 pr-2">
           <h3 className="text-[10px] font-black uppercase tracking-[0.14em] text-[#134e4a] mb-0.5">
@@ -219,39 +263,117 @@ function SetupCollectionCard({
         </div>
       </form>
 
-      <div className="mt-3 space-y-1.5">
-        {rows.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/70 px-3 py-3 text-[11px] text-slate-500">
-            No setup rows yet.
-          </div>
-        ) : (
-          rows.map((row) => (
-            <div
-              key={row.id}
-              className="flex flex-col gap-2 rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2.5 md:flex-row md:items-center md:justify-between"
-            >
-              <div className="min-w-0">
-                <p className="text-[11px] font-medium text-slate-800 leading-snug">{rowSummary(row)}</p>
-                <p className="mt-0.5 text-[10px] font-mono text-slate-400">{row.id}</p>
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                <button type="button" onClick={() => startEdit(row)} className="z-btn-secondary !px-2.5 !py-1 !text-[10px] gap-1">
-                  <Pencil size={12} /> Edit
-                </button>
-                <button type="button" onClick={() => void removeRow(row)} className="z-btn-secondary !px-2.5 !py-1 !text-[10px] gap-1">
-                  <Trash2 size={12} /> Delete
-                </button>
-              </div>
+      {tableLayout ? (
+        <div className="mt-3 overflow-x-auto rounded-xl border border-slate-200/90">
+          <table className="w-full min-w-[520px] text-left text-[11px]">
+            <thead className="border-b border-slate-200 bg-slate-50/90 text-[9px] font-black uppercase tracking-[0.1em] text-slate-500">
+              <tr>
+                {tableFields.map((f) => (
+                  <th key={f.key} className="px-2.5 py-2">
+                    {f.label}
+                  </th>
+                ))}
+                <th className="px-2.5 py-2 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {rows.length === 0 ? (
+                <tr>
+                  <td colSpan={tableFields.length + 1} className="px-3 py-6 text-center text-slate-500">
+                    No rows yet.
+                  </td>
+                </tr>
+              ) : visibleRows.length === 0 ? (
+                <tr>
+                  <td colSpan={tableFields.length + 1} className="px-3 py-6 text-center text-slate-500">
+                    No rows match your filter.
+                  </td>
+                </tr>
+              ) : (
+                visibleRows.map((row) => (
+                  <tr key={row.id} className="bg-white/95">
+                    {tableFields.map((f) => (
+                      <td key={f.key} className="px-2.5 py-2 align-top text-slate-800">
+                        {renderCellValue(f, row)}
+                      </td>
+                    ))}
+                    <td className="px-2.5 py-2 text-right whitespace-nowrap">
+                      <button
+                        type="button"
+                        onClick={() => startEdit(row)}
+                        className="z-btn-secondary !inline-flex !px-2 !py-1 !text-[10px] gap-0.5 mr-1"
+                      >
+                        <Pencil size={12} /> Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void removeRow(row)}
+                        className="z-btn-secondary !inline-flex !px-2 !py-1 !text-[10px] gap-0.5"
+                      >
+                        <Trash2 size={12} /> Del
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="mt-3 space-y-1.5">
+          {rows.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/70 px-3 py-3 text-[11px] text-slate-500">
+              No setup rows yet.
             </div>
-          ))
-        )}
-      </div>
+          ) : visibleRows.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-amber-200/80 bg-amber-50/50 px-3 py-3 text-[11px] text-slate-600">
+              No rows match your filter.
+            </div>
+          ) : (
+            visibleRows.map((row) => (
+              <div
+                key={row.id}
+                className="flex flex-col gap-2 rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2.5 md:flex-row md:items-center md:justify-between"
+              >
+                <div className="min-w-0">
+                  <p className="text-[11px] font-medium text-slate-800 leading-snug">{rowSummary(row)}</p>
+                  <p className="mt-0.5 text-[10px] font-mono text-slate-400">{row.id}</p>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  <button type="button" onClick={() => startEdit(row)} className="z-btn-secondary !px-2.5 !py-1 !text-[10px] gap-1">
+                    <Pencil size={12} /> Edit
+                  </button>
+                  <button type="button" onClick={() => void removeRow(row)} className="z-btn-secondary !px-2.5 !py-1 !text-[10px] gap-1">
+                    <Trash2 size={12} /> Delete
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
     </section>
   );
 }
 
 export default function MasterDataWorkbench({ masterData }) {
-  const procurementCatalogRows = masterData?.procurementCatalog ?? [];
+  const ws = useWorkspace();
+  const [openGroupId, setOpenGroupId] = useState(null);
+  const [modalSearch, setModalSearch] = useState('');
+
+  const productInventoryOptions = useMemo(
+    () =>
+      (ws?.snapshot?.products || []).map((p) => ({
+        value: p.productID,
+        label: `${p.name || p.productID} (${p.productID})`,
+      })),
+    [ws?.snapshot?.products]
+  );
+
+  const procurementCatalogRows = useMemo(
+    () => masterData?.procurementCatalog ?? [],
+    [masterData?.procurementCatalog]
+  );
   const quoteItemOptions = useMemo(
     () =>
       (masterData?.quoteItems || []).map((row) => ({
@@ -295,7 +417,8 @@ export default function MasterDataWorkbench({ masterData }) {
     [masterData?.profiles]
   );
 
-  const sections = [
+  const sections = useMemo(
+    () => [
     {
       kind: 'quote-items',
       title: 'Quotation items',
@@ -315,11 +438,18 @@ export default function MasterDataWorkbench({ masterData }) {
         { key: 'name', label: 'Name' },
         { key: 'unit', label: 'Default unit', placeholder: 'm / box / job' },
         { key: 'defaultUnitPriceNgn', label: 'Default unit price', type: 'number', min: '0', step: '1' },
+        {
+          key: 'inventoryProductId',
+          label: 'Stock product (accessories)',
+          type: 'select',
+          options: productInventoryOptions,
+          placeholder: 'None',
+        },
         { key: 'sortOrder', label: 'Sort order', type: 'number', min: '0', step: '1', defaultValue: 0 },
         { key: 'active', label: 'Active', type: 'checkbox', checkboxLabel: 'Visible in forms', defaultValue: true },
       ],
       rowSummary: (row) =>
-        `${row.name} · ${row.itemType} · ${row.unit}${row.defaultUnitPriceNgn ? ` · ₦${Number(row.defaultUnitPriceNgn).toLocaleString()}` : ''}`,
+        `${row.name} · ${row.itemType} · ${row.unit}${row.defaultUnitPriceNgn ? ` · ₦${Number(row.defaultUnitPriceNgn).toLocaleString()}` : ''}${row.inventoryProductId ? ` · stock:${row.inventoryProductId}` : ''}`,
     },
     {
       kind: 'colours',
@@ -446,33 +576,96 @@ export default function MasterDataWorkbench({ masterData }) {
       ],
       rowSummary: (row) => `${row.label} · ${row.productID} · ${row.color} ${row.gauge}`,
     },
-  ];
+    ],
+    [
+      masterData,
+      procurementCatalogRows,
+      productInventoryOptions,
+      quoteItemOptions,
+      colourOptions,
+      gaugeOptions,
+      materialOptions,
+      profileOptions,
+    ]
+  );
 
   const sectionByKind = Object.fromEntries(sections.map((s) => [s.kind, s]));
+  const openGroup = WORKBENCH_GROUPS.find((g) => g.id === openGroupId);
 
   return (
-    <div
-      className="md-master-workbench space-y-5 [&_.z-field-label]:mb-1 [&_.z-field-label]:text-[9px] [&_.z-input]:py-2 [&_.z-input]:px-3 [&_.z-input]:text-xs [&_.z-input]:font-medium [&_select.z-input]:py-2"
-    >
-      {WORKBENCH_GROUPS.map((group) => (
-        <section
-          key={group.id}
-          className="rounded-xl border border-slate-200/80 bg-slate-50/45 p-3 sm:p-3.5"
-        >
-          <header className="border-b border-slate-200/55 pb-2 mb-3">
-            <h2 className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-500">
-              {group.label}
-            </h2>
-            <p className="mt-0.5 text-[10px] text-slate-500 leading-snug max-w-3xl">{group.hint}</p>
-          </header>
-          <div className="space-y-3">
-            {group.kinds.map((kind) => {
-              const cfg = sectionByKind[kind];
-              return cfg ? <SetupCollectionCard key={kind} {...cfg} /> : null;
-            })}
-          </div>
-        </section>
-      ))}
-    </div>
+    <>
+      <div
+        className="md-master-workbench space-y-4 [&_.z-field-label]:mb-1 [&_.z-field-label]:text-[9px] [&_.z-input]:py-2 [&_.z-input]:px-3 [&_.z-input]:text-xs [&_.z-input]:font-medium [&_select.z-input]:py-2"
+      >
+        {WORKBENCH_GROUPS.map((group) => (
+          <section
+            key={group.id}
+            className="rounded-xl border border-slate-200/85 bg-gradient-to-br from-white to-slate-50/40 p-4 sm:p-5 shadow-sm"
+          >
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <h2 className="text-[11px] font-black uppercase tracking-[0.14em] text-[#134e4a]">{group.label}</h2>
+                <p className="mt-1 text-[10px] text-slate-500 leading-snug max-w-2xl">{group.hint}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setModalSearch('');
+                  setOpenGroupId(group.id);
+                }}
+                className="z-btn-primary shrink-0 gap-2 !text-[11px]"
+              >
+                <LayoutGrid size={16} /> Open catalog
+              </button>
+            </div>
+          </section>
+        ))}
+      </div>
+
+      <ModalFrame
+        isOpen={openGroupId != null}
+        onClose={() => {
+          setModalSearch('');
+          setOpenGroupId(null);
+        }}
+        title={openGroup?.label ?? 'Catalog'}
+        description="Edit reference lists used across the system. Use the form to add or update, the table for quick review. Filter applies to all tables in this catalog."
+      >
+        <div className="w-full max-w-[min(100%,1120px)] max-h-[min(88vh,920px)] overflow-y-auto rounded-[28px] border border-slate-200/90 bg-white p-4 shadow-xl sm:p-6">
+          {openGroup ? (
+            <>
+              <div className="sticky top-0 z-[1] -mt-1 mb-4 border-b border-slate-100 bg-white pb-3 pt-1">
+                <label htmlFor="catalog-search" className="sr-only">
+                  Filter catalog rows
+                </label>
+                <div className="relative">
+                  <Search
+                    className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                    aria-hidden
+                  />
+                  <input
+                    id="catalog-search"
+                    type="search"
+                    placeholder="Filter table rows (name, id, or any visible column)…"
+                    value={modalSearch}
+                    onChange={(e) => setModalSearch(e.target.value)}
+                    className="z-input w-full pl-9"
+                    aria-label="Filter catalog rows"
+                  />
+                </div>
+              </div>
+              <div className="space-y-2">
+                {openGroup.kinds.map((kind) => {
+                  const cfg = sectionByKind[kind];
+                  return cfg ? (
+                    <SetupCollectionCard key={kind} {...cfg} tableLayout filterQuery={modalSearch} />
+                  ) : null;
+                })}
+              </div>
+            </>
+          ) : null}
+        </div>
+      </ModalFrame>
+    </>
   );
 }

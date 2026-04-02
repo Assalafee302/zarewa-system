@@ -1,4 +1,7 @@
-import { actorId, actorName } from './auth.js';
+import { accessoryFulfillmentSummaryForQuotation } from './accessoryFulfillment.js';
+import { actorId, actorName, userHasPermission } from './auth.js';
+import { DEFAULT_BRANCH_ID } from './branches.js';
+import { isAllowedExpenseCategory } from '../shared/expenseCategories.js';
 
 function nextControlId(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -164,6 +167,42 @@ function nextPaymentRequestId() {
   return `PREQ-${year}-${Date.now()}-${salt}`;
 }
 
+const MAX_PAYREQ_ATTACHMENT_B64_LEN = 4_500_000;
+
+function normalizePaymentRequestLineItems(raw) {
+  let arr = [];
+  if (Array.isArray(raw)) arr = raw;
+  else if (raw && typeof raw === 'object' && Array.isArray(raw.items)) arr = raw.items;
+  return arr
+    .map((row) => {
+      const item = String(row?.item ?? row?.description ?? '').trim();
+      const unit = Number.parseFloat(String(row?.unit ?? row?.qty ?? '').replace(/,/g, ''));
+      const unitPriceNgn = roundMoney(row?.unitPriceNgn ?? row?.unit_price_ngn ?? 0);
+      let lineTotalNgn = roundMoney(row?.lineTotalNgn ?? row?.line_total_ngn ?? 0);
+      const u = Number.isFinite(unit) ? unit : 0;
+      if (!lineTotalNgn && u > 0 && unitPriceNgn >= 0) {
+        lineTotalNgn = roundMoney(u * unitPriceNgn);
+      }
+      return { item, unit: u, unitPriceNgn, lineTotalNgn };
+    })
+    .filter((r) => r.item && r.unit > 0 && r.lineTotalNgn > 0);
+}
+
+function parsePaymentRequestAttachment(payload) {
+  const att = payload?.attachment;
+  if (!att || typeof att !== 'object') {
+    return { name: '', mime: '', b64: '' };
+  }
+  const name = String(att.name ?? '').trim().slice(0, 240);
+  const mime = String(att.mime ?? att.mimeType ?? '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase()
+    .slice(0, 120);
+  const b64 = String(att.dataBase64 ?? '').replace(/\s/g, '');
+  return { name, mime, b64 };
+}
+
 function nextRefundId() {
   const year = new Date().getFullYear();
   const salt = Math.random().toString(36).slice(2, 8).toUpperCase();
@@ -171,15 +210,58 @@ function nextRefundId() {
 }
 
 export function insertPaymentRequest(db, payload, actor) {
-  const expenseID = String(payload.expenseID ?? '').trim();
-  const amountRequestedNgn = roundMoney(payload.amountRequestedNgn);
-  if (!expenseID) return { ok: false, error: 'Expense ID is required.' };
-  if (amountRequestedNgn <= 0) return { ok: false, error: 'Amount requested must be positive.' };
-  const expense = db.prepare(`SELECT expense_id FROM expenses WHERE expense_id = ?`).get(expenseID);
-  if (!expense) return { ok: false, error: 'Linked expense was not found.' };
   const providedRequestId = String(payload.requestID ?? '').trim();
   const requestDate = String(payload.requestDate ?? '').trim() || nowIso().slice(0, 10);
   const description = String(payload.description ?? '').trim() || '—';
+  const requestReference = String(payload.requestReference ?? payload.reference ?? '').trim();
+  const branchId = String(payload.workspaceBranchId ?? '').trim() || DEFAULT_BRANCH_ID;
+
+  const lineItems = normalizePaymentRequestLineItems(payload.lineItems ?? payload.items);
+  const expenseCategory = String(payload.expenseCategory ?? payload.category ?? '').trim();
+  const { name: attName, mime: attMime, b64: attB64Raw } = parsePaymentRequestAttachment(payload);
+  let attB64 = attB64Raw;
+  if (attB64) {
+    const allowed = attMime.startsWith('image/') || attMime === 'application/pdf';
+    if (!allowed) {
+      return { ok: false, error: 'Attachment must be a PDF or image file.' };
+    }
+    if (attB64.length > MAX_PAYREQ_ATTACHMENT_B64_LEN) {
+      return { ok: false, error: 'Attachment is too large (max about 2.5 MB).' };
+    }
+  } else {
+    attB64 = '';
+  }
+
+  const lineItemsJson = lineItems.length ? JSON.stringify(lineItems) : '';
+
+  let legacyExpenseID = String(payload.expenseID ?? '').trim();
+  let amountRequestedNgn = roundMoney(payload.amountRequestedNgn);
+
+  if (lineItems.length > 0) {
+    if (!expenseCategory) {
+      return { ok: false, error: 'Expense category is required.' };
+    }
+    if (!isAllowedExpenseCategory(expenseCategory)) {
+      return { ok: false, error: 'Expense category must be chosen from the standard list.' };
+    }
+    amountRequestedNgn = lineItems.reduce((s, x) => s + x.lineTotalNgn, 0);
+    if (amountRequestedNgn <= 0) {
+      return { ok: false, error: 'Line items must total a positive amount.' };
+    }
+  } else {
+    if (!legacyExpenseID) {
+      return {
+        ok: false,
+        error:
+          'Add at least one line with description, quantity, and unit price (or link an existing posted expense and amount).',
+      };
+    }
+    if (amountRequestedNgn <= 0) {
+      return { ok: false, error: 'Amount requested must be positive.' };
+    }
+    const expense = db.prepare(`SELECT expense_id FROM expenses WHERE expense_id = ?`).get(legacyExpenseID);
+    if (!expense) return { ok: false, error: 'Linked expense was not found.' };
+  }
 
   const maxAttempts = providedRequestId ? 1 : 3;
   let lastErr = null;
@@ -187,24 +269,66 @@ export function insertPaymentRequest(db, payload, actor) {
     const requestID =
       providedRequestId ||
       (i === 0
-        ? nextPaymentRequestId(db)
-        : `${nextPaymentRequestId(db)}-${Math.random().toString(36).slice(2, 7)}`);
+        ? nextPaymentRequestId()
+        : `${nextPaymentRequestId()}-${Math.random().toString(36).slice(2, 7)}`);
     try {
       assertPeriodOpen(db, requestDate, 'Payment request date');
       db.transaction(() => {
+        let expenseIdForRow = legacyExpenseID;
+        if (lineItems.length > 0) {
+          let newExpId = `EXP-PREQ-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+          for (let k = 0; k < 8 && db.prepare(`SELECT 1 FROM expenses WHERE expense_id = ?`).get(newExpId); k += 1) {
+            newExpId = `EXP-PREQ-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+          }
+          db.prepare(
+            `INSERT INTO expenses (expense_id, expense_type, amount_ngn, date, category, payment_method, reference, branch_id)
+             VALUES (?,?,?,?,?,?,?,?)`
+          ).run(
+            newExpId,
+            'Payment request (pending payout)',
+            amountRequestedNgn,
+            requestDate,
+            expenseCategory,
+            'Pending',
+            requestReference || requestID,
+            branchId
+          );
+          expenseIdForRow = newExpId;
+        }
         db.prepare(
           `INSERT INTO payment_requests (
             request_id, expense_id, amount_requested_ngn, request_date, approval_status, description,
-            approved_by, approved_at_iso, approval_note
-          ) VALUES (?,?,?,?,?,?,?,?,?)`
-        ).run(requestID, expenseID, amountRequestedNgn, requestDate, 'Pending', description, '', '', '');
+            approved_by, approved_at_iso, approval_note,
+            request_reference, line_items_json, attachment_name, attachment_mime, attachment_data_b64
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        ).run(
+          requestID,
+          expenseIdForRow,
+          amountRequestedNgn,
+          requestDate,
+          'Pending',
+          description,
+          '',
+          '',
+          '',
+          requestReference || '',
+          lineItemsJson || null,
+          attName || '',
+          attMime || '',
+          attB64 || ''
+        );
         appendAuditLog(db, {
           actor,
           action: 'payment_request.create',
           entityKind: 'payment_request',
           entityId: requestID,
           note: `Payment request ${requestID} submitted`,
-          details: { expenseID, amountRequestedNgn },
+          details: {
+            expenseID: expenseIdForRow,
+            amountRequestedNgn,
+            lineItemCount: lineItems.length,
+            hasAttachment: Boolean(attB64),
+          },
         });
       })();
       return { ok: true, requestID };
@@ -272,21 +396,58 @@ export function insertRefundRequest(db, payload, actor, branchId = 'BR-KAD') {
   const requestedAtISO = String(payload.requestedAtISO ?? '').trim() || nowIso();
   try {
     assertPeriodOpen(db, requestedAtISO, 'Refund request date');
+    const quotationRef = String(payload.quotationRef ?? '').trim();
+    const product = String(payload.product ?? '').trim() || '—';
+
+    if (quotationRef) {
+      const existingRefunds = db.prepare(
+        `SELECT reason_category FROM customer_refunds
+         WHERE quotation_ref = ? AND status IN ('Pending', 'Approved')`
+      ).all(quotationRef);
+
+      const requestedCats = Array.isArray(payload.reasonCategory) ? payload.reasonCategory : [payload.reasonCategory];
+      
+      for (const row of existingRefunds) {
+        try {
+          const cats = JSON.parse(row.reason_category || '[]');
+          const alreadyRefunded = Array.isArray(cats) ? cats : [row.reason_category];
+          const intersection = requestedCats.filter(c => alreadyRefunded.includes(c));
+          if (intersection.length > 0) {
+            return { ok: false, error: `A refund request for category "${intersection[0]}" already exists for this quotation.` };
+          }
+        } catch {
+          if (requestedCats.includes(row.reason_category)) {
+            return { ok: false, error: `A refund request for category "${row.reason_category}" already exists for this quotation.` };
+          }
+        }
+      }
+    }
+
+    let quotationCustomerName = '';
+    if (quotationRef) {
+      const qRow = db.prepare(`SELECT customer_name FROM quotations WHERE id = ?`).get(quotationRef);
+      quotationCustomerName = String(qRow?.customer_name ?? '').trim();
+    }
+
+    const reasonCategory = Array.isArray(payload.reasonCategory)
+      ? JSON.stringify(payload.reasonCategory)
+      : String(payload.reasonCategory ?? '').trim();
+
     db.transaction(() => {
       db.prepare(
         `INSERT INTO customer_refunds (
           refund_id, customer_id, customer_name, quotation_ref, cutting_list_ref, product, reason_category, reason,
-          amount_ngn, calculation_lines_json, suggested_lines_json, calculation_notes, status, requested_by, requested_at_iso,
+          amount_ngn, calculation_lines_json, suggested_lines_json, calculation_notes, status, requested_by, requested_by_user_id, requested_at_iso,
           approval_date, approved_by, approved_amount_ngn, manager_comments, paid_amount_ngn, paid_at_iso, paid_by, payment_note, branch_id
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       ).run(
         refundID,
         customerID,
-        String(payload.customer ?? '').trim(),
-        String(payload.quotationRef ?? '').trim(),
+        String(payload.customer ?? payload.customerName ?? quotationCustomerName ?? '').trim(),
+        quotationRef,
         String(payload.cuttingListRef ?? '').trim(),
-        String(payload.product ?? '').trim() || '—',
-        String(payload.reasonCategory ?? '').trim(),
+        product,
+        reasonCategory,
         String(payload.reason ?? '').trim(),
         amountNgn,
         JSON.stringify(payload.calculationLines || []),
@@ -294,6 +455,7 @@ export function insertRefundRequest(db, payload, actor, branchId = 'BR-KAD') {
         String(payload.calculationNotes ?? '').trim(),
         'Pending',
         actorName(actor),
+        actorId(actor),
         requestedAtISO,
         '',
         '',
@@ -325,6 +487,17 @@ export function decideRefundRequest(db, refundID, payload, actor) {
   if (!row) return { ok: false, error: 'Refund request not found.' };
   if (String(row.status || 'Pending') !== 'Pending') {
     return { ok: false, error: 'Only pending refunds can be reviewed.' };
+  }
+  if (row.requested_by_user_id === actorId(actor)) {
+    // Allow the requester to approve their own refund when they are an approver (manager/finance).
+    const canSelfApprove =
+      userHasPermission(actor, 'refunds.approve') || userHasPermission(actor, 'finance.approve');
+    if (!canSelfApprove) {
+      return {
+        ok: false,
+        error: 'Self-approval is prohibited unless you have refunds.approve or finance.approve permissions.',
+      };
+    }
   }
   const status = String(payload.status ?? '').trim();
   if (!['Approved', 'Rejected'].includes(status)) {
@@ -419,82 +592,152 @@ export function decideRefundRequest(db, refundID, payload, actor) {
 }
 
 export function previewRefundRequest(db, payload) {
-  const customerID = String(payload.customerID ?? '').trim();
-  if (!customerID) return { ok: false, error: 'Customer is required.' };
   const quotationRef = String(payload.quotationRef ?? '').trim();
-  const cuttingListRef = String(payload.cuttingListRef ?? '').trim();
-  const product = String(payload.product ?? '').trim();
   const quote = quotationRef
     ? db.prepare(`SELECT * FROM quotations WHERE id = ?`).get(quotationRef)
     : null;
+
+  const customerID = String(payload.customerID ?? quote?.customer_id ?? '').trim();
+  if (!customerID && !quotationRef) return { ok: false, error: 'Customer or Quotation is required.' };
+
   const receipts = quotationRef
     ? db.prepare(`SELECT * FROM sales_receipts WHERE quotation_ref = ?`).all(quotationRef)
     : [];
-  const cuttingList = cuttingListRef
-    ? db.prepare(`SELECT * FROM cutting_lists WHERE id = ?`).get(cuttingListRef)
-    : null;
+
+  const productionJobs = quotationRef
+    ? db.prepare(`SELECT * FROM production_jobs WHERE quotation_ref = ? AND status = 'Completed'`).all(quotationRef)
+    : [];
+
+  const existingRefunds = quotationRef
+    ? db.prepare(`SELECT * FROM customer_refunds WHERE quotation_ref = ? AND status != 'Rejected'`).all(quotationRef)
+    : [];
+
+  const refundedCategories = new Set();
+  existingRefunds.forEach(r => {
+    try {
+      const cats = JSON.parse(r.reason_category || '[]');
+      if (Array.isArray(cats)) cats.forEach(c => refundedCategories.add(c));
+      else refundedCategories.add(r.reason_category);
+    } catch {
+      refundedCategories.add(r.reason_category);
+    }
+  });
+
   const paidOnQuoteNgn = receipts.reduce((sum, row) => sum + roundMoney(row.amount_ngn), 0);
   const quoteTotalNgn = roundMoney(quote?.total_ngn);
+
+  // Quoted vs Actual Produced (optional payload overrides for tools/tests)
+  const quotedMetersFromQuote = quotedMetersFromQuotationLines(quote?.lines_json ?? '');
+  const actualMetersFromJobs = productionJobs.reduce((sum, j) => sum + (Number(j.actual_meters) || 0), 0);
+  const quotedMetersOverride = positiveNumber(payload.quotedMeters);
+  const actualMetersOverride = positiveNumber(payload.actualMeters);
   const quotedMeters =
-    positiveNumber(payload.quotedMeters) ||
-    positiveNumber(cuttingList?.total_meters) ||
-    quotedMetersFromQuotationLines(quote?.lines_json ?? '');
+    quotedMetersOverride != null ? Math.max(0, roundMoney(quotedMetersOverride)) : quotedMetersFromQuote;
   const actualMeters =
-    positiveNumber(payload.actualMeters) ||
-    positiveNumber(cuttingList?.total_meters) ||
-    null;
-  const pricePerMeter = positiveNumber(payload.pricePerMeterNgn) || quotedAmountPerMeter(quote?.lines_json);
+    actualMetersOverride != null ? Math.max(0, roundMoney(actualMetersOverride)) : actualMetersFromJobs;
+
+  const derivedPricePerMeter = quotedAmountPerMeter(quote?.lines_json);
+  const pricePerMeter = positiveNumber(payload.pricePerMeterNgn) || derivedPricePerMeter;
+
   const suggestedLines = [];
-  if (paidOnQuoteNgn > quoteTotalNgn && quoteTotalNgn > 0) {
+  const warnings = [];
+
+  const requestedPpm = positiveNumber(payload.pricePerMeterNgn);
+  if (derivedPricePerMeter && requestedPpm && derivedPricePerMeter > 0) {
+    const diffPct = (Math.abs(requestedPpm - derivedPricePerMeter) / derivedPricePerMeter) * 100;
+    if (diffPct > 5) {
+      warnings.push(
+        `Provided price/meter deviates by more than 5% from quotation-implied rate (≈₦${Math.round(derivedPricePerMeter).toLocaleString('en-NG')}).`
+      );
+    }
+  }
+
+  // 1. Overpayment Auto-detection
+  if (!refundedCategories.has('Overpayment') && paidOnQuoteNgn > quoteTotalNgn && quoteTotalNgn > 0) {
     suggestedLines.push({
       label: `Overpayment on ${quotationRef || 'quotation'}`,
       amountNgn: paidOnQuoteNgn - quoteTotalNgn,
+      category: 'Overpayment'
     });
   }
-  if (quotedMeters && actualMeters && quotedMeters > actualMeters && pricePerMeter) {
-    const excessMeters = quotedMeters - actualMeters;
+
+  // 2. Unproduced / Substituted Meterage
+  if (quotedMeters > 0 && pricePerMeter) {
+    // If production is finished, we can calculate precisely
+    const unproducedPotential = Math.max(0, quotedMeters - actualMeters);
+    if (unproducedPotential > 0 && !refundedCategories.has('Order cancellation')) {
+       suggestedLines.push({
+        label: `Unproduced metres (${unproducedPotential.toFixed(2)}m @ ₦${Math.round(pricePerMeter).toLocaleString()})`,
+        amountNgn: Math.round(unproducedPotential * pricePerMeter),
+        category: 'Order cancellation'
+      });
+    }
+  }
+
+  // 3. Service Refunds (Transport/Installation)
+  // We check the quote lines for these services
+  let quoteLines = [];
+  try {
+    quoteLines = JSON.parse(quote?.lines_json || '{}').services || [];
+  } catch {
+    quoteLines = [];
+  }
+  
+  const transportService = quoteLines.find(s => s.name.toLowerCase().includes('transport'));
+  if (transportService && !refundedCategories.has('Transport issue')) {
     suggestedLines.push({
-      label: `Unused metres ${excessMeters.toFixed(2)}m × ₦${Math.round(pricePerMeter).toLocaleString()}`,
-      amountNgn: Math.round(excessMeters * pricePerMeter),
+      label: `Unclaimed Transport: ${transportService.name}`,
+      amountNgn: roundMoney(transportService.unitPrice * transportService.qty),
+      category: 'Transport issue'
     });
   }
-  const transportRefundNgn = roundMoney(payload.transportRefundNgn);
-  if (transportRefundNgn > 0) {
+
+  const installService = quoteLines.find(s => s.name.toLowerCase().includes('install'));
+  if (installService && !refundedCategories.has('Installation issue')) {
     suggestedLines.push({
-      label: 'Transport refund',
-      amountNgn: transportRefundNgn,
+      label: `Unclaimed Installation: ${installService.name}`,
+      amountNgn: roundMoney(installService.unitPrice * installService.qty),
+      category: 'Installation issue'
     });
   }
-  const installationRefundNgn = roundMoney(payload.installationRefundNgn);
-  if (installationRefundNgn > 0) {
+
+  if (quotationRef && !refundedCategories.has('Accessory shortfall')) {
+    const accSummary = accessoryFulfillmentSummaryForQuotation(db, quotationRef);
+    for (const a of accSummary) {
+      const sf = Math.max(0, Number(a.shortfall) || 0);
+      if (sf <= 0) continue;
+      const up = Math.round(Number(a.unitPriceNgn) || 0);
+      const amountNgn = roundMoney(sf * up);
+      if (amountNgn <= 0) continue;
+      suggestedLines.push({
+        label: `Accessory shortfall: ${a.name} (${sf} × ₦${up.toLocaleString('en-NG')})`,
+        amountNgn,
+        category: 'Accessory shortfall',
+      });
+    }
+  }
+
+  if (existingRefunds.length > 0) {
+    const totalExisting = existingRefunds.reduce((sum, r) => sum + r.amount_ngn, 0);
+    warnings.push(`There are ${existingRefunds.length} existing refund(s) for this quotation totaling ₦${totalExisting.toLocaleString()}.`);
+  }
+
+  const manualAdj = roundMoney(payload.manualAdjustmentNgn);
+  if (manualAdj > 0) {
     suggestedLines.push({
-      label: 'Installation refund',
-      amountNgn: installationRefundNgn,
+      label: 'Manual adjustment',
+      amountNgn: manualAdj,
+      category: 'Adjustment',
     });
   }
-  const substitutionMeters = positiveNumber(payload.substitutionMeters);
-  const substitutionDiffPerMeterNgn = positiveNumber(payload.substitutionDiffPerMeterNgn);
-  if (substitutionMeters && substitutionDiffPerMeterNgn) {
-    suggestedLines.push({
-      label: `Gauge / material substitution ${substitutionMeters.toFixed(2)}m`,
-      amountNgn: Math.round(substitutionMeters * substitutionDiffPerMeterNgn),
-    });
-  }
-  const manualAdjustmentNgn = roundMoney(payload.manualAdjustmentNgn);
-  if (manualAdjustmentNgn > 0) {
-    suggestedLines.push({
-      label: 'Manual refund adjustment',
-      amountNgn: manualAdjustmentNgn,
-    });
-  }
+
   const suggestedAmountNgn = suggestedLines.reduce((sum, line) => sum + roundMoney(line.amountNgn), 0);
   return {
     ok: true,
     preview: {
       customerID,
+      customerName: quote?.customer_name ?? '',
       quotationRef,
-      cuttingListRef,
-      product,
       quoteTotalNgn,
       paidOnQuoteNgn,
       quotedMeters,
@@ -502,8 +745,29 @@ export function previewRefundRequest(db, payload) {
       pricePerMeterNgn: pricePerMeter ? Math.round(pricePerMeter) : null,
       suggestedAmountNgn,
       suggestedLines,
+      warnings,
+      alreadyRefundedCategories: Array.from(refundedCategories)
     },
   };
+}
+
+/** Returns quotations with money at risk (paid in) and room left to refund. */
+export function getEligibleRefundQuotations(db) {
+  const sql = `
+    SELECT q.*,
+      COALESCE((
+        SELECT SUM(amount_ngn) FROM customer_refunds
+        WHERE quotation_ref = q.id AND status != 'Rejected'
+      ), 0) AS total_refunded
+    FROM quotations q
+    WHERE q.paid_ngn > 0
+      AND COALESCE((
+        SELECT SUM(amount_ngn) FROM customer_refunds
+        WHERE quotation_ref = q.id AND status != 'Rejected'
+      ), 0) < q.paid_ngn
+    ORDER BY q.date_iso DESC
+  `;
+  return db.prepare(sql).all();
 }
 
 function positiveNumber(value) {
@@ -561,3 +825,51 @@ export function upsertTreasuryAccount(db, payload, actor) {
     return { ok: false, error: String(e.message || e) };
   }
 }
+
+export function reviewQuotation(db, quoteId, payload, actor) {
+  const row = db.prepare(`SELECT * FROM quotations WHERE id = ?`).get(quoteId);
+  if (!row) return { ok: false, error: 'Quotation not found.' };
+
+  const decision = String(payload.decision ?? '').trim(); // 'clear', 'flag', 'approve_production'
+  const note = String(payload.note ?? '').trim();
+  const now = new Date().toISOString();
+
+  try {
+    db.transaction(() => {
+      if (decision === 'clear') {
+        db.prepare(
+          `UPDATE quotations 
+           SET manager_cleared_at_iso = ?, manager_flagged_at_iso = NULL, manager_flag_reason = NULL 
+           WHERE id = ?`
+        ).run(now, quoteId);
+      } else if (decision === 'flag') {
+        db.prepare(
+          `UPDATE quotations 
+           SET manager_flagged_at_iso = ?, manager_flag_reason = ?, manager_cleared_at_iso = NULL 
+           WHERE id = ?`
+        ).run(now, note, quoteId);
+      } else if (decision === 'approve_production') {
+        db.prepare(
+          `UPDATE quotations 
+           SET manager_production_approved_at_iso = ? 
+           WHERE id = ?`
+        ).run(now, quoteId);
+      } else {
+        throw new Error('Invalid manager decision.');
+      }
+
+      appendAuditLog(db, {
+        actor,
+        action: `quotation.${decision}`,
+        entityKind: 'quotation',
+        entityId: quoteId,
+        note: `Manager ${decision} action on ${quoteId}`,
+        details: { note, decision },
+      });
+    })();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+

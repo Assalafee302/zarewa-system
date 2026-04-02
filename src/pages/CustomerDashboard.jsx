@@ -691,7 +691,7 @@ const CustomerDashboard = () => {
   if (!customer) {
     return (
       <PageShell>
-        <PageHeader title="Customer" subtitle="Dashboard" />
+        <PageHeader eyebrow="Sales" title="Customer" subtitle="Dashboard" />
         <MainPanel>
           <div className="z-empty-state max-w-md mx-auto">
             <p className="text-sm font-bold text-[#134e4a] mb-2">Customer not found</p>
@@ -721,6 +721,7 @@ const CustomerDashboard = () => {
   return (
     <PageShell blurred={showEdit || !!detail || showReports}>
       <PageHeader
+        eyebrow="Sales"
         title={customer.name}
         subtitle={`${customer.customerID} · ${customer.tier} · ${customer.paymentTerms}`}
         actions={

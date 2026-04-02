@@ -25,10 +25,12 @@ test.describe('Complete gate — module shells by role', () => {
     await expect(page.locator('h1').filter({ hasText: /^Purchases$/i })).toBeVisible();
   });
 
-  test('admin: HR workspace overview (direct route)', async ({ page }) => {
+  test('admin: HR workspace lands on my profile (direct route)', async ({ page }) => {
     await signInViaUi(page, 'admin', 'Admin@123');
     await page.goto('/hr');
-    await expect(page.getByRole('heading', { name: /^hr$/i })).toBeVisible({ timeout: 15_000 });
+    await expect(page).toHaveURL(/\/hr\/my-profile$/);
+    await expect(page.getByRole('heading', { name: /my profile/i })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('link', { name: /^my profile$/i })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Staff', exact: true })).toBeVisible();
   });
 

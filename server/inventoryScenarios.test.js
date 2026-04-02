@@ -25,11 +25,6 @@ function makeApp() {
   return createApp(db);
 }
 
-afterAll(() => {
-  for (const db of openDbs) db.close();
-  openDbs.length = 0;
-});
-
 async function loginAs(agent, username = 'admin', password = 'Admin@123') {
   const res = await agent.post('/api/session/login').send({ username, password });
   expect(res.status).toBe(200);
@@ -120,6 +115,11 @@ async function seedOneCoil(agent, coilNo, kg, productID = 'COIL-ALU') {
 }
 
 describe('Inventory scenarios (simulated flows)', () => {
+  afterAll(() => {
+    for (const db of openDbs) db.close();
+    openDbs.length = 0;
+  });
+
   it('S1 — GRN: coil remaining and COIL-ALU stock increase together', async () => {
     const app = makeApp();
     const agent = request.agent(app);

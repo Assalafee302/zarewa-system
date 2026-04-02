@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { acceptRequiredHrPoliciesViaApi } from './helpers/auth.js';
 
 async function apiSignIn(page, username, password) {
   await page.goto('/');
@@ -54,6 +55,7 @@ test.describe('HR branch scope', () => {
 
     // HR officer is scoped to a single branch via workspace selection (default Kad/HQ in seeded data).
     await apiSignIn(page, 'hr.officer', 'HrOfficer@12345!');
+    await acceptRequiredHrPoliciesViaApi(page);
     // Ensure workspace is Kaduna.
     const wsKad = await page.request.patch('/api/session/workspace', { data: { currentBranchId: kadBranch } });
     expect(wsKad.status()).toBe(200);

@@ -101,7 +101,7 @@ export default function HrNextDirectory() {
   if (!caps?.canViewDirectory) {
     return (
       <MainPanel>
-        <PageHeader title="Directory data quality" subtitle="No access." />
+        <PageHeader eyebrow="Human resources" title="Directory data quality" subtitle="No access." />
       </MainPanel>
     );
   }
@@ -110,6 +110,7 @@ export default function HrNextDirectory() {
     <MainPanel className="z-app-bg min-h-screen">
       <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}>
         <PageHeader
+          eyebrow="Human resources"
           title="Directory Intelligence"
           subtitle="Enterprise-grade observability into staff normalization, salary benchmarks, and data health."
           actions={

@@ -174,7 +174,7 @@ const SupplierProfile = () => {
   if (!supplier) {
     return (
       <PageShell>
-        <PageHeader title="Supplier" subtitle="Not found" />
+        <PageHeader eyebrow="Procurement" title="Supplier" subtitle="Not found" />
         <MainPanel>
           <Link to="/procurement" className="z-btn-primary inline-flex">
             <ArrowLeft size={16} /> Back to procurement
@@ -187,6 +187,7 @@ const SupplierProfile = () => {
   return (
     <PageShell>
       <PageHeader
+        eyebrow="Procurement"
         title={supplier.name}
         subtitle={`${supplier.supplierID} · ${supplier.city || '—'} · ${supplier.paymentTerms || '—'}`}
         actions={

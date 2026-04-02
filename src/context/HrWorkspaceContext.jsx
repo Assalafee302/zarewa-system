@@ -10,6 +10,7 @@ const DEFAULT_CAPS = {
   canPayroll: false,
   canManageStaff: false,
   canUploadAttendance: false,
+  canMarkDailyRoll: false,
   canLoanMaint: false,
   canViewSensitiveHr: false,
   canCompliance: false,
@@ -31,6 +32,11 @@ function hrCapsFromSessionPermissions(hasPermission) {
     canManageStaff: star || has('hr.staff.manage') || has('hr.manage') || has('settings.view'),
     canUploadAttendance:
       star || has('hr.attendance.upload') || has('hr.attendance') || has('operations.manage'),
+    canMarkDailyRoll:
+      star ||
+      has('hr.attendance.upload') ||
+      has('hr.daily_roll.mark') ||
+      has('hr.payroll.manage'),
     canLoanMaint:
       star ||
       has('hr.staff.manage') ||
@@ -54,6 +60,7 @@ function mergeHrCaps(apiPayload, fromSession) {
     canPayroll: apiPayload.canPayroll || fromSession.canPayroll,
     canManageStaff: apiPayload.canManageStaff || fromSession.canManageStaff,
     canUploadAttendance: apiPayload.canUploadAttendance || fromSession.canUploadAttendance,
+    canMarkDailyRoll: apiPayload.canMarkDailyRoll || fromSession.canMarkDailyRoll,
     canLoanMaint: apiPayload.canLoanMaint || fromSession.canLoanMaint,
     canHrReview: apiPayload.canHrReview || fromSession.canHrReview,
     canFinalApprove: apiPayload.canFinalApprove || fromSession.canFinalApprove,

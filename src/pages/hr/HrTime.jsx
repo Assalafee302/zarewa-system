@@ -171,6 +171,7 @@ export default function HrTime() {
   return (
     <>
       <PageHeader
+        eyebrow="Human resources"
         title="Time & attendance"
         subtitle="Daily present/late per branch (same daily rate as absent: base ÷ 22 per late day in the payroll month). Monthly absent uploads still apply for full-day absence."
         actions={
@@ -179,17 +180,13 @@ export default function HrTime() {
               type="button"
               onClick={() => load()}
               disabled={busy}
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black uppercase text-[#134e4a] disabled:opacity-50"
+              className="z-btn-secondary gap-2 py-2 px-4 text-xs disabled:opacity-50"
             >
               <RefreshCw size={14} className={busy ? 'animate-spin' : ''} />
               Refresh
             </button>
             {canUpload ? (
-              <button
-                type="button"
-                onClick={openModal}
-                className="inline-flex items-center gap-2 rounded-xl bg-[#134e4a] px-3 py-2 text-[11px] font-black uppercase text-white"
-              >
+              <button type="button" onClick={openModal} className="z-btn-primary gap-2 py-2 px-4 text-xs">
                 <Upload size={14} />
                 Upload period
               </button>

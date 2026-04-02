@@ -145,6 +145,7 @@ export default function HrStaffList() {
   return (
     <>
       <PageHeader
+        eyebrow="Human resources"
         title="Staff directory"
         subtitle="Employee files scoped to your workspace branch (unless HQ view-all is enabled). Open a record by clicking the name."
         actions={

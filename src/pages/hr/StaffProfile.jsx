@@ -362,7 +362,7 @@ export default function StaffProfile() {
   if (!row) {
     return (
       <MainPanel>
-        <PageHeader title="Staff profile" />
+        <PageHeader eyebrow="Human resources" title="Staff profile" />
         <p className="text-sm text-slate-600">Profile not found.</p>
         <Link className="mt-4 inline-block text-sm text-[#134e4a] hover:underline" to="/hr/staff">
           Back to directory
@@ -403,6 +403,7 @@ export default function StaffProfile() {
   return (
     <>
       <PageHeader
+        eyebrow="Human resources"
         title={row.displayName || row.username || 'Staff'}
         subtitle={row.jobTitle || row.department || 'Employee record'}
         actions={

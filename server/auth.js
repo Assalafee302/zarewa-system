@@ -85,6 +85,13 @@ export const ROLE_DEFINITIONS = {
       'operations.view',
       'finance.view',
       'audit.view',
+      'hr.directory.view',
+      'hr.daily_roll.mark',
+      // Manager dashboard (/manager): quotation clearance / flags / production override, refunds & payment approvals, conversion sign-off
+      'quotations.manage',
+      'refunds.approve',
+      'finance.approve',
+      'production.release',
     ],
   },
   ceo: {
@@ -133,6 +140,8 @@ export const ROLE_DEFINITIONS = {
       'receipts.post',
       'refunds.request',
       'refunds.approve',
+      'hr.directory.view',
+      'hr.daily_roll.mark',
     ],
   },
   sales_staff: {
@@ -333,6 +342,16 @@ export function publicUserFromRow(row) {
   const emailRaw = row.email ?? null;
   const avatarRaw = row.avatar_url ?? row.avatarUrl ?? null;
   const department = normalizeWorkspaceDepartment(row.department ?? row.workspace_department);
+  let permissions = permissionsForRole(roleKey);
+  const pJson = row.permissions_json ?? row.permissionsJson;
+  if (pJson && String(pJson).trim()) {
+    try {
+      const parsed = JSON.parse(pJson);
+      if (Array.isArray(parsed)) permissions = parsed;
+    } catch {
+      /* fallback to role default */
+    }
+  }
   return {
     id: row.id,
     username: row.username,
@@ -345,7 +364,7 @@ export function publicUserFromRow(row) {
     status: row.status ?? 'active',
     lastLoginAtISO: row.last_login_at_iso ?? row.lastLoginAtISO ?? '',
     createdAtISO: row.created_at_iso ?? row.createdAtISO ?? '',
-    permissions: permissionsForRole(roleKey),
+    permissions,
   };
 }
 
@@ -442,6 +461,7 @@ export function createAppUserRecord(db, row) {
   if (!username) return { ok: false, error: 'Username is required.' };
   if (!displayName) return { ok: false, error: 'Display name is required.' };
   if (!roleKey) return { ok: false, error: 'Role is required.' };
+  if (!ROLE_DEFINITIONS[roleKey]) return { ok: false, error: 'Invalid role selection.' };
   const strength = validatePasswordStrength(row?.password);
   if (!strength.ok) return strength;
   if (db.prepare(`SELECT 1 FROM app_users WHERE lower(trim(username)) = ?`).get(username)) {
@@ -916,4 +936,110 @@ export function requirePermission(required) {
       code: 'FORBIDDEN',
     });
   };
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ */
+export function listAllAppUsers(db) {
+  const rows = db.prepare(`SELECT * FROM app_users ORDER BY username ASC`).all();
+  return rows.map((r) => publicUserFromRow(r));
+}
+
+const PRIVILEGED_ROLE_KEYS = new Set(['admin', 'ceo']);
+
+function countOtherPrivilegedActiveAdmins(db, excludeUserId) {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM app_users WHERE id != ? AND role_key IN ('admin','ceo') AND status = 'active'`
+    )
+    .get(excludeUserId);
+  return row?.c ?? 0;
+}
+
+/** Sorted union of all permission strings declared on roles (for admin UIs). */
+export function allKnownPermissionKeys() {
+  const s = new Set();
+  for (const def of Object.values(ROLE_DEFINITIONS)) {
+    for (const p of def.permissions) s.add(p);
+  }
+  return [...s].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} targetUserId
+ * @param {string} roleKey
+ */
+export function updateAppUserRole(db, targetUserId, roleKey) {
+  if (!ROLE_DEFINITIONS[roleKey]) {
+    return { ok: false, error: 'Invalid role selection.' };
+  }
+  const current = db.prepare(`SELECT role_key FROM app_users WHERE id = ?`).get(targetUserId);
+  if (!current) {
+    return { ok: false, error: 'User not found.' };
+  }
+  const wasPri = PRIVILEGED_ROLE_KEYS.has(current.role_key);
+  const willPri = PRIVILEGED_ROLE_KEYS.has(roleKey);
+  if (wasPri && !willPri) {
+    if (countOtherPrivilegedActiveAdmins(db, targetUserId) < 1) {
+      return { ok: false, error: 'Cannot remove the last privileged administrator (admin or CEO role).' };
+    }
+  }
+  db.prepare(`UPDATE app_users SET role_key = ?, permissions_json = NULL WHERE id = ?`).run(
+    roleKey,
+    targetUserId
+  );
+  return { ok: true };
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} targetUserId
+ * @param {string[]} permissions
+ */
+export function updateAppUserPermissions(db, targetUserId, permissions) {
+  if (!Array.isArray(permissions)) {
+    return { ok: false, error: 'Permissions must be an array.' };
+  }
+  const permRe = /^(\*|[a-z][a-z0-9_.-]*)$/;
+  for (const p of permissions) {
+    const s = String(p ?? '').trim();
+    if (!s) return { ok: false, error: 'Empty permission entry.' };
+    if (!permRe.test(s)) {
+      return { ok: false, error: `Invalid permission format: ${s}` };
+    }
+  }
+  const json = JSON.stringify(permissions);
+  db.prepare(`UPDATE app_users SET permissions_json = ? WHERE id = ?`).run(json, targetUserId);
+  return { ok: true };
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} targetUserId
+ * @param {'active' | 'suspended'} status
+ * @param {{ actorUserId?: string }} [opts]
+ */
+export function updateAppUserStatus(db, targetUserId, status, opts = {}) {
+  if (status !== 'active' && status !== 'suspended') {
+    return { ok: false, error: 'Invalid status.' };
+  }
+  const actorUserId = opts.actorUserId;
+  if (status === 'suspended' && actorUserId && targetUserId === actorUserId) {
+    return { ok: false, error: 'You cannot suspend your own account.' };
+  }
+  if (status === 'suspended') {
+    const u = db.prepare(`SELECT role_key FROM app_users WHERE id = ?`).get(targetUserId);
+    if (u && PRIVILEGED_ROLE_KEYS.has(u.role_key)) {
+      if (countOtherPrivilegedActiveAdmins(db, targetUserId) < 1) {
+        return { ok: false, error: 'Cannot suspend the last active privileged administrator.' };
+      }
+    }
+  }
+  db.prepare(`UPDATE app_users SET status = ? WHERE id = ?`).run(status, targetUserId);
+  if (status === 'suspended') {
+    db.prepare(`DELETE FROM user_sessions WHERE user_id = ?`).run(targetUserId);
+  }
+  return { ok: true };
 }

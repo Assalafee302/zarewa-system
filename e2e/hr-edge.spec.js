@@ -22,6 +22,23 @@ async function apiSignOut(page) {
   await page.context().clearCookies();
 }
 
+async function apiAcceptRequiredPolicies(page, signatureName) {
+  const reqs = await page.request.get('/api/hr/policy-requirements');
+  if (reqs.status() !== 200) return;
+  const json = await reqs.json().catch(() => null);
+  const missing = Array.isArray(json?.missing) ? json.missing : [];
+  for (const p of missing) {
+    await page.request.post('/api/hr/policy-acknowledgements', {
+      data: {
+        policyKey: p.key,
+        policyVersion: p.version,
+        signatureName,
+        context: { channel: 'playwright' },
+      },
+    });
+  }
+}
+
 async function pickTreasuryAccountId(page) {
   const boot = await page.request.get('/api/bootstrap');
   expect(boot.status()).toBe(200);
@@ -39,6 +56,7 @@ test.describe('HR edge cases', () => {
     const staffUsername = `pw.edge.staff.${runTag}`;
 
     await apiSignIn(page, 'admin', 'Admin@123');
+    await apiAcceptRequiredPolicies(page, 'Admin');
     const register = await page.request.post('/api/hr/staff/register', {
       data: {
         username: staffUsername,
@@ -85,8 +103,9 @@ test.describe('HR edge cases', () => {
     await apiSignOut(page);
 
     await apiSignIn(page, 'admin', 'Admin@123');
+    await apiAcceptRequiredPolicies(page, 'Admin');
     const reject = await page.request.patch(`/api/hr/requests/${encodeURIComponent(requestId)}/hr-review`, {
-      data: { approve: false, note: 'Rejected by HR (Playwright edge)' },
+      data: { approve: false, note: 'Rejected by HR (Playwright edge)', reasonCode: 'policy' },
     });
     expect(reject.status()).toBe(200);
 
@@ -99,7 +118,7 @@ test.describe('HR edge cases', () => {
 
     // Manager approve should fail because it is no longer in manager_review.
     const mgr = await page.request.patch(`/api/hr/requests/${encodeURIComponent(requestId)}/manager-review`, {
-      data: { approve: true, note: 'Should not be allowed' },
+      data: { approve: true, note: 'Should not be allowed', reasonCode: 'policy' },
     });
     expect(mgr.status()).toBe(400);
   });
@@ -110,6 +129,7 @@ test.describe('HR edge cases', () => {
     const periodYyyymm = '202603';
 
     await apiSignIn(page, 'admin', 'Admin@123');
+    await apiAcceptRequiredPolicies(page, 'Admin');
     const treasuryAccountId = await pickTreasuryAccountId(page);
 
     const register = await page.request.post('/api/hr/staff/register', {
@@ -165,13 +185,14 @@ test.describe('HR edge cases', () => {
 
     // Admin approves both and disburses them.
     await apiSignIn(page, 'admin', 'Admin@123');
+    await apiAcceptRequiredPolicies(page, 'Admin');
     const approveLoan = async (loanId) => {
       const hr = await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/hr-review`, {
-        data: { approve: true, note: 'HR ok' },
+        data: { approve: true, note: 'HR ok', reasonCode: 'policy' },
       });
       expect(hr.status()).toBe(200);
       const mgr = await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/manager-review`, {
-        data: { approve: true, note: 'Exec ok' },
+        data: { approve: true, note: 'Exec ok', reasonCode: 'policy' },
       });
       if (mgr.status() !== 200) {
         throw new Error(`Manager approve failed (${mgr.status()}): ${await mgr.text()}`);

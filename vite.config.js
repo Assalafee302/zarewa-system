@@ -16,7 +16,7 @@ export default defineConfig({
   test: {
     globals: false,
     environment: 'jsdom',
-    environmentMatchGlobs: [['server/**', 'node']],
+    environmentMatchGlobs: [['**/server/**', 'node'], ['**/shared/**', 'node']],
     setupFiles: './src/test/setup.js',
     include: ['src/**/*.{test,spec}.{js,jsx}', 'server/**/*.test.js', 'shared/**/*.test.js'],
     pool: 'forks',

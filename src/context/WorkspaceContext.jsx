@@ -223,6 +223,19 @@ export function WorkspaceProvider({ children }) {
     return { ok: true };
   }, [refresh]);
 
+  /** @param {{ displayName?: string; email?: string | null; avatarUrl?: string | null }} patch */
+  const updateProfile = useCallback(async (patch) => {
+    const { ok, data } = await apiFetch('/api/session/profile', {
+      method: 'PATCH',
+      body: JSON.stringify(patch ?? {}),
+    });
+    if (!ok || !data?.ok) {
+      return { ok: false, error: data?.error || 'Could not update profile.' };
+    }
+    await refresh();
+    return { ok: true, user: data.user };
+  }, [refresh]);
+
   /** @param {{ currentBranchId?: string; viewAllBranches?: boolean }} patch */
   const updateWorkspace = useCallback(
     async (patch) => {
@@ -291,6 +304,7 @@ export function WorkspaceProvider({ children }) {
       resetPassword,
       logout,
       changePassword,
+      updateProfile,
       updateWorkspace,
     }),
     [
@@ -313,6 +327,7 @@ export function WorkspaceProvider({ children }) {
       resetPassword,
       logout,
       changePassword,
+      updateProfile,
       updateWorkspace,
     ]
   );

@@ -16,6 +16,23 @@ async function apiSignIn(page, username, password) {
   await expect(page.getByRole('navigation', { name: 'Modules' })).toBeVisible({ timeout: 20_000 });
 }
 
+async function apiAcceptRequiredPolicies(page, signatureName) {
+  const reqs = await page.request.get('/api/hr/policy-requirements');
+  if (reqs.status() !== 200) return;
+  const json = await reqs.json().catch(() => null);
+  const missing = Array.isArray(json?.missing) ? json.missing : [];
+  for (const p of missing) {
+    await page.request.post('/api/hr/policy-acknowledgements', {
+      data: {
+        policyKey: p.key,
+        policyVersion: p.version,
+        signatureName,
+        context: { channel: 'playwright' },
+      },
+    });
+  }
+}
+
 test.describe.configure({ timeout: 180_000 });
 
 test.describe('HR attendance deductions', () => {
@@ -27,6 +44,7 @@ test.describe('HR attendance deductions', () => {
 
     // Admin creates staff with known salary.
     await apiSignIn(page, 'admin', 'Admin@123');
+    await apiAcceptRequiredPolicies(page, 'Admin');
     const register = await page.request.post('/api/hr/staff/register', {
       data: {
         username,

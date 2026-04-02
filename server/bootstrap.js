@@ -25,6 +25,7 @@ import {
   getJsonBlob,
   listAdvanceInEvents,
   listProductionJobs,
+  listProductionJobAccessoryUsage,
   listAppUsers,
   listPeriodLocks,
   listApprovalActions,
@@ -116,6 +117,7 @@ export function buildBootstrap(db, opts = {}) {
     receipts: salesOk ? listSalesReceipts(db, branchScope) : [],
     cuttingLists: opsOk || salesOk ? listCuttingLists(db, branchScope) : [],
     productionJobs: prodRollupOk ? listProductionJobs(db, branchScope) : [],
+    productionJobAccessoryUsage: prodRollupOk ? listProductionJobAccessoryUsage(db, branchScope) : [],
     productionMetrics: productionOk
       ? computeProductionMetricsRollup(db, branchScope)
       : {
@@ -134,7 +136,7 @@ export function buildBootstrap(db, opts = {}) {
     expenses: finOk ? listExpenses(db, branchScope) : [],
     paymentRequests: payReqOk ? listPaymentRequests(db, branchScope) : [],
     accountsPayable: finOk ? listAccountsPayable(db, branchScope) : [],
-    bankReconciliation: finOk ? listBankReconciliation(db) : [],
+    bankReconciliation: finOk ? listBankReconciliation(db, branchScope) : [],
     coilRequests: coilReqOk ? listCoilRequests(db) : [],
     yardCoilRegister: yardOk ? listYardCoils(db) : [],
     procurementCatalog: procOk ? listProcurementCatalog(db) : [],

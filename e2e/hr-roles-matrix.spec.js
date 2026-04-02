@@ -89,12 +89,12 @@ test.describe('HR approval/payment role matrix', () => {
     // HR manager performs HR review + final approval.
     await apiSignIn(page, 'hr.manager', 'HrManager@12345!');
     const hrApprove = await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/hr-review`, {
-      data: { approve: true, note: 'HR approve by HR manager' },
+      data: { approve: true, note: 'HR approve by HR manager', reasonCode: 'policy' },
     });
     expect(hrApprove.status()).toBe(200);
     // HR manager performs final approval (manager review) and provisions finance queue.
     const mgrApprove = await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/manager-review`, {
-      data: { approve: true, note: 'Final approve by HR manager' },
+      data: { approve: true, note: 'Final approve by HR manager', reasonCode: 'policy' },
     });
     if (mgrApprove.status() !== 200) {
       throw new Error(`Manager approve failed (${mgrApprove.status()}): ${await mgrApprove.text()}`);

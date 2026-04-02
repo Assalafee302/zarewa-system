@@ -46,8 +46,8 @@ export function BranchWorkspaceBar() {
   if (!ws.apiOnline || branches.length === 0) return null;
 
   return (
-    <div className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
-      <div className="flex min-w-0 items-center gap-2 rounded-2xl border border-gray-100/90 bg-white/95 px-3 py-2 shadow-sm">
+    <div className="flex w-full min-w-0 flex-col gap-1 sm:w-auto sm:flex-row sm:items-center sm:gap-3">
+      <div className="flex min-w-0 w-full items-center gap-2 rounded-2xl border border-gray-100/90 bg-white/95 px-3 py-2.5 shadow-sm sm:w-auto sm:py-2">
         <Building2 size={16} className="shrink-0 text-[#134e4a]/70" aria-hidden />
         <div className="min-w-0 flex-1">
           <label htmlFor="zarewa-branch-workspace" className="sr-only">
@@ -58,7 +58,7 @@ export function BranchWorkspaceBar() {
             value={currentId || (branches[0]?.id ?? '')}
             onChange={onBranchChange}
             disabled={busy}
-            className="z-toolbar-shell w-full min-w-0 max-w-[200px] cursor-pointer truncate bg-transparent text-[11px] font-bold uppercase tracking-wide text-[#134e4a] outline-none disabled:opacity-50 sm:max-w-[240px]"
+            className="z-toolbar-shell w-full min-w-0 max-w-none cursor-pointer truncate bg-transparent text-[11px] font-bold uppercase tracking-wide text-[#134e4a] outline-none disabled:opacity-50 sm:max-w-[240px]"
           >
             {branches.map((b) => (
               <option key={b.id} value={b.id}>

@@ -1,5 +1,6 @@
 import { actorName } from './auth.js';
 import { appendAuditLog, assertPeriodOpen } from './controlOps.js';
+import { applyAccessoryCompletionTx, planAccessoryCompletion } from './accessoryFulfillment.js';
 
 function nextId(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -50,8 +51,8 @@ function appendStockMovementTx(db, payload) {
   const id = nextId('MV');
   const atISO = normalizeIso(payload.atISO);
   db.prepare(
-    `INSERT INTO stock_movements (id, at_iso, type, ref, product_id, qty, detail, date_iso, unit_price_ngn)
-     VALUES (?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO stock_movements (id, at_iso, type, ref, product_id, qty, detail, date_iso, unit_price_ngn, value_ngn)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`
   ).run(
     id,
     atISO,
@@ -61,7 +62,8 @@ function appendStockMovementTx(db, payload) {
     payload.qty ?? null,
     payload.detail ?? null,
     String(payload.dateISO ?? atISO).slice(0, 10),
-    payload.unitPriceNgn ?? null
+    payload.unitPriceNgn ?? null,
+    payload.valueNgn ?? null
   );
   return id;
 }
@@ -656,6 +658,9 @@ export function computeCompletionConversionRows(db, jobID, payload = {}) {
 export function previewProductionConversion(db, jobID, payload = {}) {
   const r = computeCompletionConversionRows(db, jobID, payload);
   if (!r.ok) return r;
+  const jobRow = productionJobRow(db, jobID);
+  const acc = planAccessoryCompletion(db, jobRow, payload);
+  if (!acc.ok) return { ok: false, error: acc.error };
   return {
     ok: true,
     rows: r.conversionRows.map((row) => ({
@@ -676,6 +681,7 @@ export function previewProductionConversion(db, jobID, payload = {}) {
     managerReviewRequired: r.managerReviewRequired,
     totalMeters: r.totalMeters,
     totalWeightKg: r.totalWeightKg,
+    accessoryPlan: acc.plannedLines,
   };
 }
 
@@ -689,6 +695,8 @@ export function completeProductionJob(db, jobID, payload = {}, opts = {}) {
     if (!computed.ok) return computed;
     const { conversionRows, totalMeters, totalWeightKg, aggregatedAlertState, managerReviewRequired } = computed;
     db.transaction(() => {
+      const accPlan = planAccessoryCompletion(db, job, payload);
+      if (!accPlan.ok) throw new Error(accPlan.error);
       const updateAllocation = db.prepare(
         `UPDATE production_job_coils
          SET closing_weight_kg = ?, consumed_weight_kg = ?, meters_produced = ?, actual_conversion_kg_per_m = ?,
@@ -735,11 +743,16 @@ export function completeProductionJob(db, jobID, payload = {}, opts = {}) {
             row.consumedWeightKg
         );
         const qtyReserved = clampNonNegative(safeNumber(coil?.qty_reserved) - row.openingWeightKg);
+        const uc = Math.round(Number(coil?.unit_cost_ngn_per_kg) || 0);
+        const cogsNgn = uc > 0 ? Math.round(row.consumedWeightKg * uc) : null;
+        const prevLanded = Math.round(Number(coil?.landed_cost_ngn) || 0);
+        const nextLanded =
+          cogsNgn != null && prevLanded > 0 ? Math.max(0, prevLanded - cogsNgn) : coil?.landed_cost_ngn ?? null;
         db.prepare(
           `UPDATE coil_lots
-           SET qty_remaining = ?, qty_reserved = ?, current_weight_kg = ?
+           SET qty_remaining = ?, qty_reserved = ?, current_weight_kg = ?, landed_cost_ngn = ?
            WHERE coil_no = ?`
-        ).run(qtyRemaining, qtyReserved, qtyRemaining, row.coilNo);
+        ).run(qtyRemaining, qtyReserved, qtyRemaining, nextLanded, row.coilNo);
         updateCoilDerivedStateTx(db, row.coilNo);
         appendStockMovementTx(db, {
           atISO: completedAtISO,
@@ -748,6 +761,8 @@ export function completeProductionJob(db, jobID, payload = {}, opts = {}) {
           productID: row.productID,
           qty: -row.consumedWeightKg,
           detail: `${row.coilNo} consumed for ${row.metersProduced.toFixed(2)} m on ${jobID}`,
+          unitPriceNgn: uc || null,
+          valueNgn: cogsNgn,
         });
         /** Keep `products.stock_level` aligned with coil draw-down (GRN increases this SKU; completion must decrease). */
         adjustProductStockTx(db, row.productID, -row.consumedWeightKg);
@@ -781,6 +796,15 @@ export function completeProductionJob(db, jobID, payload = {}, opts = {}) {
       if (job.cutting_list_id) {
         db.prepare(`UPDATE cutting_lists SET status = 'Finished' WHERE id = ?`).run(job.cutting_list_id);
       }
+      applyAccessoryCompletionTx(
+        db,
+        jobID,
+        String(job.quotation_ref ?? '').trim(),
+        completedAtISO,
+        accPlan.plannedLines,
+        adjustProductStockTx,
+        appendStockMovementTx
+      );
       appendAuditLog(db, {
         actor: opts.actor,
         action: 'production.complete',

@@ -1,6 +1,6 @@
+import { accessoryFulfillmentSummaryForQuotation } from './accessoryFulfillment.js';
+import { publicUserFromRow } from './auth.js';
 import { branchPredicate } from './branchSql.js';
-import { normalizeWorkspaceDepartment } from './departmentRoleTemplates.js';
-
 /** @param {import('better-sqlite3').Database} db */
 
 function hasColumn(db, table, column) {
@@ -24,6 +24,16 @@ function parseCrmTagsJson(raw) {
   try {
     const j = JSON.parse(raw);
     return Array.isArray(j) ? j.filter((t) => typeof t === 'string' && t.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+function parsePaymentRequestLineItemsJson(raw) {
+  if (!raw || typeof raw !== 'string') return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v : [];
   } catch {
     return [];
   }
@@ -152,6 +162,10 @@ function mapQuotationRow(row) {
     materialColor,
     materialDesign,
     branchId: row.branch_id ?? '',
+    managerProductionApprovedAtISO: row.manager_production_approved_at_iso ?? null,
+    managerClearedAtISO: row.manager_cleared_at_iso ?? null,
+    managerFlaggedAtISO: row.manager_flagged_at_iso ?? null,
+    managerFlagReason: row.manager_flag_reason ?? '',
   };
 }
 
@@ -178,6 +192,245 @@ export function getQuotation(db, id) {
   const row = db.prepare(`SELECT * FROM quotations WHERE id = ?`).get(id);
   if (!row) return null;
   return enrichQuotationWithLineTable(db, mapQuotationRow(row));
+}
+
+export function listManagementItems(db, branchScope = 'ALL') {
+  const bQuo = branchWhere(db, 'quotations', branchScope);
+  const bCL = branchWhere(db, 'cutting_lists', branchScope);
+  const bRef = branchWhere(db, 'customer_refunds', branchScope);
+  const bJob = branchWhere(db, 'production_jobs', branchScope);
+
+  // 1. Quotations requiring clearance (Not cleared, not flagged yet, and has payments)
+  const pendingClearance = db.prepare(`
+    SELECT id, customer_name, total_ngn, paid_ngn, date_iso, status
+    FROM quotations 
+    WHERE manager_cleared_at_iso IS NULL 
+      AND manager_flagged_at_iso IS NULL
+      AND paid_ngn > 0
+      ${bQuo.sql}
+    ORDER BY date_iso DESC LIMIT 50
+  `).all(...bQuo.args);
+
+  // 2. Flagged transactions
+  const flagged = db.prepare(`
+    SELECT id, customer_name, total_ngn, manager_flag_reason, manager_flagged_at_iso
+    FROM quotations 
+    WHERE manager_flagged_at_iso IS NOT NULL
+      ${bQuo.sql}
+    ORDER BY manager_flagged_at_iso DESC LIMIT 50
+  `).all(...bQuo.args);
+
+  // 3. Production Overrides (70% threshold bypass requirements)
+  const productionOverrides = db.prepare(`
+    SELECT cl.id, cl.customer_name, cl.quotation_ref, cl.total_meters, q.paid_ngn, q.total_ngn
+    FROM cutting_lists cl
+    JOIN quotations q ON cl.quotation_ref = q.id
+    WHERE cl.status = 'Draft' 
+      AND (q.paid_ngn < (q.total_ngn * 0.7))
+      AND q.manager_production_approved_at_iso IS NULL
+      ${bCL.sql.replace('branch_id', 'cl.branch_id')}
+    ORDER BY cl.date_iso DESC LIMIT 50
+  `).all(...bCL.args);
+
+  // 4. Refund Requests
+  const pendingRefunds = db.prepare(`
+    SELECT refund_id, customer_name, quotation_ref, amount_ngn, requested_at_iso, reason_category
+    FROM customer_refunds
+    WHERE status = 'Pending'
+      ${bRef.sql}
+    ORDER BY requested_at_iso DESC LIMIT 50
+  `).all(...bRef.args);
+
+  // 5. Payment requests pending approval (column is approval_status, not status)
+  const pendingExpensesRaw = db.prepare(`
+    SELECT pr.request_id, pr.expense_id, pr.amount_requested_ngn, pr.request_date, pr.description, pr.approval_status,
+           pr.request_reference, pr.line_items_json, pr.attachment_name, pr.attachment_data_b64,
+           e.category AS expense_category
+    FROM payment_requests pr
+    LEFT JOIN expenses e ON e.expense_id = pr.expense_id
+    WHERE pr.approval_status = 'Pending'
+    ORDER BY pr.request_date DESC LIMIT 50
+  `).all();
+  const pendingExpenses = pendingExpensesRaw.map((row) => ({
+    request_id: row.request_id,
+    expense_id: row.expense_id,
+    amount_requested_ngn: row.amount_requested_ngn,
+    request_date: row.request_date,
+    description: row.description,
+    approval_status: row.approval_status,
+    request_reference: row.request_reference ?? '',
+    line_items: parsePaymentRequestLineItemsJson(row.line_items_json),
+    attachment_present: Boolean(row.attachment_data_b64 && String(row.attachment_data_b64).trim()),
+    attachment_name: row.attachment_name ?? '',
+    expense_category: row.expense_category ?? '',
+  }));
+
+  // 6. Completed production jobs awaiting conversion / manager review sign-off (High/Low or flag)
+  const pendingConversionReviews = db.prepare(`
+    SELECT job_id, cutting_list_id, quotation_ref, customer_name, product_name,
+      conversion_alert_state, manager_review_required, actual_meters, actual_weight_kg, completed_at_iso
+    FROM production_jobs
+    WHERE status = 'Completed'
+      AND (manager_review_signed_at_iso IS NULL OR TRIM(COALESCE(manager_review_signed_at_iso, '')) = '')
+      AND (
+        manager_review_required = 1
+        OR UPPER(TRIM(COALESCE(conversion_alert_state, ''))) IN ('HIGH', 'LOW')
+      )
+      ${bJob.sql}
+    ORDER BY completed_at_iso DESC
+    LIMIT 50
+  `).all(...bJob.args);
+
+  return {
+    pendingClearance,
+    flagged,
+    productionOverrides,
+    pendingRefunds,
+    pendingExpenses,
+    pendingConversionReviews,
+  };
+}
+
+const LEDGER_INFLOW_TYPES = new Set(['RECEIPT', 'ADVANCE_IN', 'OVERPAY_ADVANCE']);
+
+export function listManagerQuotationAudit(db, quotationRef) {
+  const qid = String(quotationRef || '').trim();
+  if (!qid) {
+    return {
+      ok: false,
+      error: 'quotationRef required',
+      quotation: null,
+      summary: null,
+      ledgerEntries: [],
+      receipts: [],
+      cuttingLists: [],
+      productionLogs: [],
+      conversionChecks: [],
+      jobCoils: [],
+      refunds: [],
+      totals: {
+        cuttingListMetersSum: 0,
+        completedProductionMetersSum: 0,
+        productionJobsMetersSum: 0,
+      },
+    };
+  }
+
+  const quotation = getQuotation(db, qid);
+  const qRow = db
+    .prepare(
+      `SELECT id, customer_name, total_ngn, paid_ngn, status, payment_status,
+        manager_cleared_at_iso, manager_flagged_at_iso, manager_production_approved_at_iso
+       FROM quotations WHERE id = ?`
+    )
+    .get(qid);
+
+  const ledgerEntries = db
+    .prepare(
+      `SELECT id, at_iso, type, amount_ngn, payment_method, bank_reference, purpose, note, created_by_name
+       FROM ledger_entries
+       WHERE quotation_ref = ?
+       ORDER BY at_iso ASC, id ASC`
+    )
+    .all(qid);
+
+  const receipts = ledgerEntries.filter((e) => LEDGER_INFLOW_TYPES.has(String(e.type)));
+
+  const cuttingLists = db
+    .prepare(
+      `SELECT id, date_iso, total_meters, status, handled_by
+       FROM cutting_lists
+       WHERE quotation_ref = ?
+       ORDER BY date_iso DESC`
+    )
+    .all(qid);
+
+  const cuttingListMetersSum = cuttingLists.reduce((s, cl) => s + (Number(cl.total_meters) || 0), 0);
+
+  const productionLogs = db
+    .prepare(
+      `SELECT job_id, cutting_list_id, product_name, planned_meters, actual_meters, actual_weight_kg, status,
+        conversion_alert_state, manager_review_required, completed_at_iso, operator_name,
+        manager_review_signed_at_iso, manager_review_remark,
+        start_date_iso, end_date_iso, machine_name, materials_note, created_at_iso
+       FROM production_jobs
+       WHERE quotation_ref = ?
+       ORDER BY (completed_at_iso IS NULL), completed_at_iso DESC, created_at_iso DESC`
+    )
+    .all(qid);
+
+  const jobIds = productionLogs.map((j) => j.job_id).filter(Boolean);
+  let conversionChecks = [];
+  let jobCoils = [];
+  if (jobIds.length) {
+    const ph = jobIds.map(() => '?').join(',');
+    conversionChecks = db
+      .prepare(
+        `SELECT job_id, coil_no, alert_state, actual_conversion_kg_per_m, standard_conversion_kg_per_m,
+          checked_at_iso, note, gauge_label, material_type_name
+         FROM production_conversion_checks
+         WHERE job_id IN (${ph})
+         ORDER BY checked_at_iso DESC`
+      )
+      .all(...jobIds);
+    jobCoils = db
+      .prepare(
+        `SELECT job_id, coil_no, meters_produced, consumed_weight_kg, opening_weight_kg, closing_weight_kg,
+          actual_conversion_kg_per_m, sequence_no
+         FROM production_job_coils
+         WHERE job_id IN (${ph})
+         ORDER BY job_id, sequence_no ASC`
+      )
+      .all(...jobIds);
+  }
+
+  const refunds = db
+    .prepare(
+      `SELECT refund_id, product, reason_category, amount_ngn, status, requested_at_iso, approved_amount_ngn,
+        paid_amount_ngn, reason, calculation_notes, cutting_list_ref, manager_comments
+       FROM customer_refunds
+       WHERE quotation_ref = ?
+       ORDER BY requested_at_iso DESC`
+    )
+    .all(qid);
+
+  const orderTotal = Number(qRow?.total_ngn) || 0;
+  const paid = Number(qRow?.paid_ngn) || 0;
+  const outstanding = Math.max(0, orderTotal - paid);
+  const completedMeters = productionLogs
+    .filter((j) => String(j.status || '').toLowerCase() === 'completed')
+    .reduce((s, j) => s + (Number(j.actual_meters) || 0), 0);
+  const allJobMeters = productionLogs.reduce((s, j) => s + (Number(j.actual_meters) || 0), 0);
+
+  return {
+    ok: true,
+    quotation,
+    summary: qRow
+      ? {
+          orderTotalNgn: orderTotal,
+          paidNgn: paid,
+          outstandingNgn: outstanding,
+          percentPaid: orderTotal > 0 ? Math.round((paid / orderTotal) * 1000) / 10 : null,
+          status: qRow.status,
+          paymentStatus: qRow.payment_status,
+          managerClearedAtIso: qRow.manager_cleared_at_iso,
+          managerFlaggedAtIso: qRow.manager_flagged_at_iso,
+          managerProductionApprovedAtIso: qRow.manager_production_approved_at_iso,
+        }
+      : null,
+    ledgerEntries,
+    receipts,
+    cuttingLists,
+    productionLogs,
+    conversionChecks,
+    jobCoils,
+    refunds,
+    totals: {
+      cuttingListMetersSum: cuttingListMetersSum,
+      completedProductionMetersSum: completedMeters,
+      productionJobsMetersSum: allJobMeters,
+    },
+  };
 }
 
 function listDeliveryLinesForId(db, deliveryId) {
@@ -406,6 +659,8 @@ export function listCoilLots(db, branchScope = 'ALL') {
       branchId: row.branch_id ?? '',
       parentCoilNo: row.parent_coil_no ?? '',
       materialOriginNote: row.material_origin_note ?? '',
+      landedCostNgn: row.landed_cost_ngn != null ? Number(row.landed_cost_ngn) : null,
+      unitCostNgnPerKg: row.unit_cost_ngn_per_kg != null ? Number(row.unit_cost_ngn_per_kg) : null,
     }));
 }
 
@@ -423,6 +678,7 @@ export function listStockMovements(db) {
       detail: row.detail,
       dateISO: row.date_iso,
       unitPriceNgn: row.unit_price_ngn,
+      valueNgn: row.value_ngn != null ? Number(row.value_ngn) : null,
     }));
 }
 
@@ -549,6 +805,64 @@ export function listProductionJobs(db, branchScope = 'ALL') {
       operatorName: row.operator_name ?? '',
       branchId: row.branch_id ?? '',
     }));
+}
+
+export function listProductionJobAccessoryUsage(db, branchScope = 'ALL') {
+  const b = branchWhere(db, 'production_jobs', branchScope);
+  const branchSql = b.sql ? b.sql.replace(/\bbranch_id\b/g, 'j.branch_id') : '';
+  const rows = db
+    .prepare(
+      `SELECT u.id AS id, u.job_id AS job_id, u.quotation_ref AS quotation_ref, u.quote_line_id AS quote_line_id,
+              u.name AS name, u.ordered_qty AS ordered_qty, u.supplied_qty AS supplied_qty,
+              u.inventory_product_id AS inventory_product_id, u.posted_at_iso AS posted_at_iso
+       FROM production_job_accessory_usage u
+       INNER JOIN production_jobs j ON j.job_id = u.job_id
+       WHERE 1=1${branchSql}
+       ORDER BY u.posted_at_iso DESC`
+    )
+    .all(...b.args);
+  return rows.map((row) => ({
+    id: row.id,
+    jobID: row.job_id,
+    quotationRef: row.quotation_ref ?? '',
+    quoteLineId: row.quote_line_id ?? '',
+    name: row.name ?? '',
+    orderedQty: Number(row.ordered_qty) || 0,
+    suppliedQty: Number(row.supplied_qty) || 0,
+    inventoryProductId: row.inventory_product_id ?? '',
+    postedAtISO: row.posted_at_iso ?? '',
+  }));
+}
+
+/** Receipts, cutting lists, and produced metres for the refund modal “Transaction Intelligence” panel. */
+export function getRefundIntelligenceForQuotation(db, quotationRef, branchScope = 'ALL') {
+  const ref = String(quotationRef || '').trim();
+  if (!ref) {
+    return {
+      receipts: [],
+      cuttingLists: [],
+      summary: { producedMeters: 0, accessoriesSummary: { lines: [] } },
+    };
+  }
+  const receipts = listSalesReceipts(db, branchScope)
+    .filter((r) => String(r.quotationRef || '').trim() === ref)
+    .map((r) => ({ id: r.id, amountNgn: r.amountNgn }));
+  const cuttingLists = listCuttingLists(db, branchScope).filter(
+    (cl) => String(cl.quotationRef || '').trim() === ref
+  );
+  const jobs = listProductionJobs(db, branchScope).filter(
+    (j) => String(j.quotationRef || '').trim() === ref
+  );
+  const producedMeters = jobs.reduce((sum, j) => sum + (Number(j.actualMeters) || 0), 0);
+  const accLines = accessoryFulfillmentSummaryForQuotation(db, ref);
+  return {
+    receipts,
+    cuttingLists,
+    summary: {
+      producedMeters,
+      accessoriesSummary: { lines: accLines },
+    },
+  };
 }
 
 export function listRefunds(db, branchScope = 'ALL') {
@@ -699,27 +1013,36 @@ export function listPaymentRequests(db, branchScope = 'ALL') {
        ORDER BY pr.request_date DESC`
     )
     .all(...scopeArgs)
-    .map((row) => ({
-      requestID: row.request_id,
-      expenseID: row.expense_id,
-      amountRequestedNgn: row.amount_requested_ngn,
-      requestDate: row.request_date,
-      approvalStatus: row.approval_status,
-      description: row.description,
-      approvedBy: row.approved_by ?? '',
-      approvedAtISO: row.approved_at_iso ?? '',
-      approvalNote: row.approval_note ?? '',
-      paidAmountNgn: row.paid_amount_ngn ?? 0,
-      paidAtISO: row.paid_at_iso ?? '',
-      paidBy: row.paid_by ?? '',
-      paymentNote: row.payment_note ?? '',
-      branchId: row.expense_branch_id ?? '',
-      expenseCategory: row.expense_category ?? '',
-      isStaffLoan: String(row.expense_category || '').toLowerCase().includes('staff loan'),
-      hrRequestId: row.expense_reference ?? '',
-      staffUserId: row.staff_user_id ?? '',
-      staffDisplayName: row.staff_display_name ?? '',
-    }));
+    .map((row) => {
+      const b64 = row.attachment_data_b64;
+      const hasAttachment = Boolean(b64 && String(b64).length > 0);
+      return {
+        requestID: row.request_id,
+        expenseID: row.expense_id,
+        amountRequestedNgn: row.amount_requested_ngn,
+        requestDate: row.request_date,
+        approvalStatus: row.approval_status,
+        description: row.description,
+        approvedBy: row.approved_by ?? '',
+        approvedAtISO: row.approved_at_iso ?? '',
+        approvalNote: row.approval_note ?? '',
+        paidAmountNgn: row.paid_amount_ngn ?? 0,
+        paidAtISO: row.paid_at_iso ?? '',
+        paidBy: row.paid_by ?? '',
+        paymentNote: row.payment_note ?? '',
+        branchId: row.expense_branch_id ?? '',
+        expenseCategory: row.expense_category ?? '',
+        isStaffLoan: String(row.expense_category || '').toLowerCase().includes('staff loan'),
+        hrRequestId: row.expense_reference ?? '',
+        staffUserId: row.staff_user_id ?? '',
+        staffDisplayName: row.staff_display_name ?? '',
+        requestReference: row.request_reference ?? '',
+        lineItems: parsePaymentRequestLineItemsJson(row.line_items_json),
+        attachmentName: row.attachment_name ?? '',
+        attachmentMime: row.attachment_mime ?? '',
+        attachmentPresent: hasAttachment,
+      };
+    });
 }
 
 export function listAccountsPayable(db, branchScope = 'ALL') {
@@ -744,10 +1067,11 @@ export function listAccountsPayable(db, branchScope = 'ALL') {
     }));
 }
 
-export function listBankReconciliation(db) {
+export function listBankReconciliation(db, branchScope = 'ALL') {
+  const b = branchWhere(db, 'bank_reconciliation_lines', branchScope);
   return db
-    .prepare(`SELECT * FROM bank_reconciliation_lines ORDER BY bank_date_iso DESC`)
-    .all()
+    .prepare(`SELECT * FROM bank_reconciliation_lines WHERE 1=1${b.sql} ORDER BY bank_date_iso DESC`)
+    .all(...b.args)
     .map((row) => ({
       id: row.id,
       bankDateISO: row.bank_date_iso,
@@ -755,6 +1079,7 @@ export function listBankReconciliation(db) {
       amountNgn: row.amount_ngn,
       systemMatch: row.system_match,
       status: row.status,
+      branchId: row.branch_id || '',
     }));
 }
 
@@ -809,17 +1134,32 @@ export function listAppUsers(db) {
   return db
     .prepare(`SELECT * FROM app_users ORDER BY display_name COLLATE NOCASE, username COLLATE NOCASE`)
     .all()
-    .map((row) => ({
-      id: row.id,
-      username: row.username,
-      displayName: row.display_name,
-      email: row.email && String(row.email).trim() ? String(row.email).trim().toLowerCase() : '',
-      roleKey: row.role_key,
-      department: normalizeWorkspaceDepartment(row.department),
-      status: row.status,
-      lastLoginAtISO: row.last_login_at_iso ?? '',
-      createdAtISO: row.created_at_iso,
-    }));
+    .map((row) => {
+      const u = publicUserFromRow(row);
+      const rawJson = row.permissions_json ?? row.permissionsJson;
+      let hasCustomPermissions = false;
+      if (rawJson && String(rawJson).trim()) {
+        try {
+          const p = JSON.parse(rawJson);
+          hasCustomPermissions = Array.isArray(p);
+        } catch {
+          /* ignore */
+        }
+      }
+      return {
+        id: u.id,
+        username: u.username,
+        displayName: u.displayName,
+        email: u.email && String(u.email).trim() ? String(u.email).trim().toLowerCase() : '',
+        roleKey: u.roleKey,
+        department: u.department,
+        status: u.status,
+        permissions: u.permissions,
+        hasCustomPermissions,
+        lastLoginAtISO: u.lastLoginAtISO || '',
+        createdAtISO: u.createdAtISO || row.created_at_iso || '',
+      };
+    });
 }
 
 export function listPeriodLocks(db) {

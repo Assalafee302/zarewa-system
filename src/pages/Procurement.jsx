@@ -5,7 +5,6 @@ import {
   Plus,
   Truck,
   Anchor,
-  Clock,
   DollarSign,
   X,
   ChevronDown,
@@ -46,14 +45,18 @@ function poTotalNgn(po) {
 
 const PILL = 'inline-flex items-center px-2 py-0.5 rounded-md text-[9px] font-semibold uppercase tracking-wide';
 
-const statusTone = (st) => {
-  if (st === 'Received') return 'bg-emerald-100 text-emerald-800';
-  if (st === 'In Transit') return 'bg-sky-100 text-sky-900';
-  if (st === 'On loading') return 'bg-violet-100 text-violet-900';
-  if (st === 'Approved') return 'bg-teal-100 text-teal-900';
-  if (st === 'Rejected') return 'bg-rose-100 text-rose-800';
-  return 'bg-amber-100 text-amber-900';
+/** Bordered chip — matches Stock / Finance compact lists */
+const statusChipBorder = (st) => {
+  if (st === 'Received') return 'border-emerald-200 bg-emerald-50 text-emerald-800';
+  if (st === 'In Transit') return 'border-sky-200 bg-sky-50 text-sky-900';
+  if (st === 'On loading') return 'border-violet-200 bg-violet-50 text-violet-900';
+  if (st === 'Approved') return 'border-teal-200 bg-teal-50 text-teal-900';
+  if (st === 'Rejected') return 'border-rose-200 bg-rose-50 text-rose-800';
+  return 'border-amber-200 bg-amber-50 text-amber-900';
 };
+
+const CARD_ROW =
+  'rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md py-1.5 px-2.5 shadow-sm transition-colors hover:bg-white/70';
 
 const Procurement = () => {
   const location = useLocation();
@@ -611,6 +614,7 @@ const Procurement = () => {
   return (
     <PageShell blurred={isAnyModalOpen}>
       <PageHeader
+        eyebrow="Procurement"
         title="Purchases"
         subtitle="Coil procurement (KG) for MD — suppliers Kano / Abuja / Lagos, transport, conversion (kg/m), Finance-ready payments."
         actions={
@@ -746,7 +750,7 @@ const Procurement = () => {
 
               {activeTab === 'purchases' && (
                 <div className="space-y-3">
-                  <div className="flex flex-wrap gap-2 mb-4">
+                  <div className="flex flex-wrap gap-2 mb-2">
                     <button
                       type="button"
                       onClick={() => setShowInvoiceModal(true)}
@@ -755,155 +759,154 @@ const Procurement = () => {
                       Supplier invoice
                     </button>
                   </div>
-                  <div className="hidden sm:grid grid-cols-12 px-3 text-[9px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100 pb-2">
-                    <div className="col-span-2">PO</div>
-                    <div className="col-span-3">Supplier</div>
-                    <div className="col-span-2">Date</div>
-                    <div className="col-span-2 text-right">Total</div>
-                    <div className="col-span-3">Status / actions</div>
-                  </div>
-                  {filteredPOs.map((p) => (
-                    <div
-                      key={p.poID}
-                      className="z-list-row !py-2.5 rounded-xl border border-slate-100/80 bg-white/80 px-3 space-y-2 transition-colors hover:border-[#134e4a]/15 hover:bg-[#134e4a]/[0.03]"
-                    >
-                      <div className="grid grid-cols-12 gap-y-2 items-center">
-                        <div className="col-span-12 sm:col-span-2 font-mono text-[11px] font-bold text-[#134e4a]">
-                          {p.poID}
-                        </div>
-                        <div className="col-span-12 sm:col-span-3 text-[11px] font-medium text-slate-800 truncate">
-                          {p.supplierName}
-                        </div>
-                        <div className="col-span-12 sm:col-span-2 text-[11px] text-slate-500 flex items-center gap-1">
-                          <Clock size={12} /> {p.orderDateISO}
-                        </div>
-                        <div className="col-span-12 sm:col-span-2 text-right text-[11px] font-bold text-[#134e4a] tabular-nums">
-                          {formatNgn(poTotalNgn(p))}
-                        </div>
-                        <div className="col-span-12 sm:col-span-3 flex flex-wrap gap-1.5 items-center">
-                          <span className={`${PILL} ${statusTone(p.status)}`}>{p.status}</span>
-                        </div>
-                      </div>
-                      <p className="text-[10px] text-slate-500">
-                        {p.lines.length} coil line(s)
-                        {p.transportAgentName ? ` · ${p.transportAgentName}` : ''}
-                        {p.transportReference ? ` · Ref ${p.transportReference}` : ''}
-                        {p.transportTreasuryMovementId
-                          ? ` · Treasury mv ${p.transportTreasuryMovementId}`
-                          : ''}
-                        {p.transportAmountNgn
-                          ? ` · Haulage posted ${formatNgn(p.transportAmountNgn)}`
-                          : ''}
-                        {p.transportPaid ? ' · Haulage settled' : ''}
-                        {' · Supplier paid '}
-                        {formatNgn(p.supplierPaidNgn || 0)}
-                      </p>
-                      {p.transportNote ? (
-                        <p className="text-[10px] text-slate-500">Transport note: {p.transportNote}</p>
-                      ) : null}
-                      <div className="flex flex-wrap gap-2">
-                        {p.status === 'Pending' ? (
-                          <>
+                  <ul className="space-y-1.5">
+                    {filteredPOs.map((p) => {
+                      const meta2 = [
+                        p.orderDateISO,
+                        `${p.lines.length} coil line(s)`,
+                        p.transportAgentName,
+                        p.transportReference ? `Ref ${p.transportReference}` : null,
+                        p.transportTreasuryMovementId ? `Treasury ${p.transportTreasuryMovementId}` : null,
+                        p.transportAmountNgn ? `Haulage ${formatNgn(p.transportAmountNgn)}` : null,
+                        p.transportPaid ? 'Haulage settled' : null,
+                        `Supplier paid ${formatNgn(p.supplierPaidNgn || 0)}`,
+                        p.transportNote ? `Note: ${p.transportNote}` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ');
+                      return (
+                        <li key={p.poID} className={CARD_ROW}>
+                          <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
+                            <div className="min-w-0 leading-tight flex-1">
+                              <div className="flex items-center justify-between gap-2 min-w-0">
+                                <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
+                                  <span className="font-mono">{p.poID}</span>
+                                  <span className="font-medium text-slate-600"> · {p.supplierName}</span>
+                                </p>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <span className="text-[11px] font-black text-[#134e4a] tabular-nums">
+                                    {formatNgn(poTotalNgn(p))}
+                                  </span>
+                                  <span
+                                    className={`text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border ${statusChipBorder(p.status)}`}
+                                  >
+                                    {p.status}
+                                  </span>
+                                </div>
+                              </div>
+                              <p
+                                className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2"
+                                title={meta2}
+                              >
+                                {meta2}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5 pt-1.5 mt-1 border-t border-dashed border-slate-200">
+                            {p.status === 'Pending' ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md bg-[#134e4a] text-white hover:brightness-110"
+                                  onClick={async () => {
+                                    const r = await setPurchaseOrderStatus(p.poID, 'Approved');
+                                    if (r.ok) showToast(`${p.poID} approved.`);
+                                    else showToast(r.error || 'Update failed', { variant: 'error' });
+                                  }}
+                                >
+                                  Approve
+                                </button>
+                                <button
+                                  type="button"
+                                  className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                                  onClick={async () => {
+                                    const r = await setPurchaseOrderStatus(p.poID, 'Rejected');
+                                    if (r.ok) showToast(`${p.poID} rejected.`);
+                                    else showToast(r.error || 'Update failed', { variant: 'error' });
+                                  }}
+                                >
+                                  Reject
+                                </button>
+                              </>
+                            ) : null}
+                            {p.status === 'Approved' || p.status === 'On loading' ? (
+                              <button
+                                type="button"
+                                className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-violet-300 bg-violet-50 text-violet-900 hover:bg-violet-100"
+                                onClick={() => {
+                                  setTransportForm({
+                                    poID: p.poID,
+                                    agentId: p.transportAgentId || '',
+                                    transportReference: p.transportReference || '',
+                                    transportNote: p.transportNote || '',
+                                  });
+                                  setShowTransportModal(true);
+                                }}
+                              >
+                                {p.status === 'On loading' ? 'Edit transport' : 'Assign transport'}
+                              </button>
+                            ) : null}
+                            {p.status === 'On loading' ? (
+                              <button
+                                type="button"
+                                className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-sky-300 bg-sky-50 text-sky-900 hover:bg-sky-100"
+                                onClick={() => {
+                                  setPostTransportForm({
+                                    poID: p.poID,
+                                    amountNgn: '',
+                                    treasuryAccountId: String(treasuryAccounts[0]?.id ?? ''),
+                                    reference: p.transportReference || '',
+                                    dateISO: new Date().toISOString().slice(0, 10),
+                                    note: '',
+                                    recordTreasury: false,
+                                  });
+                                  setShowPostTransportModal(true);
+                                }}
+                              >
+                                Post in transit
+                              </button>
+                            ) : null}
+                            {p.status === 'In Transit' && !p.transportPaid ? (
+                              <button
+                                type="button"
+                                className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-sky-300 bg-sky-100 text-sky-900 hover:bg-sky-200"
+                                onClick={async () => {
+                                  const r = await markPurchaseTransportPaid(p.poID);
+                                  if (r.ok) showToast('Haulage marked settled (no treasury line).');
+                                  else showToast(r.error || 'Update failed', { variant: 'error' });
+                                }}
+                              >
+                                Haulage settled
+                              </button>
+                            ) : null}
                             <button
                               type="button"
-                              className="text-[9px] font-bold uppercase px-2 py-1 rounded-lg bg-[#134e4a] text-white"
-                              onClick={async () => {
-                                const r = await setPurchaseOrderStatus(p.poID, 'Approved');
-                                if (r.ok) showToast(`${p.poID} approved.`);
-                                else showToast(r.error || 'Update failed', { variant: 'error' });
+                              disabled={!canRecordSupplierPayment}
+                              title={
+                                canRecordSupplierPayment
+                                  ? undefined
+                                  : 'Supplier payments are controlled in Finance for signed-in finance roles.'
+                              }
+                              className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-slate-200 text-[#134e4a] bg-white hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                              onClick={() => {
+                                if (!canRecordSupplierPayment) return;
+                                setPayForm({
+                                  poID: p.poID,
+                                  amountNgn: '',
+                                  note: '',
+                                  paidBy: currentActorLabel,
+                                  treasuryAccountId: String(treasuryAccounts[0]?.id ?? ''),
+                                });
+                                setShowPayModal(true);
                               }}
                             >
-                              Approve
+                              Supplier pay
                             </button>
-                            <button
-                              type="button"
-                              className="text-[9px] font-bold uppercase px-2 py-1 rounded-lg border border-slate-200"
-                              onClick={async () => {
-                                const r = await setPurchaseOrderStatus(p.poID, 'Rejected');
-                                if (r.ok) showToast(`${p.poID} rejected.`);
-                                else showToast(r.error || 'Update failed', { variant: 'error' });
-                              }}
-                            >
-                              Reject
-                            </button>
-                          </>
-                        ) : null}
-                        {p.status === 'Approved' || p.status === 'On loading' ? (
-                          <button
-                            type="button"
-                            className="text-[9px] font-bold uppercase px-2 py-1 rounded-lg bg-violet-700 text-white"
-                            onClick={() => {
-                              setTransportForm({
-                                poID: p.poID,
-                                agentId: p.transportAgentId || '',
-                                transportReference: p.transportReference || '',
-                                transportNote: p.transportNote || '',
-                              });
-                              setShowTransportModal(true);
-                            }}
-                          >
-                            {p.status === 'On loading' ? 'Edit transport link' : 'Assign transport'}
-                          </button>
-                        ) : null}
-                        {p.status === 'On loading' ? (
-                          <button
-                            type="button"
-                            className="text-[9px] font-bold uppercase px-2 py-1 rounded-lg bg-sky-800 text-white"
-                            onClick={() => {
-                              setPostTransportForm({
-                                poID: p.poID,
-                                amountNgn: '',
-                                treasuryAccountId: String(treasuryAccounts[0]?.id ?? ''),
-                                reference: p.transportReference || '',
-                                dateISO: new Date().toISOString().slice(0, 10),
-                                note: '',
-                                recordTreasury: false,
-                              });
-                              setShowPostTransportModal(true);
-                            }}
-                          >
-                            Post to in transit
-                          </button>
-                        ) : null}
-                        {p.status === 'In Transit' && !p.transportPaid ? (
-                          <button
-                            type="button"
-                            className="text-[9px] font-bold uppercase px-2 py-1 rounded-lg bg-sky-700 text-white"
-                            onClick={async () => {
-                              const r = await markPurchaseTransportPaid(p.poID);
-                              if (r.ok) showToast('Haulage marked settled (no treasury line).');
-                              else showToast(r.error || 'Update failed', { variant: 'error' });
-                            }}
-                          >
-                            Mark haulage settled
-                          </button>
-                        ) : null}
-                        <button
-                          type="button"
-                          disabled={!canRecordSupplierPayment}
-                          title={
-                            canRecordSupplierPayment
-                              ? undefined
-                              : 'Supplier payments are controlled in Finance for signed-in finance roles.'
-                          }
-                          className="text-[9px] font-bold uppercase px-2 py-1 rounded-lg border border-slate-200 text-[#134e4a] disabled:cursor-not-allowed disabled:opacity-40"
-                          onClick={() => {
-                            if (!canRecordSupplierPayment) return;
-                            setPayForm({
-                              poID: p.poID,
-                              amountNgn: '',
-                              note: '',
-                              paidBy: currentActorLabel,
-                              treasuryAccountId: String(treasuryAccounts[0]?.id ?? ''),
-                            });
-                            setShowPayModal(true);
-                          }}
-                        >
-                          Record supplier payment
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
                 </div>
               )}
 
@@ -934,45 +937,32 @@ const Procurement = () => {
                     })}
                   </div>
                   {transportSubTab === 'agents' && (
-                    <div className="hidden sm:grid grid-cols-12 px-3 text-[9px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100 pb-2">
-                      <div className="col-span-2">ID</div>
-                      <div className="col-span-5">Name</div>
-                      <div className="col-span-3">Region</div>
-                      <div className="col-span-2">Phone</div>
-                    </div>
-                  )}
-                  {transportSubTab === 'agents' && (
-                    <div className="space-y-1.5">
-                      {agents.length === 0 ? (
-                        <p className="text-[11px] text-slate-500 py-4 text-center rounded-xl border border-dashed border-slate-200 bg-slate-50/50">
-                          No transport agents yet — add one from the header.
-                        </p>
-                      ) : (
-                        agents.map((a) => (
-                          <div
+                    agents.length === 0 ? (
+                      <p className="text-[11px] text-slate-500 py-4 text-center rounded-lg border border-dashed border-slate-200 bg-slate-50/50">
+                        No transport agents yet — add one from the header.
+                      </p>
+                    ) : (
+                    <ul className="space-y-1.5">
+                        {agents.map((a) => (
+                          <li
                             key={a.id}
-                            className="z-list-row flex items-stretch gap-0 rounded-xl border border-slate-100/80 bg-white/80 overflow-hidden transition-colors hover:border-[#134e4a]/15 hover:bg-[#134e4a]/[0.03]"
+                            className={`${CARD_ROW} flex items-start justify-between gap-2`}
                           >
-                            <div className="grid grid-cols-12 gap-x-2 gap-y-1 px-3 py-2 flex-1 min-w-0 items-center">
-                              <div className="col-span-12 sm:col-span-2 font-mono text-[11px] font-bold text-[#134e4a]">
-                                {a.id}
-                              </div>
-                              <div className="col-span-12 sm:col-span-5 text-[11px] font-medium text-slate-800 truncate">
-                                {a.name}
-                              </div>
-                              <div className="col-span-12 sm:col-span-3 text-[11px] text-slate-500 truncate">
-                                {a.region}
-                              </div>
-                              <div className="col-span-12 sm:col-span-2 text-[11px] text-slate-500 truncate">
-                                {a.phone}
-                              </div>
+                            <div className="min-w-0 leading-tight flex-1">
+                              <p className="text-[11px] font-bold text-[#134e4a] truncate">
+                                <span className="font-mono">{a.id}</span>
+                                <span className="font-medium text-slate-600"> · {a.name}</span>
+                              </p>
+                              <p className="text-[8px] text-slate-500 mt-0.5 truncate" title={`${a.region} · ${a.phone}`}>
+                                {a.region} · {a.phone}
+                              </p>
                             </div>
-                            <div className="flex items-center gap-0 pr-1.5 border-l border-slate-200/80 bg-white/70 shrink-0">
+                            <div className="flex items-center gap-0 shrink-0">
                               <button
                                 type="button"
                                 title="Edit"
                                 onClick={() => openEditAgent(a)}
-                                className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-[#134e4a]"
+                                className="p-1.5 rounded-md text-slate-500 hover:bg-slate-100 hover:text-[#134e4a]"
                               >
                                 <Pencil size={14} />
                               </button>
@@ -980,85 +970,89 @@ const Procurement = () => {
                                 type="button"
                                 title="Delete"
                                 onClick={() => void removeAgent(a)}
-                                className="p-1.5 rounded-lg text-slate-500 hover:bg-rose-50 hover:text-rose-600"
+                                className="p-1.5 rounded-md text-slate-500 hover:bg-rose-50 hover:text-rose-600"
                               >
                                 <Trash2 size={14} />
                               </button>
                             </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
+                          </li>
+                        ))}
+                    </ul>
+                    )
                   )}
                   {transportSubTab === 'transit' && (
-                    <div className="space-y-1.5">
-                      {purchaseOrders.filter((p) => p.status === 'On loading' || p.status === 'In Transit')
+                    purchaseOrders.filter((p) => p.status === 'On loading' || p.status === 'In Transit')
                         .length === 0 ? (
-                        <p className="text-[11px] text-slate-500 py-4 text-center rounded-xl border border-dashed border-slate-200 bg-slate-50/50">
-                          Nothing on loading or in transit.
-                        </p>
-                      ) : (
-                        purchaseOrders
+                      <p className="text-[11px] text-slate-500 py-4 text-center rounded-lg border border-dashed border-slate-200 bg-slate-50/50">
+                        Nothing on loading or in transit.
+                      </p>
+                    ) : (
+                    <ul className="space-y-1.5">
+                        {purchaseOrders
                           .filter((p) => p.status === 'On loading' || p.status === 'In Transit')
-                          .map((p) => (
-                            <div
-                              key={p.poID}
-                              className="z-list-row !py-2.5 rounded-xl border border-slate-100/80 bg-white/80 px-3 flex flex-wrap items-start justify-between gap-2 transition-colors hover:border-[#134e4a]/15 hover:bg-[#134e4a]/[0.03]"
-                            >
-                              <div className="min-w-0 flex-1">
-                                <p className="font-mono text-[11px] font-bold text-[#134e4a]">{p.poID}</p>
-                                <p className="text-[11px] font-medium text-slate-700 truncate">{p.supplierName}</p>
-                                <p className="text-[10px] text-slate-500 mt-0.5">
-                                  Agent: {p.transportAgentName || '—'}
-                                  {p.transportReference ? ` · Ref ${p.transportReference}` : ''}
-                                </p>
-                                {p.transportNote ? (
-                                  <p className="text-[10px] text-slate-500 mt-0.5 line-clamp-2">{p.transportNote}</p>
-                                ) : null}
-                              </div>
-                              <span className={`${PILL} ${statusTone(p.status)} shrink-0`}>{p.status}</span>
-                            </div>
-                          ))
-                      )}
-                    </div>
+                          .map((p) => {
+                            const meta2 = [
+                              `Agent ${p.transportAgentName || '—'}`,
+                              p.transportReference ? `Ref ${p.transportReference}` : null,
+                              p.transportNote,
+                            ]
+                              .filter(Boolean)
+                              .join(' · ');
+                            return (
+                              <li key={p.poID} className={CARD_ROW}>
+                                <div className="flex items-start justify-between gap-2 min-w-0">
+                                  <div className="min-w-0 leading-tight flex-1">
+                                    <p className="text-[11px] font-bold text-[#134e4a] truncate">
+                                      <span className="font-mono">{p.poID}</span>
+                                      <span className="font-medium text-slate-600"> · {p.supplierName}</span>
+                                    </p>
+                                    <p
+                                      className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2"
+                                      title={meta2}
+                                    >
+                                      {meta2}
+                                    </p>
+                                  </div>
+                                  <span
+                                    className={`text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border shrink-0 ${statusChipBorder(p.status)}`}
+                                  >
+                                    {p.status}
+                                  </span>
+                                </div>
+                              </li>
+                            );
+                          })}
+                    </ul>
+                    )
                   )}
                 </div>
               )}
 
               {activeTab === 'suppliers' && (
-                <div className="space-y-1.5">
-                  <div className="hidden sm:grid grid-cols-12 px-3 text-[9px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100 pb-2">
-                    <div className="col-span-2">ID</div>
-                    <div className="col-span-6">Name</div>
-                    <div className="col-span-2">City</div>
-                    <div className="col-span-2 text-right">Link</div>
-                  </div>
-                  {filteredSuppliers.length === 0 ? (
-                    <p className="text-[11px] text-slate-500 py-4 text-center rounded-xl border border-dashed border-slate-200 bg-slate-50/50">
-                      No suppliers match this search.
-                    </p>
-                  ) : (
-                    filteredSuppliers.map((s) => (
-                      <div
+                filteredSuppliers.length === 0 ? (
+                  <p className="text-[11px] text-slate-500 py-4 text-center rounded-lg border border-dashed border-slate-200 bg-slate-50/50">
+                    No suppliers match this search.
+                  </p>
+                ) : (
+                <ul className="space-y-1.5">
+                    {filteredSuppliers.map((s) => (
+                      <li
                         key={s.supplierID}
-                        className="z-list-row flex items-stretch gap-0 rounded-xl border border-slate-100/80 bg-white/80 overflow-hidden transition-colors hover:border-[#134e4a]/15 hover:bg-[#134e4a]/[0.03]"
+                        className={`${CARD_ROW} flex items-stretch gap-0 !p-0 overflow-hidden`}
                       >
                         <Link
                           to={`/procurement/suppliers/${encodeURIComponent(s.supplierID)}`}
-                          className="grid grid-cols-12 gap-x-2 gap-y-1 px-3 py-2 flex-1 min-w-0 items-center hover:bg-[#134e4a]/[0.04] transition-colors"
+                          className="flex-1 min-w-0 py-1.5 px-2.5 hover:bg-[#134e4a]/[0.04] transition-colors leading-tight"
                         >
-                          <div className="col-span-12 sm:col-span-2 font-mono text-[11px] font-bold text-[#134e4a]">
-                            {s.supplierID}
-                          </div>
-                          <div className="col-span-12 sm:col-span-6 text-[11px] font-medium text-slate-800 truncate">
-                            {s.name}
-                          </div>
-                          <div className="col-span-12 sm:col-span-2 text-[11px] text-slate-500">{s.city}</div>
-                          <div className="col-span-12 sm:col-span-2 text-[9px] font-bold uppercase text-slate-400 text-right">
-                            Profile →
-                          </div>
+                          <p className="text-[11px] font-bold text-[#134e4a] truncate">
+                            <span className="font-mono">{s.supplierID}</span>
+                            <span className="font-medium text-slate-600"> · {s.name}</span>
+                          </p>
+                          <p className="text-[8px] text-slate-500 mt-0.5">
+                            {s.city || '—'} · <span className="font-semibold text-sky-800">Profile →</span>
+                          </p>
                         </Link>
-                        <div className="flex items-center gap-0 pr-1.5 border-l border-slate-200/80 bg-white/70 shrink-0">
+                        <div className="flex items-center pr-1 border-l border-slate-200/80 bg-white/60 shrink-0">
                           <button
                             type="button"
                             title="Edit"
@@ -1066,7 +1060,7 @@ const Procurement = () => {
                               e.preventDefault();
                               openEditSupplier(s);
                             }}
-                            className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-[#134e4a]"
+                            className="p-1.5 rounded-md text-slate-500 hover:bg-slate-100 hover:text-[#134e4a]"
                           >
                             <Pencil size={14} />
                           </button>
@@ -1077,15 +1071,15 @@ const Procurement = () => {
                               e.preventDefault();
                               void removeSupplier(s);
                             }}
-                            className="p-1.5 rounded-lg text-slate-500 hover:bg-rose-50 hover:text-rose-600"
+                            className="p-1.5 rounded-md text-slate-500 hover:bg-rose-50 hover:text-rose-600"
                           >
                             <Trash2 size={14} />
                           </button>
                         </div>
-                      </div>
-                    ))
-                  )}
-                </div>
+                      </li>
+                    ))}
+                </ul>
+                )
               )}
 
               {activeTab === 'conversion' && (
@@ -1139,67 +1133,61 @@ const Procurement = () => {
                       </span>
                     </div>
                   </div>
-                  <div className="rounded-xl border border-slate-200/90 overflow-hidden bg-white/80">
-                    <div className="hidden md:grid grid-cols-12 gap-x-2 px-3 py-1.5 bg-slate-100 text-[9px] font-semibold text-slate-500 uppercase tracking-wider border-b border-slate-200/80">
-                      <div className="col-span-2">Colour</div>
-                      <div className="col-span-1">Ga.</div>
-                      <div className="col-span-2 text-right">Kg</div>
-                      <div className="col-span-2 text-right">m</div>
-                      <div className="col-span-2 text-right">kg/m</div>
-                      <div className="col-span-2">Notes</div>
-                      <div className="col-span-1 text-right"> </div>
-                    </div>
+                  <div className="rounded-lg border border-slate-200/60 bg-white/30 backdrop-blur-md p-2 shadow-sm">
                     {procurementCatalog.length === 0 ? (
-                      <p className="text-[11px] text-slate-500 py-4 px-3 text-center">
+                      <p className="text-[11px] text-slate-500 py-4 px-2 text-center">
                         No conversion rows — add one from the header.
                       </p>
                     ) : (
-                      procurementCatalog.map((c) => (
-                        <div
-                          key={c.id}
-                          className="z-list-row border-t border-slate-100 first:border-t-0 px-3 py-2 transition-colors hover:bg-[#134e4a]/[0.03] md:grid md:grid-cols-12 md:gap-x-2 md:items-center"
-                        >
-                          <div className="md:col-span-2 font-semibold text-[11px] text-[#134e4a]">{c.color}</div>
-                          <div className="md:col-span-1 text-[11px] text-slate-700">{c.gauge}</div>
-                          <div className="md:col-span-2 text-right font-mono tabular-nums text-[11px]">
-                            {Number(c.offerKg || 0).toLocaleString()}
-                          </div>
-                          <div className="md:col-span-2 text-right font-mono tabular-nums text-[11px]">
-                            {Number(c.offerMeters || 0).toLocaleString()}
-                          </div>
-                          <div className="md:col-span-2 text-right font-mono tabular-nums text-[11px]">{c.conversionKgPerM}</div>
-                          <div className="md:col-span-2 text-[10px] text-slate-500 truncate min-w-0">{c.label}</div>
-                          <div className="md:col-span-1 flex md:justify-end items-center gap-0.5 pt-1 md:pt-0">
-                            <button
-                              type="button"
-                              title="Edit conversion"
-                              onClick={() => openEditConversion(c)}
-                              className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-[#134e4a]"
+                      <ul className="space-y-1.5">
+                        {procurementCatalog.map((c) => {
+                          const meta2 = [
+                            `${Number(c.offerKg || 0).toLocaleString()} kg`,
+                            `${Number(c.offerMeters || 0).toLocaleString()} m`,
+                            c.label,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ');
+                          return (
+                            <li
+                              key={c.id}
+                              className={`${CARD_ROW} flex items-start justify-between gap-2`}
                             >
-                              <Pencil size={14} />
-                            </button>
-                            <button
-                              type="button"
-                              title="Delete conversion"
-                              onClick={() => void removeConversion(c)}
-                              className="p-1.5 rounded-lg text-slate-500 hover:bg-rose-50 hover:text-rose-600"
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          </div>
-                          <div className="md:hidden mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-slate-500">
-                            <span>
-                              <span className="text-slate-400">kg</span> {Number(c.offerKg || 0).toLocaleString()}
-                            </span>
-                            <span>
-                              <span className="text-slate-400">m</span> {Number(c.offerMeters || 0).toLocaleString()}
-                            </span>
-                            <span>
-                              <span className="text-slate-400">kg/m</span> {c.conversionKgPerM}
-                            </span>
-                          </div>
-                        </div>
-                      ))
+                              <div className="min-w-0 leading-tight flex-1">
+                                <p className="text-[11px] font-bold text-[#134e4a] truncate">
+                                  {c.color}
+                                  <span className="font-medium text-slate-600"> · {c.gauge}</span>
+                                  <span className="font-mono tabular-nums"> · {c.conversionKgPerM} kg/m</span>
+                                </p>
+                                <p
+                                  className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2"
+                                  title={meta2}
+                                >
+                                  {meta2}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-0 shrink-0">
+                                <button
+                                  type="button"
+                                  title="Edit conversion"
+                                  onClick={() => openEditConversion(c)}
+                                  className="p-1.5 rounded-md text-slate-500 hover:bg-slate-100 hover:text-[#134e4a]"
+                                >
+                                  <Pencil size={14} />
+                                </button>
+                                <button
+                                  type="button"
+                                  title="Delete conversion"
+                                  onClick={() => void removeConversion(c)}
+                                  className="p-1.5 rounded-md text-slate-500 hover:bg-rose-50 hover:text-rose-600"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
                     )}
                   </div>
                 </div>

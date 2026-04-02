@@ -1,5 +1,5 @@
 import React from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Button } from './ui';
 import {
@@ -14,8 +14,11 @@ import {
   ChevronLeft,
   ChevronRight,
   Users,
+  ShieldCheck,
+  Scale,
 } from 'lucide-react';
 import { useWorkspace } from '../context/WorkspaceContext';
+import { canAccessAccountingHq } from '../lib/accountingAccess';
 import { ZAREWA_LOGO_SRC } from '../Data/companyQuotation';
 
 function pathMatches(locationPath, basePath) {
@@ -25,9 +28,11 @@ function pathMatches(locationPath, basePath) {
 
 const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggleCollapsed }) => {
   const location = useLocation();
-  const navigate = useNavigate();
   const ws = useWorkspace();
   const p = location.pathname;
+  const perms = ws?.session?.permissions ?? [];
+  const user = ws?.session?.user;
+  const showAccounting = canAccessAccountingHq(perms, user);
 
   const closeIfMobile = () => {
     onCloseMobile?.();
@@ -71,6 +76,13 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
       visible: ws?.canAccessModule?.('finance') ?? true,
     },
     {
+      icon: <Scale size={18} />,
+      label: 'Accounting',
+      path: '/accounting',
+      active: pathMatches(p, '/accounting'),
+      visible: showAccounting,
+    },
+    {
       icon: <BarChart3 size={18} />,
       label: 'Reports',
       path: '/reports',
@@ -84,6 +96,12 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
       visible: ws?.canAccessModule?.('hr') ?? true,
     },
     {
+      icon: <ShieldCheck size={18} />,
+      label: 'Management',
+      path: '/manager',
+      visible: ['sales_manager', 'admin', 'md', 'ceo'].includes(ws?.session?.user?.roleKey),
+    },
+    {
       icon: <Settings size={18} />,
       label: 'Settings',
       path: '/settings',
@@ -93,7 +111,7 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
 
   return (
     <aside
-      className={`fixed left-0 top-0 max-w-[85vw] h-screen bg-[#134e4a] text-white flex flex-col z-[50] lg:z-40 border-r border-white/5 shadow-2xl lg:shadow-none transition-all duration-300 ease-out lg:translate-x-0 w-64 p-6 ${
+      className={`fixed left-0 top-0 max-w-[85vw] h-[100dvh] max-h-[100dvh] bg-[#134e4a] text-white flex flex-col z-[50] lg:z-40 border-r border-white/5 shadow-2xl lg:shadow-none transition-all duration-300 ease-out lg:translate-x-0 w-64 p-6 pt-[max(1.5rem,env(safe-area-inset-top))] pb-[max(1.5rem,env(safe-area-inset-bottom))] pl-[max(1.5rem,env(safe-area-inset-left))] ${
         collapsed ? 'lg:w-16 lg:max-w-none lg:px-2 lg:py-5 lg:overflow-x-hidden' : 'lg:w-64 lg:max-w-none'
       } ${mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}
       aria-label="Main navigation"
@@ -208,9 +226,13 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
         type="button"
         onClick={async () => {
           if (!window.confirm('Sign out of this workspace?')) return;
-          closeIfMobile();
-          await ws?.logout?.();
-          navigate('/', { replace: true });
+          try {
+            closeIfMobile();
+            await ws?.logout?.();
+            window.location.href = '/';
+          } catch {
+            window.location.href = '/';
+          }
         }}
         title="Sign out"
         aria-label="Sign out"

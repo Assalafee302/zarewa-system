@@ -8,18 +8,42 @@ async function apiSignIn(page, username, password) {
   const loginRes = await page.request.post('/api/session/login', { data: { username, password } });
   const bodyText = await loginRes.text();
   expect(loginRes.status(), bodyText).toBe(200);
+  await page.goto('/');
+  await expect(page.getByRole('navigation', { name: 'Modules' })).toBeVisible({ timeout: 20_000 });
   const cookies = await page.context().cookies();
   const csrf = cookies.find((c) => c.name === 'zarewa_csrf')?.value;
   expect(String(csrf || '')).toBeTruthy();
   await page.context().setExtraHTTPHeaders({ 'x-csrf-token': csrf });
-  await page.goto('/');
-  await expect(page.getByRole('navigation', { name: 'Modules' })).toBeVisible({ timeout: 20_000 });
+  const sess = await page.request.get('/api/session');
+  expect(sess.status(), await sess.text()).toBe(200);
 }
 
 async function apiSignOut(page) {
   await page.request.post('/api/session/logout');
   await page.context().setExtraHTTPHeaders({});
   await page.context().clearCookies();
+}
+
+async function apiAcceptRequiredPolicies(page, signatureName) {
+  const cookies = await page.context().cookies();
+  const csrf = cookies.find((c) => c.name === 'zarewa_csrf')?.value;
+  const headers = csrf ? { 'x-csrf-token': csrf } : {};
+  const reqs = await page.request.get('/api/hr/policy-requirements');
+  if (reqs.status() !== 200) return;
+  const json = await reqs.json().catch(() => null);
+  const missing = Array.isArray(json?.missing) ? json.missing : [];
+  for (const p of missing) {
+    const ack = await page.request.post('/api/hr/policy-acknowledgements', {
+      data: {
+        policyKey: p.key,
+        policyVersion: p.version,
+        signatureName,
+        context: { channel: 'playwright' },
+      },
+      headers,
+    });
+    expect(ack.status(), await ack.text()).toBe(201);
+  }
 }
 
 async function pickTreasuryAccountId(page) {
@@ -42,6 +66,7 @@ test.describe('HR end-to-end (staff → requests → approvals → disbursement 
 
     // Admin registers staff with a payrollable salary.
     await apiSignIn(page, 'admin', 'Admin@123');
+    await apiAcceptRequiredPolicies(page, 'Admin');
     const register = await page.request.post('/api/hr/staff/register', {
       data: {
         username: staffUsername,
@@ -124,28 +149,29 @@ test.describe('HR end-to-end (staff → requests → approvals → disbursement 
 
     // Admin approves requests (HR review + executive review).
     await apiSignIn(page, 'admin', 'Admin@123');
+    await apiAcceptRequiredPolicies(page, 'Admin');
 
     const hrApproveLoan = await page.request.patch(
       `/api/hr/requests/${encodeURIComponent(loanRequestId)}/hr-review`,
-      { data: { approve: true, note: 'HR reviewed (Playwright)' } }
+      { data: { approve: true, note: 'HR reviewed (Playwright)', reasonCode: 'policy' } }
     );
     expect(hrApproveLoan.status()).toBe(200);
 
     const mgrApproveLoan = await page.request.patch(
       `/api/hr/requests/${encodeURIComponent(loanRequestId)}/manager-review`,
-      { data: { approve: true, note: 'Approved (Playwright)' } }
+      { data: { approve: true, note: 'Approved (Playwright)', reasonCode: 'policy' } }
     );
     expect(mgrApproveLoan.status()).toBe(200);
 
     const hrApproveLeave = await page.request.patch(
       `/api/hr/requests/${encodeURIComponent(leaveRequestId)}/hr-review`,
-      { data: { approve: true, note: 'HR reviewed leave (Playwright)' } }
+      { data: { approve: true, note: 'HR reviewed leave (Playwright)', reasonCode: 'policy' } }
     );
     expect(hrApproveLeave.status()).toBe(200);
 
     const mgrApproveLeave = await page.request.patch(
       `/api/hr/requests/${encodeURIComponent(leaveRequestId)}/manager-review`,
-      { data: { approve: true, note: 'Approved leave (Playwright)' } }
+      { data: { approve: true, note: 'Approved leave (Playwright)', reasonCode: 'policy' } }
     );
     expect(mgrApproveLeave.status()).toBe(200);
 

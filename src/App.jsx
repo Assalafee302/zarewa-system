@@ -15,7 +15,7 @@ import Reports from './pages/Reports';
 import Settings from './pages/Settings';
 import NotFound from './pages/NotFound';
 import HrLayout from './pages/hr/HrLayout';
-import HrHome from './pages/hr/HrHome';
+import HrMyProfile from './pages/hr/HrMyProfile';
 import HrStaffList from './pages/hr/HrStaffList';
 import StaffProfile from './pages/hr/StaffProfile';
 import HrSalaryWelfare from './pages/hr/HrSalaryWelfare';
@@ -27,13 +27,26 @@ import HrNextDirectory from './pages/hr/HrNextDirectory';
 import HrNextUatChecklist from './pages/hr/HrNextUatChecklist';
 import LoginScreen from './components/auth/LoginScreen';
 import ModuleRouteGuard from './components/ModuleRouteGuard';
+import ManagerDashboard from './pages/ManagerDashboard';
+import AccountingRouteGuard from './components/AccountingRouteGuard';
+import AccountingLayout from './pages/accounting/AccountingLayout';
+import AccountingOverview from './pages/accounting/AccountingOverview';
+import AccountingAssets from './pages/accounting/AccountingAssets';
+import AccountingCosting from './pages/accounting/AccountingCosting';
+import AccountingLedger from './pages/accounting/AccountingLedger';
+import AccountingStatements from './pages/accounting/AccountingStatements';
+import AccountingControls from './pages/accounting/AccountingControls';
+import DocumentTitleSync from './components/DocumentTitleSync';
 
 function HrStaffProfileRoute() {
   const { userId } = useParams();
   return <StaffProfile key={userId} />;
 }
 function HrEntryIndexRoute() {
-  return <Navigate to="/hr/overview" replace />;
+  return <Navigate to="/hr/my-profile" replace />;
+}
+function AccountingIndexRoute() {
+  return <Navigate to="/accounting/overview" replace />;
 }
 import { Search, Bell, Command, Menu } from 'lucide-react';
 import { CustomersProvider } from './context/CustomersContext';
@@ -114,8 +127,8 @@ function PolicyAckGate() {
 
   const byKey = new Map(required.map((p) => [p.key, p]));
   return (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl">
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 p-4 backdrop-blur-[2px]">
+      <div className="z-modal-panel w-full max-w-lg max-h-none shrink-0 overflow-visible flex-none p-6 sm:p-7">
         <h2 className="text-base font-black text-slate-900">Policy acknowledgement required</h2>
         <p className="mt-1 text-xs text-slate-600">
           Before you can edit HR records, upload attendance, or run payroll, you must accept the required policies.
@@ -334,7 +347,7 @@ function AppShell() {
       />
 
       <div
-        className={`relative z-0 flex-1 min-h-screen min-w-0 ml-0 pt-[4.25rem] sm:pt-10 px-4 sm:px-6 lg:px-10 pb-10 transition-[margin] duration-300 ease-out ${
+        className={`relative z-0 flex-1 min-h-screen min-w-0 ml-0 pt-[max(4.25rem,calc(env(safe-area-inset-top)+3.25rem))] sm:pt-10 px-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] sm:px-6 lg:px-10 pb-[max(2.5rem,env(safe-area-inset-bottom))] transition-[margin] duration-300 ease-out ${
           sidebarCollapsed ? 'lg:ml-16' : 'lg:ml-64'
         }`}
       >
@@ -349,20 +362,20 @@ function AppShell() {
         <button
           type="button"
           onClick={() => setMobileNavOpen(true)}
-          className="lg:hidden fixed left-4 top-4 z-[55] flex h-11 w-11 items-center justify-center rounded-2xl border border-gray-200/80 bg-white/95 text-[#134e4a] shadow-md backdrop-blur-sm transition hover:border-teal-200 hover:shadow-lg"
+          className="lg:hidden fixed z-[55] flex h-12 w-12 items-center justify-center rounded-2xl border border-gray-200/80 bg-white/95 text-[#134e4a] shadow-md backdrop-blur-sm transition hover:border-teal-200 hover:shadow-lg left-[max(1rem,env(safe-area-inset-left))] top-[max(1rem,env(safe-area-inset-top))]"
           aria-label="Open navigation menu"
         >
           <Menu size={22} strokeWidth={2} />
         </button>
 
-        <div className="sticky top-0 z-30 -mx-4 sm:-mx-6 lg:mx-0 mb-6 sm:mb-8 px-2 py-3 sm:static sm:px-0 sm:py-0">
-          <div className="z-toolbar-shell flex flex-col gap-4 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-4">
+        <div className="sticky top-0 z-30 -mx-4 sm:-mx-6 lg:mx-0 mb-6 sm:mb-8 py-3 pl-2 pr-2 max-sm:pl-14 sm:static sm:px-0 sm:py-0">
+          <div className="z-toolbar-shell flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-4 max-sm:pt-2">
             <form
-              className="relative group flex-1 min-w-0 sm:max-w-[520px] pl-12 sm:pl-0"
+              className="relative group flex-1 min-w-0 sm:max-w-[520px] pl-0 sm:pl-0 max-sm:order-2"
               onSubmit={runGlobalSearch}
             >
               <Search
-                className="absolute left-5 sm:left-5 top-1/2 -translate-y-1/2 text-gray-300 group-focus-within:text-[#134e4a] transition-colors pointer-events-none z-[1]"
+                className="absolute left-4 sm:left-5 top-1/2 -translate-y-1/2 text-gray-300 group-focus-within:text-[#134e4a] transition-colors pointer-events-none z-[1]"
                 size={16}
               />
               <input
@@ -370,19 +383,20 @@ function AppShell() {
                 type="search"
                 value={headerSearch}
                 onChange={(e) => setHeaderSearch(e.target.value)}
-                placeholder="Search customers, quotes, receipts, POs… (2+ chars)"
+                placeholder="Search… (2+ chars)"
                 autoComplete="off"
                 aria-label="Global search"
                 aria-autocomplete="list"
                 aria-expanded={searchHits.length > 0}
-                className="z-toolbar-shell w-full py-3 pl-12 pr-14 text-[13px] font-medium outline-none transition focus:border-teal-300/50 focus:ring-4 focus:ring-teal-500/10"
+                enterKeyHint="search"
+                className="z-toolbar-shell w-full min-h-12 py-3 pl-11 pr-4 sm:pl-12 sm:pr-14 text-base sm:text-[13px] font-medium outline-none transition focus:border-teal-300/50 focus:ring-4 focus:ring-teal-500/10"
               />
-              <div className="pointer-events-none absolute right-3 top-1/2 flex -translate-y-1/2 items-center gap-1 rounded-lg border border-gray-100 bg-gray-50/90 px-2 py-1">
+              <div className="pointer-events-none absolute right-3 top-1/2 hidden -translate-y-1/2 items-center gap-1 rounded-lg border border-gray-100 bg-gray-50/90 px-2 py-1 sm:flex">
                 <Command size={10} className="text-gray-400" />
                 <span className="text-[9px] font-black text-gray-400">K</span>
               </div>
               {headerSearch.trim().length >= 2 ? (
-                <div className="absolute left-0 right-0 top-full z-[60] mt-1 max-h-72 overflow-y-auto rounded-xl border border-gray-200 bg-white py-1 text-left shadow-lg">
+                <div className="absolute left-0 right-0 top-full z-[60] mt-1 max-h-[min(18rem,50dvh)] sm:max-h-72 overflow-y-auto overscroll-contain rounded-xl border border-gray-200 bg-white py-1 text-left shadow-lg">
                   {searchBusy ? (
                     <p className="px-3 py-2 text-[11px] text-gray-500">Searching…</p>
                   ) : searchHits.length === 0 ? (
@@ -394,7 +408,7 @@ function AppShell() {
                           <button
                             type="button"
                             role="option"
-                            className="flex w-full flex-col items-start gap-0.5 px-3 py-2 text-left text-[12px] hover:bg-teal-50/80"
+                            className="flex w-full flex-col items-start gap-0.5 px-3 py-3 text-left text-[12px] hover:bg-teal-50/80 sm:py-2"
                             onMouseDown={(ev) => ev.preventDefault()}
                             onClick={() => goSearchHit(hit)}
                           >
@@ -417,9 +431,9 @@ function AppShell() {
               Enter for the first match.
             </p>
 
-            <div className="flex flex-wrap items-center justify-end gap-3 sm:gap-4 lg:gap-5">
+            <div className="flex w-full flex-wrap items-center justify-between gap-2 sm:w-auto sm:justify-end sm:gap-4 lg:gap-5 max-sm:order-1">
               <BranchWorkspaceBar />
-              <div className="relative">
+              <div className="relative flex shrink-0 items-center gap-2">
                 <button
                   type="button"
                   aria-expanded={notifOpen}
@@ -428,10 +442,10 @@ function AppShell() {
                     e.stopPropagation();
                     setNotifOpen((o) => !o);
                   }}
-                  className="relative rounded-2xl border border-gray-100/90 bg-white/95 p-3 shadow-sm transition hover:border-teal-100 hover:shadow-md active:scale-[0.98]"
+                  className="relative flex h-12 w-12 items-center justify-center rounded-2xl border border-gray-100/90 bg-white/95 shadow-sm transition hover:border-teal-100 hover:shadow-md active:scale-[0.98]"
                   title="Notifications"
                 >
-                  <Bell size={18} className="text-gray-400" />
+                  <Bell size={20} className="text-gray-400" />
                   {notificationItems.length > 0 ? (
                     <span className="absolute -right-0.5 -top-0.5 flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-white bg-red-500 px-1 text-[9px] font-black text-white">
                       {urgentNotifCount || notificationItems.length}
@@ -440,7 +454,7 @@ function AppShell() {
                 </button>
                 {notifOpen ? (
                   <div
-                    className="absolute right-0 mt-2 w-80 max-h-[min(70vh,420px)] overflow-y-auto rounded-2xl border border-gray-100 bg-white p-4 text-left shadow-xl shadow-slate-900/10"
+                    className="fixed inset-x-3 top-[max(4.5rem,calc(env(safe-area-inset-top)+3.5rem))] z-[70] mt-0 max-h-[min(70dvh,28rem)] overflow-y-auto overscroll-contain rounded-2xl border border-gray-100 bg-white p-4 text-left shadow-xl shadow-slate-900/10 sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-80 sm:max-h-[min(70vh,420px)]"
                     role="menu"
                     onClick={(e) => e.stopPropagation()}
                   >
@@ -457,7 +471,7 @@ function AppShell() {
                           <li key={n.id}>
                             <button
                               type="button"
-                              className={`w-full rounded-lg px-3 py-2 text-left transition hover:brightness-[0.98] ${
+                              className={`w-full rounded-lg px-3 py-3 text-left transition hover:brightness-[0.98] sm:py-2 ${
                                 n.severity === 'warning'
                                   ? 'bg-amber-50 border border-amber-100'
                                   : 'bg-slate-50 border border-slate-100'
@@ -486,29 +500,29 @@ function AppShell() {
               </div>
 
               <div
-                className="flex items-center gap-3 rounded-zarewa border border-gray-100/90 bg-white/95 py-1.5 pl-1.5 pr-4 text-left shadow-sm transition hover:border-teal-200 hover:shadow-md"
+                className="flex min-w-0 flex-1 items-center gap-3 rounded-zarewa border border-gray-100/90 bg-white/95 py-1.5 pl-1.5 pr-3 text-left shadow-sm transition hover:border-teal-200 hover:shadow-md sm:flex-initial sm:pr-4"
                 role="group"
                 aria-label={`Signed in as ${userName}`}
               >
                 <button
                   type="button"
                   onClick={() => navigate('/settings')}
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#134e4a] text-[11px] font-black text-[#2dd4bf] shadow-inner transition hover:brightness-110 active:scale-[0.98]"
+                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#134e4a] text-xs font-black text-[#2dd4bf] shadow-inner transition hover:brightness-110 active:scale-[0.98] sm:h-9 sm:w-9 sm:text-[11px]"
                   title={`${userName} · ${userRole} — Open settings`}
                   aria-label="Open settings"
                 >
                   {userInitials}
                 </button>
-                <div className="hidden min-[380px]:block min-w-0">
+                <div className="min-w-0 flex-1 sm:flex-initial">
                   {ws?.canAccessModule?.('hr') ? (
                     <>
                       <Link
                         to="/hr/staff/me"
-                        className="block rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/40 focus-visible:ring-offset-1"
+                        className="block min-w-0 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/40 focus-visible:ring-offset-1"
                         title="Open your HR staff profile"
                         aria-label={`${userName} — Open your profile`}
                       >
-                        <p className="text-[10px] font-black uppercase leading-none tracking-tighter text-[#134e4a] hover:underline underline-offset-2">
+                        <p className="truncate text-[10px] font-black uppercase leading-none tracking-tighter text-[#134e4a] hover:underline underline-offset-2">
                           {userName}
                         </p>
                       </Link>
@@ -520,11 +534,11 @@ function AppShell() {
                     <button
                       type="button"
                       onClick={() => navigate('/settings')}
-                      className="w-full text-left"
+                      className="w-full min-w-0 text-left"
                       title={`${userName} · ${userRole} — Open settings`}
                       aria-label={`Signed in as ${userName}. Open settings.`}
                     >
-                      <p className="text-[10px] font-black uppercase leading-none tracking-tighter text-[#134e4a]">
+                      <p className="truncate text-[10px] font-black uppercase leading-none tracking-tighter text-[#134e4a]">
                         {userName}
                       </p>
                       <p className="mt-0.5 text-[9px] font-bold uppercase leading-none tracking-widest text-gray-400">
@@ -614,6 +628,24 @@ function AppShell() {
               }
             />
             <Route
+              path="/accounting"
+              element={
+                <ModuleRouteGuard moduleKey="finance">
+                  <AccountingRouteGuard>
+                    <AccountingLayout />
+                  </AccountingRouteGuard>
+                </ModuleRouteGuard>
+              }
+            >
+              <Route index element={<AccountingIndexRoute />} />
+              <Route path="overview" element={<AccountingOverview />} />
+              <Route path="assets" element={<AccountingAssets />} />
+              <Route path="costing" element={<AccountingCosting />} />
+              <Route path="ledger" element={<AccountingLedger />} />
+              <Route path="statements" element={<AccountingStatements />} />
+              <Route path="controls" element={<AccountingControls />} />
+            </Route>
+            <Route
               path="/reports"
               element={
                 <ModuleRouteGuard moduleKey="reports">
@@ -622,10 +654,18 @@ function AppShell() {
               }
             />
             <Route
-              path="/settings"
+              path="/settings/*"
               element={
                 <ModuleRouteGuard moduleKey="settings">
                   <Settings />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
+              path="/manager"
+              element={
+                <ModuleRouteGuard moduleKey="sales">
+                  <ManagerDashboard />
                 </ModuleRouteGuard>
               }
             />
@@ -638,7 +678,7 @@ function AppShell() {
               }
             >
               <Route index element={<HrEntryIndexRoute />} />
-              <Route path="overview" element={<HrHome />} />
+              <Route path="my-profile" element={<HrMyProfile />} />
               <Route path="salary-welfare" element={<HrSalaryWelfare />} />
               <Route path="staff" element={<HrStaffList />} />
               <Route path="staff/directory-quality" element={<HrNextDirectory />} />
@@ -706,6 +746,7 @@ function App() {
     <Router>
       <WorkspaceProvider>
         <ToastProvider>
+          <DocumentTitleSync />
           <AuthGate />
         </ToastProvider>
       </WorkspaceProvider>

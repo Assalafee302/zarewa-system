@@ -54,12 +54,14 @@ export function defaultHomePathForDepartment(deptId) {
 export function pathToModuleKey(pathname) {
   const p = String(pathname || '').replace(/\/$/, '') || '/';
   if (p === '/') return null;
+  if (p === '/manager') return 'sales';
   if (p === '/sales' || p.startsWith('/customers')) return 'sales';
   if (p === '/procurement' || p.startsWith('/procurement/')) return 'procurement';
   if (p === '/operations' || p === '/deliveries') return 'operations';
   if (p === '/accounts') return 'finance';
+  if (p === '/accounting' || p.startsWith('/accounting/')) return 'finance';
   if (p === '/reports') return 'reports';
-  if (p === '/settings') return 'settings';
+  if (p === '/settings' || p.startsWith('/settings/')) return 'settings';
   if (p === '/hr' || p.startsWith('/hr/') || p === '/hr-next' || p.startsWith('/hr-next/')) return 'hr';
   return null;
 }

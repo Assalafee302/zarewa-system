@@ -5,7 +5,7 @@ import { MainPanel, ModalFrame, PageHeader } from '../../components/layout';
 import { useHrWorkspace } from '../../context/HrWorkspaceContext';
 import { useToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/apiBase';
-import { downloadPayrollTreasuryPack } from '../../lib/hrDownload';
+import { downloadPayrollGlJournalTemplate, downloadPayrollTreasuryPack } from '../../lib/hrDownload';
 import { formatNgn } from '../../hr/hrFormat';
 import HrCapsLoading from './hrCapsLoading';
 import { statusChipClass } from '../../hr/hrFormat';
@@ -156,12 +156,22 @@ export default function HrPayroll() {
     }
   };
 
+  const glJournalDownload = async (id) => {
+    try {
+      await downloadPayrollGlJournalTemplate(id);
+      showToast('GL journal template CSV downloaded.');
+    } catch (e) {
+      showToast(String(e.message || e), { variant: 'error' });
+    }
+  };
+
   if (caps === null) return <HrCapsLoading />;
   if (!caps.canPayroll) return <Navigate to="/hr" replace />;
 
   return (
     <>
       <PageHeader
+        eyebrow="Human resources"
         title="Payroll runs"
         subtitle="Draft → recompute → lock for treasury export → mark paid when complete. Staff files can set individual PAYE and pension; lines show effective % after recompute."
         actions={
@@ -169,7 +179,7 @@ export default function HrPayroll() {
             type="button"
             onClick={() => load()}
             disabled={busy}
-            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black uppercase text-[#134e4a] disabled:opacity-50"
+            className="z-btn-secondary gap-2 py-2 px-4 text-xs disabled:opacity-50"
           >
             <RefreshCw size={14} className={busy ? 'animate-spin' : ''} />
             Refresh
@@ -310,6 +320,16 @@ export default function HrPayroll() {
                             </button>
                             <button
                               type="button"
+                              className="inline-flex items-center gap-1 text-[11px] font-black uppercase text-slate-700 disabled:opacity-50"
+                              disabled={busy}
+                              onClick={() => glJournalDownload(r.id)}
+                              title="Double-entry template for general ledger"
+                            >
+                              <Download size={12} />
+                              GL
+                            </button>
+                            <button
+                              type="button"
                               className="text-[11px] font-black uppercase text-emerald-800 disabled:opacity-50"
                               disabled={busy}
                               onClick={() => setStatus(r.id, 'paid')}
@@ -327,14 +347,25 @@ export default function HrPayroll() {
                           </>
                         ) : null}
                         {r.status === 'paid' ? (
-                          <button
-                            type="button"
-                            className="inline-flex items-center gap-1 text-[11px] font-black uppercase text-slate-600"
-                            onClick={() => treasuryDownload(r.id)}
-                          >
-                            <Download size={12} />
-                            CSV
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1 text-[11px] font-black uppercase text-slate-600"
+                              onClick={() => treasuryDownload(r.id)}
+                            >
+                              <Download size={12} />
+                              CSV
+                            </button>
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1 text-[11px] font-black uppercase text-slate-600"
+                              onClick={() => glJournalDownload(r.id)}
+                              title="Double-entry template for general ledger"
+                            >
+                              <Download size={12} />
+                              GL
+                            </button>
+                          </>
                         ) : null}
                       </div>
                     </td>

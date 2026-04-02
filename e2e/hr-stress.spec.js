@@ -99,12 +99,12 @@ test.describe('HR stress (opt-in)', () => {
       expect(submit.status()).toBe(200);
 
       const hr = await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/hr-review`, {
-        data: { approve: true, note: 'Stress HR approve' },
+        data: { approve: true, note: 'Stress HR approve', reasonCode: 'policy' },
       });
       expect(hr.status()).toBe(200);
 
       const mgr = await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/manager-review`, {
-        data: { approve: true, note: 'Stress manager approve' },
+        data: { approve: true, note: 'Stress manager approve', reasonCode: 'policy' },
       });
       if (mgr.status() !== 200) {
         throw new Error(`Manager approve failed (${mgr.status()}): ${await mgr.text()}`);

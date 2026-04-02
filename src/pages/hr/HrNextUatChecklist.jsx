@@ -41,7 +41,11 @@ export default function HrNextUatChecklist() {
 
   return (
     <MainPanel>
-      <PageHeader title="HR Next UAT checklist" subtitle="Gate review before replacing legacy /hr entry." />
+      <PageHeader
+        eyebrow="Human resources"
+        title="HR Next UAT checklist"
+        subtitle="Gate review before replacing legacy /hr entry."
+      />
       <div className="rounded-2xl border border-slate-200 bg-white p-5">
         <p className="text-sm font-semibold text-slate-700">
           Cutover status:{' '}

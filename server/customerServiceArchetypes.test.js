@@ -25,11 +25,6 @@ import { createApp } from './app.js';
 
 const openDbs = [];
 
-afterAll(() => {
-  for (const db of openDbs) db.close();
-  openDbs.length = 0;
-});
-
 async function loginAs(agent, username, password) {
   const res = await agent.post('/api/session/login').send({ username, password });
   expect(res.status).toBe(200);
@@ -661,7 +656,7 @@ function buildArchetypes() {
           expenseType: 'Blocked',
           amountNgn: 5000,
           date: '2026-03-29',
-          category: 'Diesel',
+          category: 'Operational — rent & utilities',
           paymentMethod: 'Cash',
           treasuryAccountId: 1,
           reference: 'NOPE',
@@ -737,7 +732,7 @@ function buildArchetypes() {
           expenseType: 'Fuel',
           amountNgn: 40_000,
           date: '2026-03-29',
-          category: 'Diesel',
+          category: 'Operational — rent & utilities',
           paymentMethod: 'Cash',
           reference: 'EX-A19',
         });
@@ -769,7 +764,7 @@ function buildArchetypes() {
           expenseType: 'Backdated',
           amountNgn: 3000,
           date: '2026-04-10',
-          category: 'Diesel',
+          category: 'Operational — rent & utilities',
           paymentMethod: 'Cash',
           treasuryAccountId: 1,
           reference: 'BLK',
@@ -783,7 +778,7 @@ function buildArchetypes() {
           expenseType: 'After unlock',
           amountNgn: 3000,
           date: '2026-04-10',
-          category: 'Diesel',
+          category: 'Operational — rent & utilities',
           paymentMethod: 'Cash',
           treasuryAccountId: 1,
           reference: 'OK',
@@ -983,7 +978,7 @@ function buildArchetypes() {
           expenseType: 'Repairs',
           amountNgn: 22_000,
           date: '2026-03-29',
-          category: 'Maintenance',
+          category: 'Maintenance — plant & equipment',
           paymentMethod: 'Cash',
           reference: 'EX-A28',
         });
@@ -1255,7 +1250,7 @@ function buildArchetypes() {
           expenseType: 'Doubtful',
           amountNgn: 99_000,
           date: '2026-03-29',
-          category: 'Maintenance',
+          category: 'Maintenance — plant & equipment',
           paymentMethod: 'Cash',
           reference: 'EX-A36',
         });
@@ -1322,7 +1317,7 @@ function buildArchetypes() {
           expenseType: 'Generator',
           amountNgn: 500_000,
           date: '2026-03-29',
-          category: 'Maintenance',
+          category: 'Maintenance — plant & equipment',
           paymentMethod: 'Mixed',
           reference: 'EX-A39',
         });
@@ -1470,7 +1465,7 @@ function buildArchetypes() {
           expenseType: 'Fake fuel',
           amountNgn: 50_000,
           date: '2026-03-29',
-          category: 'Diesel',
+          category: 'Operational — rent & utilities',
           paymentMethod: 'Cash',
           treasuryAccountId: 1,
           reference: 'BAD',
@@ -1484,6 +1479,11 @@ function buildArchetypes() {
 const ARCHETYPES = buildArchetypes();
 
 describe('Customer service archetypes (45 personalities)', () => {
+  afterAll(() => {
+    for (const db of openDbs) db.close();
+    openDbs.length = 0;
+  });
+
   it.each(ARCHETYPES)('$id — $title', async ({ run }) => {
     await run();
   }, 45_000);

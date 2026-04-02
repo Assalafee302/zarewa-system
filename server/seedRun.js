@@ -165,7 +165,7 @@ export function seedEverything(db) {
       `INSERT INTO accounts_payable (ap_id, supplier_name, po_ref, invoice_ref, amount_ngn, paid_ngn, due_date_iso, payment_method) VALUES (?,?,?,?,?,?,?,?)`
     );
     const insBr = db.prepare(
-      `INSERT INTO bank_reconciliation_lines (id, bank_date_iso, description, amount_ngn, system_match, status) VALUES (?,?,?,?,?,?)`
+      `INSERT INTO bank_reconciliation_lines (id, bank_date_iso, description, amount_ngn, system_match, status, branch_id) VALUES (?,?,?,?,?,?,?)`
     );
     const insCat = db.prepare(
       `INSERT INTO procurement_catalog (id, color, gauge, product_id, offer_kg, offer_meters, conversion_kg_per_m, label) VALUES (?,?,?,?,?,?,?,?)`
@@ -358,7 +358,15 @@ export function seedEverything(db) {
         );
       }
       for (const b of BANK_RECONCILIATION_SEED) {
-        insBr.run(b.id, b.bankDateISO, b.description, b.amountNgn, b.systemMatch, b.status);
+        insBr.run(
+          b.id,
+          b.bankDateISO,
+          b.description,
+          b.amountNgn,
+          b.systemMatch,
+          b.status,
+          b.branchId ?? DEFAULT_BRANCH_ID
+        );
       }
       for (const c of PROCUREMENT_CATALOG_SEED) {
         insCat.run(c.id, c.color, c.gauge, c.productID, c.offerKg, c.offerMeters, c.conversionKgPerM, c.label);

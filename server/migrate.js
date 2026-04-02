@@ -1,3 +1,6 @@
+import { mapLegacyExpenseCategoryToCanonical, isAllowedExpenseCategory } from '../shared/expenseCategories.js';
+import { seedDefaultGlAccounts } from './glOps.js';
+
 /**
  * Idempotent SQLite migrations for existing DB files (CREATE IF NOT EXISTS misses new columns).
  * @param {import('better-sqlite3').Database} db
@@ -14,6 +17,18 @@ export function runMigrations(db) {
   }
   if (!q.has('lines_json')) {
     db.exec(`ALTER TABLE quotations ADD COLUMN lines_json TEXT`);
+  }
+  if (!q.has('manager_cleared_at_iso')) {
+    db.exec(`ALTER TABLE quotations ADD COLUMN manager_cleared_at_iso TEXT`);
+  }
+  if (!q.has('manager_flagged_at_iso')) {
+    db.exec(`ALTER TABLE quotations ADD COLUMN manager_flagged_at_iso TEXT`);
+  }
+  if (!q.has('manager_flag_reason')) {
+    db.exec(`ALTER TABLE quotations ADD COLUMN manager_flag_reason TEXT`);
+  }
+  if (!q.has('manager_production_approved_at_iso')) {
+    db.exec(`ALTER TABLE quotations ADD COLUMN manager_production_approved_at_iso TEXT`);
   }
 
   const r = tableCols('sales_receipts');
@@ -50,6 +65,21 @@ export function runMigrations(db) {
   }
   if (!payReq.has('payment_note')) {
     db.exec(`ALTER TABLE payment_requests ADD COLUMN payment_note TEXT`);
+  }
+  if (!payReq.has('request_reference')) {
+    db.exec(`ALTER TABLE payment_requests ADD COLUMN request_reference TEXT`);
+  }
+  if (!payReq.has('line_items_json')) {
+    db.exec(`ALTER TABLE payment_requests ADD COLUMN line_items_json TEXT`);
+  }
+  if (!payReq.has('attachment_name')) {
+    db.exec(`ALTER TABLE payment_requests ADD COLUMN attachment_name TEXT`);
+  }
+  if (!payReq.has('attachment_mime')) {
+    db.exec(`ALTER TABLE payment_requests ADD COLUMN attachment_mime TEXT`);
+  }
+  if (!payReq.has('attachment_data_b64')) {
+    db.exec(`ALTER TABLE payment_requests ADD COLUMN attachment_data_b64 TEXT`);
   }
 
   const deliveries = tableCols('deliveries');
@@ -180,6 +210,10 @@ export function runMigrations(db) {
   }
 
   const refunds = tableCols('customer_refunds');
+  // Legacy DBs: refunds table existed before workflow status column (listManagementItems filters on it).
+  if (refunds.size > 0 && !refunds.has('status')) {
+    db.exec(`ALTER TABLE customer_refunds ADD COLUMN status TEXT`);
+  }
   if (!refunds.has('suggested_lines_json')) {
     db.exec(`ALTER TABLE customer_refunds ADD COLUMN suggested_lines_json TEXT`);
   }
@@ -192,6 +226,14 @@ export function runMigrations(db) {
   if (!refunds.has('payment_note')) {
     db.exec(`ALTER TABLE customer_refunds ADD COLUMN payment_note TEXT`);
   }
+  if (!refunds.has('requested_by_user_id')) {
+    db.exec(`ALTER TABLE customer_refunds ADD COLUMN requested_by_user_id TEXT`);
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_refunds_single_pending
+      ON customer_refunds(quotation_ref, product)
+      WHERE status IN ('Pending', 'Approved');
+  `);
   db.exec(`
     UPDATE customer_refunds
     SET suggested_lines_json = CASE
@@ -363,7 +405,8 @@ export function runMigrations(db) {
       unit TEXT NOT NULL DEFAULT 'unit',
       default_unit_price_ngn INTEGER NOT NULL DEFAULT 0,
       active INTEGER NOT NULL DEFAULT 1,
-      sort_order INTEGER NOT NULL DEFAULT 0
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      inventory_product_id TEXT
     );
 
     CREATE TABLE IF NOT EXISTS setup_colours (
@@ -509,6 +552,126 @@ export function runMigrations(db) {
   migrateMaterialTypeLabels(db);
   migrateUserProfileAndPasswordReset(db);
   migrateHrStaffProfileColumns(db);
+  migrateAccountingLayer(db);
+  migrateExpenseCategoriesToCanonical(db);
+  migrateAccessoryOperations(db);
+}
+
+/** Quote item → inventory SKU mapping; per-job accessory fulfillment for refunds and stock. */
+function migrateAccessoryOperations(db) {
+  const sqiCols = db.prepare(`PRAGMA table_info(setup_quote_items)`).all();
+  const sqiNames = new Set(sqiCols.map((c) => c.name));
+  if (sqiCols.length > 0 && !sqiNames.has('inventory_product_id')) {
+    db.exec(`ALTER TABLE setup_quote_items ADD COLUMN inventory_product_id TEXT`);
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS production_job_accessory_usage (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      quotation_ref TEXT,
+      quote_line_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      ordered_qty REAL NOT NULL DEFAULT 0,
+      supplied_qty REAL NOT NULL DEFAULT 0,
+      inventory_product_id TEXT,
+      posted_at_iso TEXT NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES production_jobs(job_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_prod_job_acc_usage_quotation
+      ON production_job_accessory_usage(quotation_ref, quote_line_id);
+    CREATE INDEX IF NOT EXISTS idx_prod_job_acc_usage_job
+      ON production_job_accessory_usage(job_id);
+  `);
+}
+
+/** Map legacy free-text expense categories on `expenses` to canonical labels; refresh treasury counterparty names. */
+function migrateExpenseCategoriesToCanonical(db) {
+  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='expenses'`).get()) return;
+  const rows = db.prepare(`SELECT expense_id, category FROM expenses WHERE category IS NOT NULL`).all();
+  const upd = db.prepare(`UPDATE expenses SET category = ? WHERE expense_id = ?`);
+  for (const r of rows) {
+    const cur = String(r.category ?? '').trim();
+    if (!cur || isAllowedExpenseCategory(cur)) continue;
+    const next = mapLegacyExpenseCategoryToCanonical(cur);
+    if (next !== cur) upd.run(next, r.expense_id);
+  }
+  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='treasury_movements'`).get()) return;
+  db.prepare(
+    `UPDATE treasury_movements
+     SET counterparty_name = COALESCE(
+       (SELECT e.category FROM expenses e WHERE e.expense_id = treasury_movements.counterparty_id),
+       counterparty_name
+     )
+     WHERE counterparty_kind = 'EXPENSE'
+       AND source_kind = 'EXPENSE'
+       AND EXISTS (SELECT 1 FROM expenses e WHERE e.expense_id = treasury_movements.counterparty_id)`
+  ).run();
+}
+
+/** Landed cost on coil lots, movement values, GL tables + seed chart. */
+function migrateAccountingLayer(db) {
+  const tableCols = (name) => {
+    try {
+      const rows = db.prepare(`PRAGMA table_info(${name})`).all();
+      return new Set(rows.map((c) => c.name));
+    } catch {
+      return new Set();
+    }
+  };
+  const cl = tableCols('coil_lots');
+  if (cl.size && !cl.has('landed_cost_ngn')) {
+    db.exec(`ALTER TABLE coil_lots ADD COLUMN landed_cost_ngn INTEGER`);
+  }
+  if (cl.size && !cl.has('unit_cost_ngn_per_kg')) {
+    db.exec(`ALTER TABLE coil_lots ADD COLUMN unit_cost_ngn_per_kg INTEGER`);
+  }
+  const sm = tableCols('stock_movements');
+  if (sm.size && !sm.has('value_ngn')) {
+    db.exec(`ALTER TABLE stock_movements ADD COLUMN value_ngn INTEGER`);
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gl_accounts (
+      id TEXT PRIMARY KEY,
+      code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS gl_journal_entries (
+      id TEXT PRIMARY KEY,
+      entry_date_iso TEXT NOT NULL,
+      period_key TEXT NOT NULL,
+      memo TEXT,
+      source_kind TEXT,
+      source_id TEXT,
+      created_at_iso TEXT NOT NULL,
+      created_by_user_id TEXT,
+      branch_id TEXT
+    );
+    CREATE TABLE IF NOT EXISTS gl_journal_lines (
+      id TEXT PRIMARY KEY,
+      journal_id TEXT NOT NULL,
+      account_id TEXT NOT NULL,
+      debit_ngn INTEGER NOT NULL DEFAULT 0,
+      credit_ngn INTEGER NOT NULL DEFAULT 0,
+      memo TEXT,
+      FOREIGN KEY (journal_id) REFERENCES gl_journal_entries(id) ON DELETE CASCADE,
+      FOREIGN KEY (account_id) REFERENCES gl_accounts(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_gl_lines_journal ON gl_journal_lines(journal_id);
+    CREATE INDEX IF NOT EXISTS idx_gl_lines_account ON gl_journal_lines(account_id);
+  `);
+  try {
+    db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_gl_journal_source ON gl_journal_entries(source_kind, source_id) WHERE source_kind IS NOT NULL AND source_id IS NOT NULL AND TRIM(source_id) != '';`
+    );
+  } catch {
+    /* ignore */
+  }
+
+  seedDefaultGlAccounts(db);
 }
 
 /** Extra columns on hr_staff_profiles (idempotent). */
@@ -963,6 +1126,7 @@ function migrateBranches(db) {
   addBranch('suppliers');
   addBranch('transport_agents');
   addBranch('products');
+  addBranch('bank_reconciliation_lines');
 }
 
 /** Align setup material type names with product.material_type (Aluminium / Aluzinc). */

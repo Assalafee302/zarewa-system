@@ -36,16 +36,16 @@ test.describe('Authenticated app flows', () => {
     await expect(page).toHaveURL(/\//);
   });
 
-  test('settings exposes access profile and period lock controls', async ({ page }) => {
+  test('settings exposes profile and period lock controls', async ({ page }) => {
     await signInViaUi(page, 'admin', 'Admin@123');
-    await page.getByRole('navigation', { name: 'Modules' }).getByRole('link', { name: 'Settings' }).click();
+    await page.goto('/settings/profile');
     await expect(page.getByRole('heading', { name: /settings/i })).toBeVisible();
     const main = page.locator('#main-content');
-    await expect(main.getByText(/current user/i)).toBeVisible();
-    await expect(main.getByText(/^zarewa admin$/i).first()).toBeVisible();
-    await expect(main.getByText(/^administrator$/i)).toBeVisible();
+    await expect(main.getByText(/your profile/i).first()).toBeVisible({ timeout: 15_000 });
+    await expect(main.getByRole('textbox').first()).toHaveValue(/zarewa admin/i);
+    await expect(main.getByText(/^administrator$/i).first()).toBeVisible();
 
-    await page.getByRole('tab', { name: /controls & audit/i }).click();
+    await page.getByRole('tab', { name: /governance/i }).click();
     await page.locator('input[type="month"]').fill('2099-12');
     await page.getByPlaceholder(/month-end close completed/i).fill('Playwright period lock');
     await page.getByRole('button', { name: /lock period/i }).click();
@@ -73,30 +73,43 @@ test.describe('Authenticated app flows', () => {
 
   test('settings master data workspace can add a colour', async ({ page }) => {
     await signInViaUi(page, 'admin', 'Admin@123');
-    await page.getByRole('navigation', { name: 'Modules' }).getByRole('link', { name: 'Settings' }).click();
-    await page.getByRole('tab', { name: /data & pricing/i }).click();
-    await expect(page.getByRole('heading', { name: /master lists/i })).toBeVisible();
+    await page.goto('/settings/data');
+    await expect(page).toHaveURL(/\/settings\/data/);
+    const openCatalog = page.getByRole('button', { name: /open catalog/i }).first();
+    await expect(openCatalog).toBeVisible({ timeout: 25_000 });
+    await openCatalog.scrollIntoViewIfNeeded();
+    await openCatalog.click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible({ timeout: 15_000 });
+    await expect(dialog.getByLabel(/filter catalog rows/i)).toBeVisible();
     const colourName = `Playwright colour ${Date.now()}`;
-    await page.getByRole('heading', { name: /master lists/i }).scrollIntoViewIfNeeded();
-    const coloursForm = page
-      .locator('#main-content form')
-      .filter({ has: page.getByText('Colour name', { exact: true }) });
+    const coloursForm = dialog.locator('form').filter({ has: page.getByText('Colour name', { exact: true }) });
     await coloursForm.getByText('Colour name', { exact: true }).locator('..').getByRole('textbox').first().fill(colourName);
     await coloursForm.getByPlaceholder(/HMB \/ IV \/ TB/i).fill('PW');
     await coloursForm.getByRole('button', { name: /^save$/i }).click();
-    await expect(
-      page.getByRole('paragraph').filter({ hasText: `${colourName} (PW)` }).first()
-    ).toBeVisible({ timeout: 15_000 });
+    await expect(dialog.getByRole('row').filter({ hasText: colourName }).filter({ hasText: 'PW' })).toBeVisible({
+      timeout: 15_000,
+    });
   });
 
-  test('sales refunds tab opens request modal with preview and payout guidance', async ({ page }) => {
+  test('sales refunds tab opens create modal, loads eligible quotations, shows intelligence', async ({ page }) => {
+    test.setTimeout(120_000);
     await signInViaUi(page, 'sales.staff', 'Sales@123');
     await page.getByRole('navigation', { name: 'Modules' }).getByRole('link', { name: 'Sales' }).click();
     await expect(page).toHaveURL(/\/sales$/);
     await page.getByRole('tab', { name: 'Refunds' }).click();
     await page.getByRole('button', { name: /new refund/i }).click();
-    await expect(page.getByRole('heading', { name: 'Refund request' })).toBeVisible();
-    await expect(page.getByText(/split a payout across more than one bank or cash account/i)).toBeVisible();
-    await expect(page.getByText(/live preview/i)).toBeVisible();
+    await expect(page.getByRole('heading', { name: /create refund/i })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(/quotation-linked workflow/i)).toBeVisible();
+    // Eligible quotations load from GET /api/refunds/eligible-quotations — spinner must clear.
+    await expect(page.getByText('Loading active quotes...')).toBeHidden({ timeout: 25_000 });
+    await expect(page.getByText('Transaction Intelligence')).toBeVisible();
+    const quoteSelect = page.locator('select').filter({ hasText: /Select a finished quotation/i });
+    const optionCount = await quoteSelect.locator('option').count();
+    if (optionCount > 1) {
+      await quoteSelect.selectOption({ index: 1 });
+      await expect(page.getByText('Quote Total', { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByText('Payment History')).toBeVisible();
+    }
   });
 });

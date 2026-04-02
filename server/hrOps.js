@@ -6,6 +6,7 @@ import { provisionStaffLoanForFinanceQueue } from './writeOps.js';
 const REQUEST_KINDS = new Set([
   'leave',
   'loan',
+  'attendance_exception',
   'retirement',
   'appeal',
   'profile_change',
@@ -858,15 +859,32 @@ export function createHrRequest(db, userId, body) {
     );
   } else if (kind === 'loan') {
     const p = body?.payload || {};
+    const amountNgn = Math.round(Number(p.amountNgn) || 0);
+    const repaymentMonths = Math.round(Number(p.repaymentMonths) || 0);
+    const deductionPerMonthNgn = Math.round(Number(p.deductionPerMonthNgn) || 0);
+    if (amountNgn <= 0) return { ok: false, error: 'Loan amount must be greater than 0.' };
+    if (repaymentMonths < 1 || repaymentMonths > 24) {
+      return { ok: false, error: 'repaymentMonths must be between 1 and 24.' };
+    }
+    if (deductionPerMonthNgn <= 0) return { ok: false, error: 'deductionPerMonthNgn must be greater than 0.' };
+    const minDeduction = Math.ceil(amountNgn / repaymentMonths);
+    if (deductionPerMonthNgn < minDeduction) {
+      return { ok: false, error: `deductionPerMonthNgn too low for repaymentMonths (min ${minDeduction}).` };
+    }
+    const prof = db.prepare(`SELECT base_salary_ngn FROM hr_staff_profiles WHERE user_id = ?`).get(userId);
+    const base = Math.round(Number(prof?.base_salary_ngn) || 0);
+    if (base > 0 && amountNgn > base * 3) {
+      return { ok: false, error: 'Loan amount exceeds principal cap (3x base salary).' };
+    }
     db.prepare(
       `INSERT OR REPLACE INTO hr_request_loan (
         request_id, amount_ngn, repayment_months, deduction_per_month_ngn, purpose
       ) VALUES (?,?,?,?,?)`
     ).run(
       id,
-      Math.round(Number(p.amountNgn) || 0),
-      Math.round(Number(p.repaymentMonths) || 0),
-      Math.round(Number(p.deductionPerMonthNgn) || 0),
+      amountNgn,
+      repaymentMonths,
+      deductionPerMonthNgn,
       String(p.purpose || '').trim() || null
     );
   }
@@ -908,11 +926,31 @@ export function hrReviewRequest(db, requestId, actor, approve, note) {
   if (row.status !== 'hr_review') {
     return { ok: false, error: 'Request is not awaiting HR review.' };
   }
+  const HR_DECISION_REASON_CODES = new Set([
+    'documentation',
+    'policy',
+    'attendance',
+    'performance',
+    'finance',
+    'other',
+  ]);
+  const rc = String(arguments[5] ?? '') // reasonCode (back-compat: optional)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z_]/g, '_')
+    .slice(0, 40);
+  const noteNorm = String(note || '').trim();
+  if (!HR_DECISION_REASON_CODES.has(rc)) {
+    return { ok: false, error: 'reasonCode is required for HR decisions.' };
+  }
+  if (noteNorm.length < 3) {
+    return { ok: false, error: 'note is required for HR decisions.' };
+  }
   const now = nowIso();
   if (!approve) {
     db.prepare(
       `UPDATE hr_requests SET status = 'rejected', hr_reviewer_user_id = ?, hr_reviewer_note = ?, hr_reviewed_at_iso = ? WHERE id = ?`
-    ).run(actor.id, String(note || '').trim() || null, now, requestId);
+    ).run(actor.id, noteNorm || null, now, requestId);
     appendHrAuditEvent(db, {
       actorUserId: actor.id,
       actorDisplayName: actor.displayName || actor.username || '',
@@ -920,13 +958,14 @@ export function hrReviewRequest(db, requestId, actor, approve, note) {
       entityKind: 'hr_request',
       entityId: requestId,
       branchId: row.branch_id,
-      reason: String(note || '').trim() || null,
+      reason: noteNorm || null,
+      details: { kind: row.kind, decision: 'reject', reasonCode: rc },
     });
     return { ok: true };
   }
   db.prepare(
     `UPDATE hr_requests SET status = 'manager_review', hr_reviewer_user_id = ?, hr_reviewer_note = ?, hr_reviewed_at_iso = ? WHERE id = ?`
-  ).run(actor.id, String(note || '').trim() || null, now, requestId);
+  ).run(actor.id, noteNorm || null, now, requestId);
   appendHrAuditEvent(db, {
     actorUserId: actor.id,
     actorDisplayName: actor.displayName || actor.username || '',
@@ -934,7 +973,8 @@ export function hrReviewRequest(db, requestId, actor, approve, note) {
     entityKind: 'hr_request',
     entityId: requestId,
     branchId: row.branch_id,
-    reason: String(note || '').trim() || null,
+    reason: noteNorm || null,
+    details: { kind: row.kind, decision: 'approve', reasonCode: rc },
   });
   return { ok: true };
 }
@@ -946,11 +986,31 @@ export function managerReviewRequest(db, requestId, actor, approve, note) {
   if (row.status !== 'manager_review') {
     return { ok: false, error: 'Request is not awaiting executive approval.' };
   }
+  const HR_DECISION_REASON_CODES = new Set([
+    'documentation',
+    'policy',
+    'attendance',
+    'performance',
+    'finance',
+    'other',
+  ]);
+  const rc = String(arguments[5] ?? '') // reasonCode (back-compat: optional)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z_]/g, '_')
+    .slice(0, 40);
+  const noteNorm = String(note || '').trim();
+  if (!HR_DECISION_REASON_CODES.has(rc)) {
+    return { ok: false, error: 'reasonCode is required for executive decisions.' };
+  }
+  if (noteNorm.length < 3) {
+    return { ok: false, error: 'note is required for executive decisions.' };
+  }
   const now = nowIso();
   if (!approve) {
     db.prepare(
       `UPDATE hr_requests SET status = 'rejected', manager_reviewer_user_id = ?, manager_note = ?, manager_reviewed_at_iso = ? WHERE id = ?`
-    ).run(actor.id, String(note || '').trim() || null, now, requestId);
+    ).run(actor.id, noteNorm || null, now, requestId);
     appendHrAuditEvent(db, {
       actorUserId: actor.id,
       actorDisplayName: actor.displayName || actor.username || '',
@@ -958,7 +1018,8 @@ export function managerReviewRequest(db, requestId, actor, approve, note) {
       entityKind: 'hr_request',
       entityId: requestId,
       branchId: row.branch_id,
-      reason: String(note || '').trim() || null,
+      reason: noteNorm || null,
+      details: { kind: row.kind, decision: 'reject', reasonCode: rc },
     });
     return { ok: true };
   }
@@ -968,7 +1029,7 @@ export function managerReviewRequest(db, requestId, actor, approve, note) {
       db.transaction(() => {
         db.prepare(
           `UPDATE hr_requests SET status = 'approved', manager_reviewer_user_id = ?, manager_note = ?, manager_reviewed_at_iso = ? WHERE id = ?`
-        ).run(actor.id, String(note || '').trim() || null, now, requestId);
+        ).run(actor.id, noteNorm || null, now, requestId);
         const refreshed = db.prepare(`SELECT * FROM hr_requests WHERE id = ?`).get(requestId);
         const prov = provisionStaffLoanForFinanceQueue(db, actor, refreshed);
         if (!prov.ok) throw new Error(prov.error);
@@ -983,14 +1044,14 @@ export function managerReviewRequest(db, requestId, actor, approve, note) {
       entityKind: 'hr_request',
       entityId: requestId,
       branchId: row.branch_id,
-      reason: String(note || '').trim() || null,
-      details: { kind: row.kind, financeProvisioned: true },
+      reason: noteNorm || null,
+      details: { kind: row.kind, financeProvisioned: true, decision: 'approve', reasonCode: rc },
     });
     return { ok: true };
   }
   db.prepare(
     `UPDATE hr_requests SET status = 'approved', manager_reviewer_user_id = ?, manager_note = ?, manager_reviewed_at_iso = ? WHERE id = ?`
-  ).run(actor.id, String(note || '').trim() || null, now, requestId);
+  ).run(actor.id, noteNorm || null, now, requestId);
   appendHrAuditEvent(db, {
     actorUserId: actor.id,
     actorDisplayName: actor.displayName || actor.username || '',
@@ -998,8 +1059,8 @@ export function managerReviewRequest(db, requestId, actor, approve, note) {
     entityKind: 'hr_request',
     entityId: requestId,
     branchId: row.branch_id,
-    reason: String(note || '').trim() || null,
-    details: { kind: row.kind },
+    reason: noteNorm || null,
+    details: { kind: row.kind, decision: 'approve', reasonCode: rc },
   });
   return { ok: true };
 }
@@ -1464,8 +1525,38 @@ function attendanceDeductionForUser(db, userId, branchId, periodYyyymm) {
     }
   }
 
-  const deductionNgn = (absentDays + lateDays) * daily;
-  return { absentDays, lateDays, deductionNgn };
+  // Approved exceptions can waive a day of absent/late deductions.
+  let absentExceptions = 0;
+  let lateExceptions = 0;
+  if (periodYyyymm && /^\d{6}$/.test(periodYyyymm)) {
+    const excRows = db
+      .prepare(
+        `SELECT payload_json
+         FROM hr_requests
+         WHERE user_id = ? AND kind = 'attendance_exception' AND status = 'approved'`
+      )
+      .all(userId);
+    for (const r of excRows) {
+      const p = safeJsonParse(r.payload_json, {});
+      const dayIso = String(p.dayIso || p.dateIso || '').trim().slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dayIso)) continue;
+      const excPeriod = dayIso.slice(0, 7).replace('-', '');
+      if (excPeriod !== periodYyyymm) continue;
+      const excType = String(p.type || '').trim().toLowerCase();
+      if (excType === 'absent') absentExceptions += 1;
+      if (excType === 'late') lateExceptions += 1;
+    }
+  }
+  const effAbsent = Math.max(0, absentDays - absentExceptions);
+  const effLate = Math.max(0, lateDays - lateExceptions);
+  const deductionNgn = (effAbsent + effLate) * daily;
+  return {
+    absentDays,
+    lateDays,
+    absentExceptions,
+    lateExceptions,
+    deductionNgn,
+  };
 }
 
 export function createPayrollRun(db, actor, body) {
@@ -1695,6 +1786,51 @@ export function getPayrollRunById(db, runId) {
 /**
  * CSV for finance / treasury: net pay per employee, loan split, totals. Allowed when run is locked or paid.
  */
+/**
+ * Double-entry template for GL import (Dr payroll expense, Cr PAYE, pension, net pay).
+ * Uses the same eligibility as treasury pack.
+ */
+export function exportPayrollGlJournalTemplateCsv(db, runId) {
+  const run = getPayrollRunById(db, runId);
+  if (!run) return { ok: false, error: 'Payroll run not found.' };
+  if (run.status !== 'locked' && run.status !== 'paid') {
+    return { ok: false, error: 'Lock or mark this run paid before GL journal export.' };
+  }
+  const lines = listPayrollLines(db, runId);
+  let expenseDr = 0;
+  let taxCr = 0;
+  let penCr = 0;
+  let netCr = 0;
+  for (const l of lines) {
+    const g = Math.round(Number(l.grossNgn) || 0) + Math.round(Number(l.bonusNgn) || 0);
+    const ad = Math.round(Number(l.attendanceDeductionNgn) || 0);
+    const od = Math.round(Number(l.otherDeductionNgn) || 0);
+    expenseDr += g - ad - od;
+    taxCr += Math.round(Number(l.taxNgn) || 0);
+    penCr += Math.round(Number(l.pensionNgn) || 0);
+    netCr += Math.round(Number(l.netNgn) || 0);
+  }
+  const headers = ['account_code', 'account_name', 'debit_ngn', 'credit_ngn', 'memo'];
+  const esc = (v) => {
+    const t = String(v ?? '');
+    if (/[",\r\n]/.test(t)) return `"${t.replace(/"/g, '""')}"`;
+    return t;
+  };
+  const memoBase = `Payroll ${run.periodYyyymm} ${run.id}`;
+  const rows = [
+    ['6000', 'Payroll expense', expenseDr, 0, memoBase],
+    ['2300', 'PAYE payable', 0, taxCr, memoBase],
+    ['2400', 'Pension payable', 0, penCr, memoBase],
+    ['2200', 'Net payroll payable', 0, netCr, memoBase],
+  ];
+  const csv = [headers.join(','), ...rows.map((r) => r.map(esc).join(','))].join('\r\n');
+  return {
+    ok: true,
+    csv,
+    filename: `gl-journal-payroll-${run.periodYyyymm}-${String(run.id).replace(/[^\w-]/g, '').slice(0, 12)}.csv`,
+  };
+}
+
 export function exportPayrollTreasuryPackCsv(db, runId) {
   const run = getPayrollRunById(db, runId);
   if (!run) return { ok: false, error: 'Payroll run not found.' };
@@ -2083,8 +2219,52 @@ export function listHrObservability(db, scope) {
     pendingManagerReview: db.prepare(`SELECT COUNT(*) AS c FROM hr_requests WHERE status = 'manager_review'`).get().c,
     overdueRequests: listHrRequests(db, scope || { viewAll: true, branchId: DEFAULT_BRANCH_ID }, {})
       .filter((r) => r.slaState === 'overdue').length,
+    eeo: eeoDecisionSummary(db, scope, { days: 120 }),
   };
   return { events, summary };
+}
+
+function eeoDecisionSummary(db, scope, opts = {}) {
+  const days = Math.max(7, Math.round(Number(opts.days) || 120));
+  const sinceIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  let sql = `
+    SELECT e.action, e.details_json, e.entity_id, r.kind, r.branch_id, p.department
+    FROM hr_audit_events e
+    LEFT JOIN hr_requests r ON r.id = e.entity_id
+    LEFT JOIN hr_staff_profiles p ON p.user_id = r.user_id
+    WHERE e.occurred_at_iso >= ?
+      AND e.entity_kind = 'hr_request'
+      AND e.action IN ('hr.request.hr_approve','hr.request.hr_reject','hr.request.manager_approve','hr.request.manager_reject')
+  `;
+  const args = [sinceIso];
+  if (!scope?.viewAll) {
+    sql += ` AND (r.branch_id = ? OR r.branch_id IS NULL)`;
+    args.push(scope?.branchId || DEFAULT_BRANCH_ID);
+  }
+  const rows = db.prepare(sql).all(...args);
+  const byKind = {};
+  const byBranch = {};
+  const byDept = {};
+  let missingReasonCode = 0;
+  for (const row of rows) {
+    const details = safeJsonParse(row.details_json, {});
+    const rc = String(details.reasonCode || '').trim();
+    if (!rc) missingReasonCode += 1;
+    const kind = String(row.kind || details.kind || 'unknown');
+    const branchId = String(row.branch_id || '—');
+    const dept = String(row.department || '—');
+    const decision = String(details.decision || (String(row.action).includes('reject') ? 'reject' : 'approve'));
+    byKind[kind] = byKind[kind] || { approve: 0, reject: 0, total: 0 };
+    byKind[kind][decision] += 1;
+    byKind[kind].total += 1;
+    byBranch[branchId] = byBranch[branchId] || { approve: 0, reject: 0, total: 0 };
+    byBranch[branchId][decision] += 1;
+    byBranch[branchId].total += 1;
+    byDept[dept] = byDept[dept] || { approve: 0, reject: 0, total: 0 };
+    byDept[dept][decision] += 1;
+    byDept[dept].total += 1;
+  }
+  return { windowDays: days, totalDecisions: rows.length, missingReasonCode, byKind, byBranch, byDepartment: byDept };
 }
 
 export function hrNextUatReadiness(db, scope) {

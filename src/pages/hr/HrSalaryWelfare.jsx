@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, Navigate } from 'react-router-dom';
 import { ArrowRight, Banknote, HeartHandshake, RefreshCw, Upload, Users, X } from 'lucide-react';
-import { ModalFrame } from '../../components/layout';
+import { ModalFrame, PageHeader } from '../../components/layout';
 import { useHrWorkspace } from '../../context/HrWorkspaceContext';
 import { useToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/apiBase';
@@ -98,28 +98,23 @@ export default function HrSalaryWelfare() {
 
   return (
     <div className="space-y-8">
-      <section className="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-[var(--shadow-zarewa-card)]">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h2 className="text-lg font-black text-[#134e4a]">Salary &amp; benefits</h2>
-            <p className="mt-2 text-sm text-slate-600 max-w-3xl leading-relaxed">
-              Package breakdown (base, housing, transport), per-staff <strong>PAYE</strong> when set on the file, approved{' '}
-              <strong>loan</strong> deductions, and notes for bonuses / benefits. Official payslips come from{' '}
-              <strong>Payroll</strong> after recompute; absent days and daily <strong>late</strong> marks feed deductions
-              there too.
-            </p>
-          </div>
+      <PageHeader
+        eyebrow="Human resources"
+        title="Salary & benefits"
+        subtitle="Package breakdown (base, housing, transport), per-staff PAYE when set on the file, approved loan deductions, and notes for bonuses / benefits. Official payslips come from Payroll after recompute; absent days and daily late marks feed deductions there too."
+        actions={
           <button
             type="button"
             onClick={() => load()}
             disabled={loadState === 'loading'}
-            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black uppercase text-[#134e4a] disabled:opacity-50"
+            className="z-btn-secondary gap-2 py-2 px-4 text-xs disabled:opacity-50"
           >
             <RefreshCw size={14} className={loadState === 'loading' ? 'animate-spin' : ''} />
             Refresh data
           </button>
-        </div>
-
+        }
+      />
+      <section className="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-[var(--shadow-zarewa-card)]">
         {snapshot?.referenceRun ? (
           <div className="mt-4 rounded-xl border border-teal-100 bg-teal-50/60 px-4 py-3 text-sm text-slate-700">
             <p className="font-black text-[#134e4a] text-[10px] uppercase tracking-wide">Payroll rate reference</p>

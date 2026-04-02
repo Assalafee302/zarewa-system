@@ -123,9 +123,9 @@ export default function LoginScreen() {
   };
 
   return (
-    <div className="min-h-screen z-app-bg px-4 py-8 sm:px-6 lg:px-10">
-      <div className="mx-auto grid min-h-[calc(100vh-4rem)] max-w-6xl grid-cols-1 gap-6 lg:grid-cols-[1.15fr_0.85fr]">
-        <section className="rounded-[32px] border border-white/70 bg-white/80 p-8 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)] backdrop-blur-xl sm:p-10">
+    <div className="min-h-[100dvh] z-app-bg px-[max(1rem,env(safe-area-inset-left))] pt-[max(1rem,env(safe-area-inset-top))] pr-[max(1rem,env(safe-area-inset-right))] pb-[max(1.5rem,env(safe-area-inset-bottom))] sm:px-6 sm:pt-8 sm:pb-8 lg:px-10">
+      <div className="mx-auto grid min-h-0 max-w-6xl grid-cols-1 gap-6 lg:min-h-[calc(100vh-4rem)] lg:grid-cols-[1.15fr_0.85fr]">
+        <section className="rounded-[28px] border border-white/70 bg-white/80 p-5 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)] backdrop-blur-xl sm:rounded-[32px] sm:p-10">
           <img
             src={ZAREWA_LOGO_SRC}
             alt=""
@@ -137,10 +137,10 @@ export default function LoginScreen() {
             <ShieldCheck size={14} />
             Production-safe workspace
           </div>
-          <h1 className="mt-6 text-3xl font-black tracking-tight text-[#134e4a] sm:text-5xl">
+          <h1 className="mt-6 text-2xl font-black tracking-tight text-[#134e4a] sm:text-5xl">
             Zarewa operating system
           </h1>
-          <p className="mt-4 max-w-2xl text-sm leading-7 text-slate-600 sm:text-base">
+          <p className="mt-4 max-w-2xl text-sm leading-relaxed text-slate-600 sm:text-base sm:leading-7">
             Sign in to continue with live treasury controls, approval workflows, audit visibility, and the
             unified production dashboard.
           </p>
@@ -197,7 +197,7 @@ export default function LoginScreen() {
           </div>
         </section>
 
-        <section className="rounded-[32px] border border-slate-200/80 bg-white/92 p-8 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.3)] backdrop-blur-xl sm:p-10">
+        <section className="rounded-[28px] border border-slate-200/80 bg-white/92 p-5 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.3)] backdrop-blur-xl sm:rounded-[32px] sm:p-10">
           <div className="flex items-center gap-3">
             <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#134e4a] text-[#8ef0dc] shadow-lg shadow-teal-950/20">
               <LockKeyhole size={22} />

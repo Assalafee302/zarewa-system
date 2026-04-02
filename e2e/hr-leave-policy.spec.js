@@ -80,11 +80,11 @@ test.describe('HR leave policy enforcement', () => {
     // HR manager approves leave.
     await apiSignIn(page, 'hr.manager', 'HrManager@12345!');
     const hr = await page.request.patch(`/api/hr/requests/${encodeURIComponent(requestId)}/hr-review`, {
-      data: { approve: true, note: 'HR ok' },
+      data: { approve: true, note: 'HR ok', reasonCode: 'policy' },
     });
     expect(hr.status()).toBe(200);
     const mgr = await page.request.patch(`/api/hr/requests/${encodeURIComponent(requestId)}/manager-review`, {
-      data: { approve: true, note: 'Final ok' },
+      data: { approve: true, note: 'Final ok', reasonCode: 'policy' },
     });
     expect(mgr.status()).toBe(200);
 

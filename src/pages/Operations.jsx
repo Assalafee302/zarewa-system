@@ -13,10 +13,11 @@ import {
   Award,
   ChevronRight,
   Scale,
+  Search,
 } from 'lucide-react';
 
 import { WorkspacePanelToolbar } from '../components/workspace';
-import { WORKSPACE_TABLE_HEAD, WORKSPACE_EMPTY_LIST_CLASS } from '../lib/workspaceListStyle';
+import { WORKSPACE_EMPTY_LIST_CLASS } from '../lib/workspaceListStyle';
 import { MainPanel, PageHeader, PageShell, PageTabs, ModalFrame } from '../components/layout';
 import { LiveProductionMonitor } from '../components/LiveProductionMonitor';
 import ProductionDeliveriesTab from '../components/operations/ProductionDeliveriesTab';
@@ -50,6 +51,85 @@ const PANEL_TITLE = {
 
 /** Matches `confirmStoreReceipt` — POs store can post GRN against */
 const PO_RECEIVABLE_STATUSES = ['Approved', 'On loading', 'In Transit'];
+
+/** Default rows shown; search or sort surfaces older items. */
+const STOCK_SIDE_LIST_LIMIT = 20;
+
+function sortTransitPurchaseOrders(rows, sortKey) {
+  const poCmp = (a, b) => String(a.poID || '').localeCompare(String(b.poID || ''));
+  return [...rows].sort((a, b) => {
+    switch (sortKey) {
+      case 'orderAsc': {
+        const c = String(a.orderDateISO || '').localeCompare(String(b.orderDateISO || ''));
+        return c !== 0 ? c : poCmp(a, b);
+      }
+      case 'etaAsc': {
+        const emptyA = !String(a.expectedDeliveryISO || '').trim();
+        const emptyB = !String(b.expectedDeliveryISO || '').trim();
+        if (emptyA !== emptyB) return emptyA ? 1 : -1;
+        const c = String(a.expectedDeliveryISO || '').localeCompare(String(b.expectedDeliveryISO || ''));
+        return c !== 0 ? c : poCmp(a, b);
+      }
+      case 'etaDesc': {
+        const emptyA = !String(a.expectedDeliveryISO || '').trim();
+        const emptyB = !String(b.expectedDeliveryISO || '').trim();
+        if (emptyA !== emptyB) return emptyA ? 1 : -1;
+        const c = String(b.expectedDeliveryISO || '').localeCompare(String(a.expectedDeliveryISO || ''));
+        return c !== 0 ? c : poCmp(a, b);
+      }
+      case 'supplierAsc': {
+        const c = String(a.supplierName || '').localeCompare(String(b.supplierName || ''));
+        return c !== 0 ? c : poCmp(a, b);
+      }
+      case 'poAsc':
+        return poCmp(a, b);
+      case 'statusAsc': {
+        const c = String(a.status || '').localeCompare(String(b.status || ''));
+        return c !== 0 ? c : String(b.orderDateISO || '').localeCompare(String(a.orderDateISO || ''));
+      }
+      case 'orderDesc':
+      default: {
+        const c = String(b.orderDateISO || '').localeCompare(String(a.orderDateISO || ''));
+        return c !== 0 ? c : poCmp(a, b);
+      }
+    }
+  });
+}
+
+function transitPoSearchBlob(p) {
+  const lines = Array.isArray(p.lines) ? p.lines : [];
+  const lineBits = lines
+    .map((l) => [l.productName, l.productID, l.color, l.gauge].filter(Boolean).join(' '))
+    .join(' ');
+  return [
+    p.poID,
+    p.supplierName,
+    p.status,
+    p.transportAgentName,
+    p.expectedDeliveryISO,
+    p.orderDateISO,
+    lineBits,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+}
+
+function coilReceiptSearchBlob(c) {
+  return [
+    c.coilNo,
+    c.colour,
+    c.gaugeLabel,
+    c.materialTypeName,
+    c.productID,
+    c.poID,
+    c.supplierName,
+    c.location,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+}
 
 const ADJUST_REASONS = [
   'Damage',
@@ -155,6 +235,9 @@ const Operations = () => {
     wipQtyReleased: '',
   });
   const [coilLiveSort, setCoilLiveSort] = useState('recent');
+  const [transitSearch, setTransitSearch] = useState('');
+  const [transitSort, setTransitSort] = useState('orderDesc');
+  const [coilLiveSearch, setCoilLiveSearch] = useState('');
 
   const [coilMaterialTab, setCoilMaterialTab] = useState('split');
   const [coilMaterialSaving, setCoilMaterialSaving] = useState(false);
@@ -456,12 +539,26 @@ const Operations = () => {
     navigate(location.pathname, { replace: true, state: {} });
   }, [location.state, location.pathname, navigate]);
 
-  const transitOrders = useMemo(
+  const transitOrdersAll = useMemo(
     () => purchaseOrders.filter((p) => PO_RECEIVABLE_STATUSES.includes(p.status)),
     [purchaseOrders]
   );
 
-  const coilLotsByReceipt = useMemo(() => {
+  const transitSearchNorm = transitSearch.trim().toLowerCase();
+  const transitOrdersSortedFiltered = useMemo(() => {
+    const sorted = sortTransitPurchaseOrders(transitOrdersAll, transitSort);
+    if (!transitSearchNorm) return sorted;
+    return sorted.filter((p) => transitPoSearchBlob(p).includes(transitSearchNorm));
+  }, [transitOrdersAll, transitSort, transitSearchNorm]);
+
+  const transitOrdersTruncated =
+    !transitSearchNorm && transitOrdersSortedFiltered.length > STOCK_SIDE_LIST_LIMIT;
+  const transitOrders = useMemo(() => {
+    if (transitSearchNorm) return transitOrdersSortedFiltered;
+    return transitOrdersSortedFiltered.slice(0, STOCK_SIDE_LIST_LIMIT);
+  }, [transitOrdersSortedFiltered, transitSearchNorm]);
+
+  const coilLotsReceiptSorted = useMemo(() => {
     const finishedCoils = new Set(
       (ws?.snapshot?.movements || [])
         .filter((m) => m?.type === 'FINISHED_GOODS' && m?.ref)
@@ -487,6 +584,19 @@ const Operations = () => {
     });
     return rows;
   }, [coilLots, coilLiveSort, ws?.snapshot?.movements]);
+
+  const coilLiveSearchNorm = coilLiveSearch.trim().toLowerCase();
+  const coilLotsReceiptFiltered = useMemo(() => {
+    if (!coilLiveSearchNorm) return coilLotsReceiptSorted;
+    return coilLotsReceiptSorted.filter((c) => coilReceiptSearchBlob(c).includes(coilLiveSearchNorm));
+  }, [coilLotsReceiptSorted, coilLiveSearchNorm]);
+
+  const coilsReceiptTruncated =
+    !coilLiveSearchNorm && coilLotsReceiptFiltered.length > STOCK_SIDE_LIST_LIMIT;
+  const coilLotsByReceipt = useMemo(() => {
+    if (coilLiveSearchNorm) return coilLotsReceiptFiltered;
+    return coilLotsReceiptFiltered.slice(0, STOCK_SIDE_LIST_LIMIT);
+  }, [coilLotsReceiptFiltered, coilLiveSearchNorm]);
 
   useEffect(() => {
     setGrnConversionOverride(false);
@@ -901,6 +1011,7 @@ const Operations = () => {
   return (
     <PageShell blurred={isAnyModalOpen || deliveriesShellBlur}>
       <PageHeader
+        eyebrow="Production"
         title="Store & production"
         subtitle="Receive in-transit coils into stock, adjustments, finished goods & coil requests — aligned with Sales / Procurement."
         actions={
@@ -913,71 +1024,124 @@ const Operations = () => {
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 lg:gap-8">
         {activeTab === 'inventory' ? (
         <div className="col-span-full w-full order-2">
-          <div className="flex flex-col lg:flex-row gap-6 lg:gap-8 lg:items-stretch lg:min-h-[50vh]">
-            <section className="z-soft-panel overflow-hidden w-full lg:w-1/2 lg:flex-1 min-w-0 flex flex-col min-h-[280px] lg:min-h-0">
+          <div className="flex flex-col lg:flex-row gap-6 lg:gap-8 lg:items-start">
+            <section className="z-soft-panel overflow-hidden w-full lg:w-1/2 lg:flex-1 min-w-0 flex flex-col">
             <div className="h-1 bg-teal-500 shrink-0 opacity-80" />
-            <div className="p-4 sm:p-6 flex-1 flex flex-col min-h-0">
+            <div className="p-4 sm:p-6 flex flex-col">
               <h3 className="text-[10px] font-semibold text-slate-600 uppercase tracking-widest mb-1 flex items-center gap-2">
                 <Truck size={14} className="text-sky-700" />
                 Goods in transit — receive
               </h3>
-              <p className="text-[10px] text-slate-500 leading-relaxed mb-4">
+              <p className="text-[10px] text-slate-500 leading-relaxed mb-3">
                 Store sees spec & quantities only (no amounts). Enter coil # and kg received; stock updates when you
                 confirm.
               </p>
-              {transitOrders.length === 0 ? (
+              {transitOrdersAll.length === 0 ? (
                 <p className="text-[10px] font-medium text-slate-400">Nothing on road or loading.</p>
+              ) : transitOrdersSortedFiltered.length === 0 ? (
+                <p className="text-[10px] font-medium text-slate-400">No purchase orders match your search.</p>
               ) : (
-                <ul className="space-y-4 flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 -mr-1">
-                  {transitOrders.map((p) => (
+                <>
+                  <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-2 mb-2 shrink-0">
+                    <label className="relative flex-1 min-w-[140px]">
+                      <Search
+                        size={12}
+                        className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
+                        aria-hidden
+                      />
+                      <input
+                        type="search"
+                        value={transitSearch}
+                        onChange={(e) => setTransitSearch(e.target.value)}
+                        placeholder="Search PO, supplier, product…"
+                        className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-2 text-[10px] font-medium text-slate-800 placeholder:text-slate-400"
+                      />
+                    </label>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-[8px] font-bold uppercase tracking-wide text-slate-500 whitespace-nowrap">
+                        Sort
+                      </span>
+                      <select
+                        value={transitSort}
+                        onChange={(e) => setTransitSort(e.target.value)}
+                        className="rounded-lg border border-slate-200 bg-white py-1.5 px-2 text-[10px] font-semibold text-slate-700 min-w-0 max-w-full"
+                      >
+                        <option value="orderDesc">Newest order</option>
+                        <option value="orderAsc">Oldest order</option>
+                        <option value="etaAsc">ETA (soonest)</option>
+                        <option value="etaDesc">ETA (latest)</option>
+                        <option value="supplierAsc">Supplier A–Z</option>
+                        <option value="poAsc">PO no.</option>
+                        <option value="statusAsc">Status</option>
+                      </select>
+                    </div>
+                  </div>
+                  {transitOrdersTruncated ? (
+                    <p className="text-[9px] text-slate-500 mb-1.5">
+                      Showing {STOCK_SIDE_LIST_LIMIT} of {transitOrdersSortedFiltered.length}. Search or sort to find
+                      older POs.
+                    </p>
+                  ) : null}
+                  <ul className="space-y-1.5">
+                  {transitOrders.map((p) => {
+                    const openKg = p.lines.reduce(
+                      (sum, l) => sum + Math.max(0, Number(l.qtyOrdered) - Number(l.qtyReceived)),
+                      0
+                    );
+                    const meta2 = [
+                      p.status,
+                      p.transportAgentName || null,
+                      p.expectedDeliveryISO ? `ETA ${p.expectedDeliveryISO}` : null,
+                      `${p.lines.length} line(s)`,
+                      `${openKg.toLocaleString()} kg open`,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ');
+                    return (
                     <li
                       key={p.poID}
-                      className="rounded-xl border border-slate-200/60 bg-white/40 p-3 shadow-sm backdrop-blur-md"
+                      className="rounded-lg border border-slate-200/60 bg-white/40 py-1.5 px-2.5 shadow-sm backdrop-blur-md"
                     >
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="text-[11px] font-bold text-[#134e4a]">{p.poID}</p>
-                          <p className="text-[9px] text-slate-600 font-medium truncate">{p.supplierName}</p>
-                          <p className="text-[8px] text-slate-500 mt-0.5">
-                            {p.status}
-                            {p.transportAgentName ? ` · ${p.transportAgentName}` : ''}
-                            {p.expectedDeliveryISO ? ` · ETA ${p.expectedDeliveryISO}` : ''}
+                      <div className="min-w-0 leading-tight">
+                        <div className="flex items-center justify-between gap-2 min-w-0">
+                          <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
+                            {p.poID}
+                            <span className="font-medium text-slate-600"> · {p.supplierName}</span>
                           </p>
+                          {expandedReceivePoId !== p.poID ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setExpandedReceivePoId(p.poID);
+                                setReceiveDraft((d) => ({ ...d, poID: p.poID }));
+                              }}
+                              className="text-[8px] font-semibold uppercase tracking-wide text-sky-800 bg-sky-100 hover:bg-sky-200 px-2 py-1 rounded-md shrink-0"
+                            >
+                              Receive
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setExpandedReceivePoId(null);
+                                setReceiveDraft({ poID: '', location: '' });
+                                setGrnLines([]);
+                              }}
+                              className="text-[8px] font-semibold text-slate-500 hover:text-slate-800 uppercase shrink-0 px-1"
+                            >
+                              Cancel
+                            </button>
+                          )}
                         </div>
-                        {expandedReceivePoId !== p.poID ? (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setExpandedReceivePoId(p.poID);
-                              setReceiveDraft((d) => ({ ...d, poID: p.poID }));
-                            }}
-                            className="text-[9px] font-semibold uppercase tracking-wide text-sky-800 bg-sky-100 hover:bg-sky-200 px-2.5 py-1.5 rounded-md shrink-0"
-                          >
-                            Receive
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setExpandedReceivePoId(null);
-                              setReceiveDraft({ poID: '', location: '' });
-                              setGrnLines([]);
-                            }}
-                            className="text-[9px] font-semibold text-slate-500 hover:text-slate-800 uppercase"
-                          >
-                            Cancel
-                          </button>
-                        )}
+                        <p
+                          className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2"
+                          title={meta2}
+                        >
+                          {meta2}
+                        </p>
                       </div>
-                      <p className="mt-1.5 text-[9px] text-slate-500 border-t border-slate-100 pt-1.5">
-                        {p.lines.length} line(s) ·{' '}
-                        {p.lines
-                          .reduce((sum, l) => sum + Math.max(0, Number(l.qtyOrdered) - Number(l.qtyReceived)), 0)
-                          .toLocaleString()}{' '}
-                        kg open
-                      </p>
                       {expandedReceivePoId === p.poID ? (
-                        <form className="mt-3 space-y-3 border-t border-dashed border-slate-200 pt-3" onSubmit={applyTransitReceipt}>
+                        <form className="mt-2 space-y-3 border-t border-dashed border-slate-200 pt-2" onSubmit={applyTransitReceipt}>
                           <div>
                             <label className="text-[9px] font-bold text-slate-400 uppercase block mb-1">
                               Location (optional)
@@ -1085,74 +1249,114 @@ const Operations = () => {
                         </form>
                       ) : null}
                     </li>
-                  ))}
+                    );
+                  })}
                 </ul>
+                </>
               )}
             </div>
           </section>
 
-            <section className="z-soft-panel overflow-hidden w-full lg:w-1/2 lg:flex-1 min-w-0 flex flex-col min-h-[280px] lg:min-h-0">
+            <section className="z-soft-panel overflow-hidden w-full lg:w-1/2 lg:flex-1 min-w-0 flex flex-col">
               <div className="h-1 bg-[#134e4a] shrink-0 opacity-80" />
-              <div className="p-4 sm:p-6 flex-1 flex flex-col min-h-0">
+              <div className="p-4 sm:p-6 flex flex-col">
                 <h3 className="text-[10px] font-semibold text-slate-600 uppercase tracking-widest mb-1 flex items-center gap-2">
                   <Scale size={14} className="text-[#134e4a]" />
                   Received coils — live weight
                 </h3>
-                <p className="text-[10px] text-slate-500 leading-relaxed mb-4">
+                <p className="text-[10px] text-slate-500 leading-relaxed mb-3">
                   Every coil from store GRN. <strong>Current kg</strong> is the live weight left on the coil
                   (after production has used material).
                 </p>
-                {coilLotsByReceipt.length === 0 ? (
+                {coilLotsReceiptSorted.length === 0 ? (
                   <p className="text-[10px] font-medium text-slate-400">
                     No coils yet — confirm a receipt in the panel on the left.
                   </p>
+                ) : coilLotsReceiptFiltered.length === 0 ? (
+                  <p className="text-[10px] font-medium text-slate-400">No coils match your search.</p>
                 ) : (
-                  <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar pr-1 -mr-1 rounded-lg border border-slate-200 bg-white">
-                    <div className="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-slate-50">
-                      <p className="text-[9px] font-bold uppercase tracking-wide text-slate-500">Sort</p>
-                      <select
-                        value={coilLiveSort}
-                        onChange={(e) => setCoilLiveSort(e.target.value)}
-                        className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold text-slate-700"
-                      >
-                        <option value="recent">Newest receipt</option>
-                        <option value="kgDesc">Current kg (high → low)</option>
-                        <option value="kgAsc">Current kg (low → high)</option>
-                        <option value="coilAsc">Coil no (A → Z)</option>
-                        <option value="gaugeAsc">Gauge</option>
-                        <option value="materialAsc">Material</option>
-                      </select>
+                  <>
+                    <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-2 mb-2 shrink-0">
+                      <label className="relative flex-1 min-w-[140px]">
+                        <Search
+                          size={12}
+                          className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
+                          aria-hidden
+                        />
+                        <input
+                          type="search"
+                          value={coilLiveSearch}
+                          onChange={(e) => setCoilLiveSearch(e.target.value)}
+                          placeholder="Search coil, PO, colour…"
+                          className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-2 text-[10px] font-medium text-slate-800 placeholder:text-slate-400"
+                        />
+                      </label>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-[8px] font-bold uppercase tracking-wide text-slate-500 whitespace-nowrap">
+                          Sort
+                        </span>
+                        <select
+                          value={coilLiveSort}
+                          onChange={(e) => setCoilLiveSort(e.target.value)}
+                          className="rounded-lg border border-slate-200 bg-white py-1.5 px-2 text-[10px] font-semibold text-slate-700 min-w-0 max-w-full"
+                        >
+                          <option value="recent">Newest receipt</option>
+                          <option value="kgDesc">Current kg (high → low)</option>
+                          <option value="kgAsc">Current kg (low → high)</option>
+                          <option value="coilAsc">Coil no (A → Z)</option>
+                          <option value="gaugeAsc">Gauge</option>
+                          <option value="materialAsc">Material</option>
+                        </select>
+                      </div>
                     </div>
-                    <div className="grid grid-cols-[1.2fr_0.8fr_0.8fr_1fr_0.8fr] gap-2 px-3 py-2 text-[9px] font-bold uppercase tracking-wide text-slate-500 border-b border-slate-200 bg-slate-50">
-                      <span>Coil no</span>
-                      <span>Colour</span>
-                      <span>Gauge</span>
-                      <span>Material</span>
-                      <span className="text-right">Current kg</span>
-                    </div>
-                    <ul>
+                    {coilsReceiptTruncated ? (
+                      <p className="text-[9px] text-slate-500 mb-1.5">
+                        Showing {STOCK_SIDE_LIST_LIMIT} of {coilLotsReceiptFiltered.length}. Search to find older coils.
+                      </p>
+                    ) : null}
+                    <ul className="space-y-1.5">
                       {coilLotsByReceipt.map((c) => {
                         const live = liveCoilWeightKg(c);
+                        const material = c.materialTypeName || c.productID || '—';
+                        const meta2 = [
+                          c.colour || null,
+                          c.gaugeLabel || null,
+                          c.poID ? `PO ${c.poID}` : null,
+                          c.receivedAtISO ? `Rcvd ${c.receivedAtISO}` : null,
+                          `${live.toLocaleString(undefined, { maximumFractionDigits: 2 })} kg current`,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ');
                         return (
                           <li key={`${c.coilNo}-${c.poID || ''}-${c.lineKey || ''}`}>
                             <button
                               type="button"
                               onClick={() => navigate(`/operations/coils/${encodeURIComponent(c.coilNo)}`)}
-                              className="w-full text-left grid grid-cols-[1.2fr_0.8fr_0.8fr_1fr_0.8fr] gap-2 px-3 py-2 text-[11px] text-slate-700 hover:bg-slate-50 border-b border-slate-100"
+                              className="w-full text-left rounded-lg border border-slate-200/60 bg-white/40 py-1.5 px-2.5 shadow-sm backdrop-blur-md hover:bg-white/70 transition-colors group"
                             >
-                              <span className="font-bold text-[#134e4a] truncate">{c.coilNo}</span>
-                              <span className="truncate">{c.colour || '—'}</span>
-                              <span className="truncate">{c.gaugeLabel || '—'}</span>
-                              <span className="truncate">{c.materialTypeName || c.productID || '—'}</span>
-                              <span className="text-right font-bold tabular-nums text-[#134e4a]">
-                                {live.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-                              </span>
+                              <div className="min-w-0 leading-tight">
+                                <div className="flex items-center justify-between gap-2 min-w-0">
+                                  <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
+                                    {c.coilNo}
+                                    <span className="font-medium text-slate-600"> · {material}</span>
+                                  </p>
+                                  <span className="text-[8px] font-semibold uppercase tracking-wide text-sky-800 bg-sky-100 group-hover:bg-sky-200 px-2 py-1 rounded-md shrink-0">
+                                    Open
+                                  </span>
+                                </div>
+                                <p
+                                  className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2"
+                                  title={meta2}
+                                >
+                                  {meta2}
+                                </p>
+                              </div>
                             </button>
                           </li>
                         );
                       })}
                     </ul>
-                  </div>
+                  </>
                 )}
               </div>
             </section>
@@ -1298,7 +1502,7 @@ const Operations = () => {
                     </div>
 
                     <div
-                      className="inline-flex flex-wrap rounded-2xl border border-slate-200/90 bg-slate-50/90 p-1.5 gap-1 mb-1"
+                      className="inline-flex flex-wrap rounded-lg border border-slate-200 bg-slate-50/90 p-1 gap-1 mb-1"
                       role="group"
                       aria-label="Filter production queue"
                     >
@@ -1313,10 +1517,10 @@ const Operations = () => {
                           key={f.id}
                           type="button"
                           onClick={() => setProductionFilter(f.id)}
-                          className={`px-3 py-2 rounded-xl text-[10px] font-bold uppercase tracking-wide transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/25 ${
+                          className={`px-2.5 py-1.5 rounded-md text-[8px] font-semibold uppercase tracking-wide transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/25 ${
                             productionFilter === f.id
                               ? 'bg-[#134e4a] text-white shadow-sm'
-                              : 'text-slate-600 hover:bg-white/90 hover:text-slate-900'
+                              : 'text-slate-600 hover:bg-white hover:text-slate-900'
                           }`}
                         >
                           {f.label}
@@ -1338,118 +1542,115 @@ const Operations = () => {
                         </p>
                       </div>
                     ) : (
-                      <div className="space-y-3">
-                        <div className={WORKSPACE_TABLE_HEAD}>
-                          <div className="col-span-3">List / job</div>
-                          <div className="col-span-3">Customer</div>
-                          <div className="col-span-3">Specification</div>
-                          <div className="col-span-1 tabular-nums">Qty</div>
-                          <div className="col-span-2 text-right sm:pr-1">Coil &amp; status</div>
-                        </div>
-                        {productionQueueRows.map((item) => (
-                          <div
-                            key={`${item.queueKind}-${item.id}`}
-                            role="button"
-                            tabIndex={0}
-                            onClick={() => openProductionQueueRow(item)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' || e.key === ' ') {
-                                e.preventDefault();
-                                openProductionQueueRow(item);
-                              }
-                            }}
-                            className={`z-list-row grid grid-cols-12 items-center gap-y-2 gap-x-1 text-[11px] cursor-pointer !shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/25 ${
-                              item.needsCoil
-                                ? '!border-amber-300 !bg-amber-50/60'
-                                : item.managerReviewRequired
-                                  ? '!border-red-300 !bg-red-50/50'
-                                  : item.overdue
-                                    ? '!border-rose-300 !bg-rose-50/50'
-                                    : 'border-slate-200/90 hover:border-slate-300'
-                            }`}
-                          >
-                            <div className="col-span-12 sm:col-span-3 font-semibold text-[#134e4a] min-w-0">
-                              <span className="font-mono font-bold truncate block">{item.id}</span>
-                            </div>
-                            <div className="col-span-12 sm:col-span-3 font-medium text-slate-800 truncate min-w-0">
-                              {item.customer}
-                            </div>
-                            <div className="col-span-12 sm:col-span-3 font-normal text-slate-600 truncate min-w-0">
-                              {item.spec}
-                            </div>
-                            <div className="col-span-12 sm:col-span-1 font-semibold text-[#134e4a] tabular-nums truncate">
-                              {item.quantity}
-                            </div>
-                            <div className="col-span-12 sm:col-span-2 flex flex-wrap justify-start sm:justify-end items-center gap-2 sm:pt-0">
-                              {ws?.hasWorkspaceData && item.coilLabel ? (
-                                <span
-                                  className={`hidden lg:inline text-[10px] truncate max-w-[10rem] ${
-                                    item.status === 'Planned' && item.coilCount === 0
-                                      ? 'text-amber-800 font-semibold'
-                                      : 'text-slate-500'
-                                  }`}
-                                  title={item.coilLabel}
-                                >
-                                  {item.coilLabel}
-                                </span>
-                              ) : null}
-                              <span
-                                className={`z-status-pill ${
-                                  item.priority === 'High'
-                                    ? 'border-red-200 bg-red-50 text-red-700'
-                                    : item.priority === 'Done'
-                                      ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                                      : item.priority === 'Waiting' || item.priority === 'Wait'
-                                        ? 'border-amber-200 bg-amber-50 text-amber-900'
-                                        : 'border-slate-200 bg-slate-50 text-slate-600'
-                                }`}
+                      <ul className="space-y-1.5">
+                        {productionQueueRows.map((item) => {
+                          const meta2 = [
+                            item.spec,
+                            item.quantity,
+                            ws?.hasWorkspaceData && item.coilLabel ? item.coilLabel : null,
+                            item.status,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ');
+                          const rowTone = item.needsCoil
+                            ? 'border-amber-300/80 bg-amber-50/50'
+                            : item.managerReviewRequired
+                              ? 'border-red-300/80 bg-red-50/45'
+                              : item.overdue
+                                ? 'border-rose-300/80 bg-rose-50/45'
+                                : 'border-slate-200/60 bg-white/40 hover:bg-white/70';
+                          const priorityChip =
+                            item.priority === 'High'
+                              ? 'border-red-200 bg-red-50 text-red-700'
+                              : item.priority === 'Done'
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                                : item.priority === 'Waiting' || item.priority === 'Wait'
+                                  ? 'border-amber-200 bg-amber-50 text-amber-900'
+                                  : 'border-slate-200 bg-slate-50 text-slate-600';
+                          return (
+                            <li
+                              key={`${item.queueKind}-${item.id}`}
+                              className={`rounded-lg border py-1.5 px-2.5 shadow-sm backdrop-blur-md transition-colors ${rowTone}`}
+                            >
+                              <div
+                                role="button"
+                                tabIndex={0}
+                                onClick={() => openProductionQueueRow(item)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault();
+                                    openProductionQueueRow(item);
+                                  }
+                                }}
+                                className="min-w-0 leading-tight cursor-pointer rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/25 -m-0.5 p-0.5"
                               >
-                                {item.priority}
-                              </span>
-                            </div>
-                            {!item.completed ? (
-                              <div className="col-span-12 flex flex-wrap gap-2 pt-1 border-t border-slate-100/90 mt-1">
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    openTraceWithHint(item, 'Open coil assignment inside traceability.');
-                                  }}
-                                  className="inline-flex items-center justify-center rounded-xl border border-gray-100 bg-white px-3 py-1.5 text-[10px] font-bold text-[#134e4a] shadow-sm hover:bg-gray-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/20"
+                                <div className="flex items-center justify-between gap-2 min-w-0">
+                                  <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
+                                    <span className="font-mono">{item.id}</span>
+                                    <span className="font-medium text-slate-600"> · {item.customer}</span>
+                                  </p>
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    <span
+                                      className={`text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border ${priorityChip}`}
+                                    >
+                                      {item.priority}
+                                    </span>
+                                    <span className="text-[8px] font-semibold uppercase tracking-wide text-sky-800 bg-sky-100 px-2 py-1 rounded-md">
+                                      Trace
+                                    </span>
+                                  </div>
+                                </div>
+                                <p
+                                  className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2"
+                                  title={meta2}
                                 >
-                                  Assign coil
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    openTraceWithHint(item, 'Open run log and start production for this job.');
-                                  }}
-                                  className="inline-flex items-center justify-center rounded-xl border border-gray-100 bg-white px-3 py-1.5 text-[10px] font-bold text-[#134e4a] shadow-sm hover:bg-gray-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/20"
-                                >
-                                  Start run
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    requestMarkComplete(item);
-                                  }}
-                                  className="inline-flex items-center justify-center rounded-xl border border-emerald-200/90 bg-emerald-50 px-3 py-1.5 text-[10px] font-bold text-emerald-900 shadow-sm hover:bg-emerald-100/90 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/25"
-                                >
-                                  Mark complete
-                                </button>
+                                  {meta2}
+                                </p>
                               </div>
-                            ) : null}
-                          </div>
-                        ))}
-                      </div>
+                              {!item.completed ? (
+                                <div className="flex flex-wrap gap-1.5 pt-1.5 mt-1 border-t border-dashed border-slate-200">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openTraceWithHint(item, 'Open coil assignment inside traceability.');
+                                    }}
+                                    className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-sky-200 bg-sky-50 text-sky-900 hover:bg-sky-100 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/40"
+                                  >
+                                    Assign coil
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openTraceWithHint(item, 'Open run log and start production for this job.');
+                                    }}
+                                    className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-sky-200 bg-sky-50 text-sky-900 hover:bg-sky-100 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300/40"
+                                  >
+                                    Start run
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      requestMarkComplete(item);
+                                    }}
+                                    className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/35"
+                                  >
+                                    Mark complete
+                                  </button>
+                                </div>
+                              ) : null}
+                            </li>
+                          );
+                        })}
+                      </ul>
                     )}
                   </div>
 
                   <aside className="space-y-4 lg:col-span-1 order-2">
                     {ws?.hasWorkspaceData && jobsNeedingManagerReview.length > 0 ? (
-                      <div className="rounded-2xl border border-red-200 bg-red-50/90 px-4 py-4 text-sm text-red-950 shadow-sm">
+                      <div className="rounded-lg border border-red-200 bg-red-50/90 px-3 py-3 text-sm text-red-950 shadow-sm">
                         <p className="text-[10px] font-black uppercase tracking-widest text-red-800 flex items-center gap-2">
                           <AlertTriangle size={16} className="shrink-0" />
                           Manager review
@@ -1468,38 +1669,51 @@ const Operations = () => {
                     ) : null}
 
                     {ws?.hasWorkspaceData && recentConversionChecks.length > 0 ? (
-                      <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
-                        <div className="border-b border-slate-100 px-4 py-3">
-                          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                      <div className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md shadow-sm overflow-hidden">
+                        <div className="border-b border-slate-100/90 px-3 py-2">
+                          <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">
                             Recent four-reference checks
                           </p>
-                          <p className="text-[11px] text-slate-500 mt-1">Latest conversion variance checks.</p>
+                          <p className="text-[9px] text-slate-500 mt-0.5 leading-snug">
+                            Latest conversion variance checks.
+                          </p>
                         </div>
-                        <div className="max-h-[32rem] overflow-auto">
-                          <table className="min-w-full text-left text-[11px]">
-                            <thead className="bg-slate-50 text-[9px] font-black uppercase tracking-widest text-slate-500">
-                              <tr>
-                                <th className="px-3 py-2">List</th>
-                                <th className="px-3 py-2">Δ Std</th>
-                                <th className="px-3 py-2">Alert</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {recentConversionChecks.map((c) => {
-                                const v = c.varianceSummary?.variances ?? {};
-                                return (
-                                  <tr key={c.id} className="border-t border-slate-100">
-                                    <td className="px-3 py-2 font-mono font-bold text-[#134e4a]">
-                                      {c.cuttingListId || c.jobID}
-                                    </td>
-                                    <td className="px-3 py-2 tabular-nums">{formatVariancePct(v.standardPct)}</td>
-                                    <td className="px-3 py-2 font-semibold">{c.alertState}</td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
+                        <ul className="p-2 space-y-1.5">
+                          {recentConversionChecks.map((c) => {
+                            const v = c.varianceSummary?.variances ?? {};
+                            const listId = c.cuttingListId || c.jobID;
+                            const alert = String(c.alertState || '—');
+                            const alertTone =
+                              alert === 'High'
+                                ? 'border-red-200 bg-red-50 text-red-800'
+                                : alert === 'Low'
+                                  ? 'border-amber-200 bg-amber-50 text-amber-900'
+                                  : alert === 'Watch'
+                                    ? 'border-sky-200 bg-sky-50 text-sky-900'
+                                    : 'border-emerald-200 bg-emerald-50 text-emerald-800';
+                            const meta2 = `Δ Std ${formatVariancePct(v.standardPct)}`;
+                            return (
+                              <li
+                                key={c.id}
+                                className="rounded-lg border border-slate-200/60 bg-white/50 py-1.5 px-2.5 shadow-sm"
+                              >
+                                <div className="flex items-center justify-between gap-2 min-w-0">
+                                  <p className="text-[11px] font-bold font-mono text-[#134e4a] truncate min-w-0">
+                                    {listId}
+                                  </p>
+                                  <span
+                                    className={`shrink-0 text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border ${alertTone}`}
+                                  >
+                                    {alert}
+                                  </span>
+                                </div>
+                                <p className="text-[8px] text-slate-500 mt-0.5 tabular-nums leading-snug" title={meta2}>
+                                  {meta2}
+                                </p>
+                              </li>
+                            );
+                          })}
+                        </ul>
                       </div>
                     ) : null}
                   </aside>

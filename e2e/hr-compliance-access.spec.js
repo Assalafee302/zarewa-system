@@ -35,5 +35,19 @@ test.describe('HR compliance/observability access control', () => {
     expect((await page.request.get('/api/hr/observability')).status()).toBe(200);
     expect((await page.request.get('/api/hr/data-cleanup-queue')).status()).toBe(200);
   });
+
+  test('HR officer cannot see unmasked sensitive staff fields without IT security ack', async ({ page }) => {
+    await apiSignIn(page, 'hr.officer', 'HrOfficer@12345!');
+    const staff = await page.request.get('/api/hr/staff');
+    expect(staff.status()).toBe(200);
+    const json = await staff.json();
+    const row = (json.staff || [])[0];
+    expect(row).toBeTruthy();
+    expect(row.taxId === '***' || row.taxId == null || row.taxId === '').toBe(true);
+    expect(row.pensionRsaPin === '***' || row.pensionRsaPin == null || row.pensionRsaPin === '').toBe(true);
+    expect(row.bankAccountNoMasked === '***' || row.bankAccountNoMasked == null || row.bankAccountNoMasked === '').toBe(
+      true
+    );
+  });
 });
 

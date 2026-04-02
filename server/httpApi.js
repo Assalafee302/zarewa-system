@@ -17,19 +17,26 @@ import {
   SALES_DOMAIN_PERMS,
 } from './workspaceAccess.js';
 import {
+  allKnownPermissionKeys,
   canUseAllBranchesRollup,
   changePassword,
   clearCsrfCookie,
   clearSessionCookie,
   completePasswordReset,
+  createAppUserRecord,
+  listAllAppUsers,
   loginWithPassword,
   logoutSession,
   patchAppUserWorkspaceDepartment,
   requestPasswordReset,
   requireAuth,
   requirePermission,
+  ROLE_DEFINITIONS,
   setCsrfCookie,
   setSessionCookie,
+  updateAppUserPermissions,
+  updateAppUserRole,
+  updateAppUserStatus,
   updateUserProfile,
   userHasPermission,
 } from './auth.js';
@@ -43,6 +50,8 @@ import {
   insertRefundRequest,
   lockAccountingPeriod,
   previewRefundRequest,
+  getEligibleRefundQuotations,
+  reviewQuotation,
   unlockAccountingPeriod,
   upsertTreasuryAccount,
 } from './controlOps.js';
@@ -66,6 +75,7 @@ import {
   listSuppliers,
   listTransportAgents,
   listRefunds,
+  getRefundIntelligenceForQuotation,
   listAdvanceInEvents,
   listAuditLog,
   listAuditLogNdjsonRows,
@@ -79,9 +89,21 @@ import {
   setJsonBlob,
   workspaceReportAggregateCounts,
   dashboardSummary,
+  listManagementItems,
+  listManagerQuotationAudit,
 } from './readModel.js';
 import { insertLedgerRows } from './writeOps.js';
 import * as write from './writeOps.js';
+import {
+  listGlAccounts,
+  listGlActivityLines,
+  listGlJournalEntries,
+  listGlJournalLinesForJournal,
+  postBalancedJournal,
+  trialBalanceRows,
+  tryPostCustomerAdvanceGl,
+  tryPostCustomerReceiptGl,
+} from './glOps.js';
 import {
   computePayrollRun,
   createHrRequest,
@@ -90,6 +112,7 @@ import {
   exportPayrollPayslipsCsv,
   exportPayrollStatutoryPackCsv,
   exportPayrollTreasuryPackCsv,
+  exportPayrollGlJournalTemplateCsv,
   generateEmploymentLetter,
   getHrMeProfile,
   getHrDailyRollCall,
@@ -121,6 +144,7 @@ import {
   listHrPolicyAcknowledgements,
   listHrLeaveBalances,
   adjustHrLeaveBalance,
+  appendHrAuditEvent,
   upsertHrDailyRollCall,
   upsertHrStaffProfile,
   uploadHrAttendance,
@@ -213,6 +237,8 @@ function hrCapsForUser(user) {
     canViewDirectory: star || has('hr.directory.view') || has('hr.staff.manage'),
     canPayroll: star || has('hr.payroll.manage'),
     canManageStaff: star || has('hr.staff.manage'),
+    canMarkDailyRoll:
+      star || has('hr.attendance.upload') || has('hr.daily_roll.mark') || has('hr.payroll.manage'),
     canUploadAttendance:
       star || has('hr.attendance.upload'),
     canLoanMaint:
@@ -237,6 +263,44 @@ function hrScopeFromReq(req) {
   });
 }
 
+function defaultAttendanceSchedule() {
+  return {
+    graceMinutesLate: 10,
+    week: {
+      mon: { start: '08:00', end: '17:00' },
+      tue: { start: '08:00', end: '17:00' },
+      wed: { start: '08:00', end: '17:00' },
+      thu: { start: '08:00', end: '17:00' },
+      fri: { start: '08:00', end: '17:00' },
+      sat: { start: '09:00', end: '16:00' },
+    },
+  };
+}
+
+function parseHmToMinutes(hm) {
+  const m = String(hm || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const hh = Math.max(0, Math.min(23, Number(m[1])));
+  const mm = Math.max(0, Math.min(59, Number(m[2])));
+  return hh * 60 + mm;
+}
+
+function weekdayKeyFromIso(dayIso) {
+  const d = new Date(`${dayIso}T00:00:00Z`);
+  const idx = d.getUTCDay(); // 0 Sun .. 6 Sat
+  return ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][idx] || 'mon';
+}
+
+function computeMinutesLateFromSchedule(schedule, dayIso, arrivalHm) {
+  const wk = weekdayKeyFromIso(dayIso);
+  const startHm = schedule?.week?.[wk]?.start || schedule?.week?.mon?.start || '08:00';
+  const startMin = parseHmToMinutes(startHm);
+  const arrMin = parseHmToMinutes(arrivalHm);
+  if (startMin == null || arrMin == null) return 0;
+  const grace = Math.max(0, Math.round(Number(schedule?.graceMinutesLate) || 0));
+  return Math.max(0, arrMin - startMin - grace);
+}
+
 function resolveHrStaffUserIdParam(req) {
   const raw = String(req.params.userId || '').trim();
   return raw === 'me' ? req.user.id : raw;
@@ -257,6 +321,59 @@ export function registerHttpApi(app, db) {
         cuttingListRegisterProduction: true,
       },
     });
+  });
+
+  app.get(
+    '/api/management/items',
+    requirePermission(['audit.view', 'refunds.approve', 'sales.manage', 'quotations.manage']),
+    (req, res) => {
+      try {
+        const branchScope = resolveBootstrapBranchScope(req);
+        res.json(listManagementItems(db, branchScope));
+      } catch (e) {
+        console.error(e);
+        res.status(500).json({ ok: false, error: 'Failed to load management items.' });
+      }
+    }
+  );
+
+  app.patch('/api/management/targets', requirePermission('quotations.manage'), (req, res) => {
+    try {
+      const { targets } = req.body || {};
+      db.prepare(`INSERT OR REPLACE INTO app_json_blobs (key, payload) VALUES (?, ?)`).run('manager_targets', JSON.stringify(targets));
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  app.get(
+    '/api/management/quotation-audit',
+    requirePermission(['audit.view', 'refunds.approve', 'sales.manage', 'quotations.manage']),
+    (req, res) => {
+      try {
+        res.json(listManagerQuotationAudit(db, req.query.quotationRef));
+      } catch (e) {
+        console.error(e);
+        res.status(500).json({ ok: false, error: 'Failed to load quotation audit.' });
+      }
+    }
+  );
+
+  app.post('/api/management/review', requirePermission('quotations.manage'), (req, res) => {
+    try {
+      const { quotationId, decision, reason } = req.body || {};
+      const r = reviewQuotation(
+        db,
+        String(quotationId ?? '').trim(),
+        { decision, note: reason },
+        req.user
+      );
+      res.json(r);
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
   });
 
   app.get('/api/dashboard/summary', requirePermission('dashboard.view'), (req, res) => {
@@ -559,6 +676,161 @@ export function registerHttpApi(app, db) {
     } catch (e) {
       console.error(e);
       return res.status(500).json({ ok: false, error: 'Could not update workspace department.' });
+    }
+  });
+
+  app.get('/api/users', requirePermission('settings.view'), (req, res) => {
+    try {
+      res.json({ ok: true, users: listAllAppUsers(db) });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ ok: false, error: 'Could not list users.' });
+    }
+  });
+
+  app.post('/api/users', requirePermission('settings.view'), (req, res) => {
+    try {
+      const r = createAppUserRecord(db, req.body || {});
+      if (!r.ok) return res.status(400).json(r);
+      appendAuditLog(db, {
+        actor: req.user,
+        action: 'user.create',
+        entityKind: 'user',
+        entityId: r.userId,
+        note: `Created user ${req.body.username}`,
+      });
+      res.status(201).json(r);
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  app.patch('/api/users/:id/role', requirePermission('settings.view'), (req, res) => {
+    try {
+      const r = updateAppUserRole(db, req.params.id, req.body?.roleKey);
+      if (!r.ok) return res.status(400).json(r);
+      appendAuditLog(db, {
+        actor: req.user,
+        action: 'user.update_role',
+        entityKind: 'user',
+        entityId: req.params.id,
+        note: `Role updated to ${req.body.roleKey}`,
+      });
+      res.json({ ok: true });
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  app.patch('/api/users/:id/permissions', requirePermission('settings.view'), (req, res) => {
+    try {
+      const r = updateAppUserPermissions(db, req.params.id, req.body?.permissions);
+      if (!r.ok) return res.status(400).json(r);
+      appendAuditLog(db, {
+        actor: req.user,
+        action: 'user.update_permissions',
+        entityKind: 'user',
+        entityId: req.params.id,
+        note: 'Granular permissions updated',
+      });
+      res.json({ ok: true });
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  app.get('/api/roles', requirePermission('settings.view'), (_req, res) => {
+    try {
+      const roles = Object.entries(ROLE_DEFINITIONS).map(([key, v]) => ({
+        key,
+        label: v.label,
+        permissions: [...v.permissions],
+      }));
+      roles.sort((a, b) => a.key.localeCompare(b.key));
+      res.json({
+        ok: true,
+        roles,
+        permissionKeys: allKnownPermissionKeys(),
+      });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ ok: false, error: 'Could not load roles.' });
+    }
+  });
+
+  app.patch('/api/users/:id/status', requirePermission('settings.view'), (req, res) => {
+    try {
+      const r = updateAppUserStatus(db, req.params.id, req.body?.status, { actorUserId: req.user.id });
+      if (!r.ok) return res.status(400).json(r);
+      appendAuditLog(db, {
+        actor: req.user,
+        action: 'user.update_status',
+        entityKind: 'user',
+        entityId: req.params.id,
+        note: `Status updated to ${req.body.status}`,
+      });
+      res.json({ ok: true });
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  app.get('/api/gl/accounts', requirePermission('finance.view'), (req, res) => {
+    try {
+      res.json({ ok: true, accounts: listGlAccounts(db) });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  app.get('/api/gl/trial-balance', requirePermission('finance.view'), (req, res) => {
+    const startDate = String(req.query.startDate || '').slice(0, 10);
+    const endDate = String(req.query.endDate || '').slice(0, 10);
+    const r = trialBalanceRows(db, startDate, endDate);
+    if (!r.ok) return res.status(400).json(r);
+    res.json(r);
+  });
+
+  app.get('/api/gl/journals', requirePermission('finance.view'), (req, res) => {
+    const startDate = String(req.query.startDate || '').slice(0, 10);
+    const endDate = String(req.query.endDate || '').slice(0, 10);
+    const r = listGlJournalEntries(db, startDate, endDate);
+    if (!r.ok) return res.status(400).json(r);
+    res.json(r);
+  });
+
+  app.get('/api/gl/journals/:journalId/lines', requirePermission('finance.view'), (req, res) => {
+    const r = listGlJournalLinesForJournal(db, String(req.params.journalId || ''));
+    if (!r.ok) return res.status(400).json(r);
+    res.json(r);
+  });
+
+  app.get('/api/gl/activity', requirePermission('finance.view'), (req, res) => {
+    const startDate = String(req.query.startDate || '').slice(0, 10);
+    const endDate = String(req.query.endDate || '').slice(0, 10);
+    const r = listGlActivityLines(db, startDate, endDate);
+    if (!r.ok) return res.status(400).json(r);
+    res.json(r);
+  });
+
+  app.post('/api/gl/journal', requirePermission('finance.post'), (req, res) => {
+    try {
+      const r = postBalancedJournal(db, {
+        entryDateISO: req.body?.entryDateISO,
+        memo: req.body?.memo,
+        sourceKind: req.body?.sourceKind,
+        sourceId: req.body?.sourceId,
+        branchId: req.workspaceBranchId,
+        createdByUserId: req.user?.id,
+        lines: req.body?.lines || [],
+      });
+      res.status(r.ok ? 201 : 400).json(r);
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
     }
   });
 
@@ -1396,6 +1668,31 @@ export function registerHttpApi(app, db) {
     }
   });
 
+  app.get('/api/refunds/eligible-quotations', requirePermission(['refunds.request', 'refunds.approve', 'finance.approve']), (req, res) => {
+    try {
+      const rows = getEligibleRefundQuotations(db);
+      res.json({ ok: true, quotations: rows });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ ok: false, error: 'Failed to fetch eligible quotations' });
+    }
+  });
+
+  app.get('/api/refunds/intelligence', requirePermission(['refunds.request', 'refunds.approve', 'finance.approve']), (req, res) => {
+    try {
+      const quotationRef = String(req.query.quotationRef || '').trim();
+      if (!quotationRef) {
+        return res.status(400).json({ ok: false, error: 'quotationRef is required' });
+      }
+      const branchScope = resolveBootstrapBranchScope(req);
+      const { receipts, cuttingLists, summary } = getRefundIntelligenceForQuotation(db, quotationRef, branchScope);
+      res.json({ ok: true, receipts, cuttingLists, summary });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ ok: false, error: 'Failed to load refund intelligence' });
+    }
+  });
+
   app.post('/api/refunds', requirePermission('refunds.request'), (req, res) => {
     try {
       const r = insertRefundRequest(
@@ -1552,8 +1849,41 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/payment-requests', requirePermission('finance.post'), (req, res) => {
     try {
-      const r = insertPaymentRequest(db, req.body || {}, req.user);
+      const r = insertPaymentRequest(db, { ...(req.body || {}), workspaceBranchId: req.workspaceBranchId }, req.user);
       res.status(r.ok ? 201 : 400).json(r);
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  app.get('/api/payment-requests/:requestId/attachment', requireAuth, (req, res) => {
+    try {
+      const can =
+        userHasPermission(req.user, 'finance.post') ||
+        userHasPermission(req.user, 'finance.approve') ||
+        userHasPermission(req.user, 'finance.pay');
+      if (!can) {
+        res.status(403).json({ ok: false, error: 'Forbidden' });
+        return;
+      }
+      const requestId = String(req.params.requestId || '').trim();
+      const row = db
+        .prepare(
+          `SELECT attachment_name, attachment_mime, attachment_data_b64 FROM payment_requests WHERE request_id = ?`
+        )
+        .get(requestId);
+      const b64 = row?.attachment_data_b64;
+      if (!row || !b64 || !String(b64).trim()) {
+        res.status(404).json({ ok: false, error: 'No attachment on this request.' });
+        return;
+      }
+      const buf = Buffer.from(String(b64).trim(), 'base64');
+      const mime = String(row.attachment_mime || 'application/octet-stream').split(';')[0].trim();
+      const name = String(row.attachment_name || 'attachment').replace(/[^\w.-]+/g, '_');
+      res.setHeader('Content-Type', mime || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `inline; filename="${name}"`);
+      res.send(buf);
     } catch (e) {
       console.error(e);
       res.status(400).json({ ok: false, error: String(e.message || e) });
@@ -1716,6 +2046,25 @@ export function registerHttpApi(app, db) {
         req.body || {},
         req.user,
         req.workspaceBranchId || DEFAULT_BRANCH_ID
+      );
+      res.status(r.ok ? 201 : 400).json(r);
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  app.post('/api/bank-reconciliation', requirePermission('finance.post'), (req, res) => {
+    try {
+      let branchId = req.workspaceBranchId || DEFAULT_BRANCH_ID;
+      if (req.workspaceViewAll && canUseAllBranchesRollup(req.user)) {
+        const requested = String(req.body?.branchId ?? '').trim();
+        if (requested && getBranch(db, requested)) branchId = requested;
+      }
+      const r = write.insertBankReconciliationLine(
+        db,
+        { ...(req.body || {}), actor: req.user },
+        branchId
       );
       res.status(r.ok ? 201 : 400).json(r);
     } catch (e) {
@@ -1930,6 +2279,18 @@ export function registerHttpApi(app, db) {
             createdBy: req.user.displayName,
           });
         }
+        if (created && treasuryLines.length > 0) {
+          const glA = tryPostCustomerAdvanceGl(db, {
+            ledgerEntryId: created.id,
+            amountNgn: created.amountNgn,
+            entryDateISO: dateISO,
+            branchId: wb,
+            createdByUserId: req.user.id,
+          });
+          if (!glA.ok && !glA.skipped && !glA.duplicate) {
+            throw new Error(glA.error || 'Could not post advance to general ledger.');
+          }
+        }
         appendAuditLog(db, {
           actor: req.user,
           action: 'ledger.advance',
@@ -2063,6 +2424,18 @@ export function registerHttpApi(app, db) {
             paymentLines: treasuryLines,
             createdBy: req.user.displayName,
           });
+        }
+        if (parsed.receipt?.id && treasuryLines.length > 0) {
+          const glR = tryPostCustomerReceiptGl(db, {
+            ledgerEntryId: parsed.receipt.id,
+            amountNgn: parsed.receipt.amountNgn,
+            entryDateISO: dateISO,
+            branchId: wb,
+            createdByUserId: req.user.id,
+          });
+          if (!glR.ok && !glR.skipped && !glR.duplicate) {
+            throw new Error(glR.error || 'Could not post receipt to general ledger.');
+          }
         }
         appendAuditLog(db, {
           actor: req.user,
@@ -2202,6 +2575,25 @@ export function registerHttpApi(app, db) {
     res.json({ ok: true, required, missing });
   });
 
+  app.get('/api/hr/attendance/schedule', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canUploadAttendance && !caps.canPayroll && !caps.canManageStaff) {
+      return res.status(403).json({ ok: false, error: 'No access.' });
+    }
+    const raw = getJsonBlob(db, 'hr.attendance.schedule.v1')?.payload || null;
+    const payload = raw ? JSON.parse(raw) : { byBranchId: {}, default: defaultAttendanceSchedule() };
+    res.json({ ok: true, schedule: payload });
+  });
+
+  app.put('/api/hr/attendance/schedule', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canManageStaff) return res.status(403).json({ ok: false, error: 'No access.' });
+    const next = req.body?.schedule;
+    if (!next || typeof next !== 'object') return res.status(400).json({ ok: false, error: 'schedule is required.' });
+    setJsonBlob(db, 'hr.attendance.schedule.v1', next);
+    res.json({ ok: true });
+  });
+
   app.get('/api/hr/me', requireAuth, (req, res) => {
     const payload = getHrMeProfile(db, req.user.id);
     res.json({ ok: true, ...payload });
@@ -2231,6 +2623,17 @@ export function registerHttpApi(app, db) {
         transportAllowanceNgn: 0,
       };
     });
+    if (caps.canViewSensitiveHr && missingSensitive.length === 0) {
+      appendHrAuditEvent(db, {
+        actorUserId: req.user.id,
+        actorDisplayName: req.user.displayName || req.user.username || null,
+        action: 'hr.staff.sensitive_view',
+        entityKind: 'hr_staff_profiles',
+        entityId: null,
+        branchId: scope?.branchId || null,
+        details: { kind: 'list', count: staff.length },
+      });
+    }
     res.json({ ok: true, staff });
   });
 
@@ -2272,6 +2675,17 @@ export function registerHttpApi(app, db) {
         bankAccountNoMasked: profile.bankAccountNoMasked ? '***' : profile.bankAccountNoMasked,
         bankAccountName: profile.bankAccountName ? 'Restricted' : profile.bankAccountName,
       };
+    }
+    if (caps.canViewSensitiveHr && missingSensitive.length === 0) {
+      appendHrAuditEvent(db, {
+        actorUserId: req.user.id,
+        actorDisplayName: req.user.displayName || req.user.username || null,
+        action: 'hr.staff.sensitive_view',
+        entityKind: 'hr_staff_profile',
+        entityId: uid,
+        branchId: scope?.branchId || null,
+        details: { kind: 'read', userId: uid },
+      });
     }
     return res.json({ ok: true, mode: 'hr', profile });
   });
@@ -2382,7 +2796,8 @@ export function registerHttpApi(app, db) {
         String(req.params.requestId || ''),
         req.user,
         Boolean(req.body?.approve),
-        req.body?.note
+        req.body?.note,
+        req.body?.reasonCode
       );
       res.status(r.ok ? 200 : 400).json(r);
     } catch (e) {
@@ -2403,7 +2818,8 @@ export function registerHttpApi(app, db) {
         String(req.params.requestId || ''),
         req.user,
         Boolean(req.body?.approve),
-        req.body?.note
+        req.body?.note,
+        req.body?.reasonCode
       );
       res.status(r.ok ? 200 : 400).json(r);
     } catch (e) {
@@ -2468,6 +2884,16 @@ export function registerHttpApi(app, db) {
     const caps = hrCapsForUser(req.user);
     if (!caps.canPayroll) return res.status(403).json({ ok: false, error: 'No access to payroll.' });
     const r = exportPayrollTreasuryPackCsv(db, String(req.params.runId || ''));
+    if (!r.ok) return res.status(400).json(r);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${r.filename}"`);
+    res.send(r.csv);
+  });
+
+  app.get('/api/hr/payroll-runs/:runId/gl-journal-template', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canPayroll) return res.status(403).json({ ok: false, error: 'No access to payroll.' });
+    const r = exportPayrollGlJournalTemplateCsv(db, String(req.params.runId || ''));
     if (!r.ok) return res.status(400).json(r);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${r.filename}"`);
@@ -2574,7 +3000,30 @@ export function registerHttpApi(app, db) {
     if (branchId && !scope.viewAll && String(scope.branchId || '') !== branchId) {
       return res.status(403).json({ ok: false, error: 'Branch not in your workspace scope.' });
     }
-    const r = uploadHrAttendance(db, req.user, req.body || {});
+    // Optionally compute minutesLate from schedule if arrivalTimeHm is provided.
+    let body = req.body || {};
+    try {
+      const blob = getJsonBlob(db, 'hr.attendance.schedule.v1')?.payload || null;
+      const sched = blob ? JSON.parse(blob) : null;
+      const schedule = sched?.byBranchId?.[branchId] || sched?.default || defaultAttendanceSchedule();
+      const rows = Array.isArray(body?.rows) ? body.rows : [];
+      body = {
+        ...body,
+        rows: rows.map((row) => {
+          const arrivalHm = String(row?.arrivalTimeHm || '').trim();
+          const minutesLate =
+            row?.minutesLate != null
+              ? Math.max(0, Math.round(Number(row.minutesLate) || 0))
+              : arrivalHm
+                ? computeMinutesLateFromSchedule(schedule, `${body.periodYyyymm.slice(0, 4)}-${body.periodYyyymm.slice(4, 6)}-01`, arrivalHm)
+                : 0;
+          return { ...row, minutesLate };
+        }),
+      };
+    } catch {
+      /* ignore schedule parsing */
+    }
+    const r = uploadHrAttendance(db, req.user, body);
     res.status(r.ok ? 201 : 400).json(r);
   });
 
@@ -2595,7 +3044,7 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/hr/daily-roll', requireAuth, (req, res) => {
     const caps = hrCapsForUser(req.user);
-    if (!caps.canUploadAttendance && !caps.canPayroll) {
+    if (!caps.canUploadAttendance && !caps.canPayroll && !caps.canMarkDailyRoll) {
       return res.status(403).json({ ok: false, error: 'Cannot record daily roll.' });
     }
     const scope = hrScopeFromReq(req);

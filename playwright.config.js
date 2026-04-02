@@ -1,5 +1,11 @@
 import { defineConfig, devices } from '@playwright/test';
 
+/**
+ * Ports: E2E_UI_PORT (default 5180) and E2E_API_PORT (default 8788) must be free.
+ * If the UI port is busy (e.g. a leftover e2e-web process), run with different ports, e.g. PowerShell:
+ *   $env:E2E_UI_PORT='5182'; $env:E2E_API_PORT='8790'; npm run test:e2e
+ * HR stress (opt-in): HR_STRESS=1 HR_STRESS_N=12 npm run test:e2e -- e2e/hr-stress.spec.js
+ */
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,

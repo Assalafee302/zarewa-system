@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Briefcase,
   CalendarRange,
@@ -54,6 +54,8 @@ function statusStyle(s) {
 export default function HrTalent() {
   const { caps } = useHrWorkspace();
   const ws = useWorkspace();
+  const location = useLocation();
+  const navigate = useNavigate();
   const selfId = ws?.session?.user?.id;
   const { show: showToast } = useToast();
   const [requests, setRequests] = useState([]);
@@ -122,6 +124,23 @@ export default function HrTalent() {
     }, delay);
     return () => window.clearTimeout(t);
   }, [caps, load, q, kindFilter, statusFilter]);
+
+  useEffect(() => {
+    const st = location.state;
+    if (!st || typeof st !== 'object') return;
+    const t = window.setTimeout(() => {
+      if (st.openLeaveForm) {
+        setLeaveOpen(true);
+        navigate(location.pathname, { replace: true, state: {} });
+        return;
+      }
+      if (st.openLoanForm) {
+        setLoanOpen(true);
+        navigate(location.pathname, { replace: true, state: {} });
+      }
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, [location.state, location.pathname, navigate]);
 
   const submitCreate = async (e) => {
     e.preventDefault();
@@ -356,7 +375,7 @@ export default function HrTalent() {
   if (caps.enabled === false) {
     return (
       <MainPanel>
-        <PageHeader title="Leave & HR requests" />
+        <PageHeader eyebrow="Human resources" title="Leave & HR requests" />
         <p className="text-sm text-amber-800">HR data is not initialised on this server.</p>
       </MainPanel>
     );
@@ -365,6 +384,7 @@ export default function HrTalent() {
   return (
     <>
       <PageHeader
+        eyebrow="Human resources"
         title="Leave & HR requests"
         subtitle="One queue for leave, loans, welfare, and other HR cases — submit, get HR then executive approval, and push approved loans into finance for payout."
         actions={
@@ -373,7 +393,7 @@ export default function HrTalent() {
               type="button"
               onClick={() => load()}
               disabled={busy}
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black uppercase text-[#134e4a] disabled:opacity-50"
+              className="z-btn-secondary gap-2 py-2 px-4 text-xs disabled:opacity-50"
             >
               <RefreshCw size={14} className={busy ? 'animate-spin' : ''} />
               Refresh
@@ -381,7 +401,7 @@ export default function HrTalent() {
             <button
               type="button"
               onClick={() => setLoanOpen(true)}
-              className="inline-flex items-center gap-2 rounded-xl border border-teal-200 bg-teal-50 px-3 py-2 text-[11px] font-black uppercase text-[#134e4a]"
+              className="inline-flex items-center gap-2 rounded-xl border border-teal-200 bg-teal-50 px-4 py-2.5 text-xs font-bold uppercase tracking-wide text-[#134e4a]"
             >
               <Wallet size={14} />
               Apply loan
@@ -389,16 +409,12 @@ export default function HrTalent() {
             <button
               type="button"
               onClick={() => setLeaveOpen(true)}
-              className="inline-flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] font-black uppercase text-[#134e4a]"
+              className="inline-flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-xs font-bold uppercase tracking-wide text-[#134e4a]"
             >
               <CalendarRange size={14} />
               Apply leave
             </button>
-            <button
-              type="button"
-              onClick={() => setCreateOpen(true)}
-              className="inline-flex items-center gap-2 rounded-xl bg-[#134e4a] px-3 py-2 text-[11px] font-black uppercase text-white"
-            >
+            <button type="button" onClick={() => setCreateOpen(true)} className="z-btn-primary gap-2 py-2 px-4 text-xs">
               <Plus size={14} />
               New request
             </button>

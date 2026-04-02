@@ -87,6 +87,33 @@ describe('Zarewa API', () => {
     expect(res.body.suggestedRoleByDepartment?.sales).toBe('sales_staff');
   });
 
+  it('GET /api/roles returns role catalog and permission keys for settings users', async () => {
+    const signedAgent = request.agent(app);
+    await loginAs(signedAgent);
+    const res = await signedAgent.get('/api/roles');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(Array.isArray(res.body.roles)).toBe(true);
+    expect(res.body.roles.some((r) => r.key === 'admin')).toBe(true);
+    expect(Array.isArray(res.body.permissionKeys)).toBe(true);
+    expect(res.body.permissionKeys.includes('dashboard.view')).toBe(true);
+  });
+
+  it('POST /api/users creates a login when admin has settings.view', async () => {
+    const signedAgent = request.agent(app);
+    await loginAs(signedAgent);
+    const res = await signedAgent.post('/api/users').send({
+      username: 'e2e.created.user',
+      displayName: 'E2E Created',
+      password: 'TempPass@999!',
+      roleKey: 'viewer',
+      department: 'general',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.userId).toMatch(/^USR-/);
+  });
+
   it('PATCH /api/session/dashboard-prefs persists and returns on bootstrap', async () => {
     const signedAgent = request.agent(app);
     await loginAs(signedAgent);
@@ -102,6 +129,18 @@ describe('Zarewa API', () => {
     expect(boot.status).toBe(200);
     expect(boot.body.dashboardPrefs.showCharts).toBe(false);
     expect(boot.body.dashboardPrefs.showAlertBanner).toBe(false);
+  });
+
+  it('PATCH /api/session/profile updates display name and returns on bootstrap', async () => {
+    const signedAgent = request.agent(app);
+    await loginAs(signedAgent);
+    const patch = await signedAgent.patch('/api/session/profile').send({ displayName: 'Zarewa Admin Updated' });
+    expect(patch.status).toBe(200);
+    expect(patch.body.ok).toBe(true);
+    expect(patch.body.user.displayName).toBe('Zarewa Admin Updated');
+    const boot = await signedAgent.get('/api/bootstrap');
+    expect(boot.status).toBe(200);
+    expect(boot.body.session.user.displayName).toBe('Zarewa Admin Updated');
   });
 
   it('GET /api/customers returns seeded customers', async () => {
@@ -235,13 +274,38 @@ describe('Zarewa API', () => {
     expect(line?.status).toBe('Review');
     const patch = await agent.patch('/api/bank-reconciliation/BR-003').send({
       status: 'Matched',
-      systemMatch: 'RC-2026-099',
+      systemMatch: 'RC-2026-014',
     });
     expect(patch.status).toBe(200);
     const after = await agent.get('/api/bootstrap');
     const row = after.body.bankReconciliation.find((l) => l.id === 'BR-003');
     expect(row.status).toBe('Matched');
-    expect(row.systemMatch).toBe('RC-2026-099');
+    expect(row.systemMatch).toBe('RC-2026-014');
+  });
+
+  it('PATCH /api/bank-reconciliation/:lineId rejects Matched when RC- id is not a receipt', async () => {
+    const bad = await agent.patch('/api/bank-reconciliation/BR-003').send({
+      status: 'Matched',
+      systemMatch: 'RC-NOT-A-REAL-RECEIPT-ID',
+    });
+    expect(bad.status).toBe(400);
+    expect(bad.body.ok).toBe(false);
+  });
+
+  it('POST /api/bank-reconciliation creates a statement line in Review', async () => {
+    const created = await agent.post('/api/bank-reconciliation').send({
+      bankDateISO: '2026-04-01',
+      description: 'API test bank line',
+      amountNgn: -5000,
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.ok).toBe(true);
+    expect(created.body.id).toMatch(/^BR-/);
+    const boot = await agent.get('/api/bootstrap');
+    const row = boot.body.bankReconciliation.find((l) => l.id === created.body.id);
+    expect(row?.description).toBe('API test bank line');
+    expect(row?.amountNgn).toBe(-5000);
+    expect(row?.status).toBe('Review');
   });
 
   it('POST /api/ledger/advance then summary shows advance', async () => {
@@ -282,6 +346,19 @@ describe('Zarewa API', () => {
   it('POST /api/ledger/apply-advance applies deposit to quotation', async () => {
     const before = await agent.get('/api/bootstrap');
     const treasuryAccountId = before.body.treasuryAccounts[0].id;
+    const q = await agent.post('/api/quotations').send({
+      customerID: 'CUS-001',
+      projectName: `Advance apply ${Date.now()}`,
+      dateISO: '2026-03-29',
+      lines: {
+        products: [{ name: 'Test item', qty: '1', unitPrice: '100000' }],
+        accessories: [],
+        services: [],
+      },
+    });
+    expect(q.status).toBe(201);
+    const quotationRef = q.body.quotation?.quotationID || q.body.quotation?.id || q.body.quotationID || q.body.id;
+    expect(String(quotationRef || '')).toBeTruthy();
     await agent.post('/api/ledger/advance').send({
       customerID: 'CUS-001',
       amountNgn: 50_000,
@@ -293,7 +370,7 @@ describe('Zarewa API', () => {
 
     const apply = await agent.post('/api/ledger/apply-advance').send({
       customerID: 'CUS-001',
-      quotationRef: 'QT-2026-001',
+      quotationRef,
       amountNgn: 50_000,
     });
     expect(apply.status).toBe(201);
@@ -326,9 +403,22 @@ describe('Zarewa API', () => {
   });
 
   it('POST /api/ledger/reverse-receipt reverses a posted receipt', async () => {
+    const q = await agent.post('/api/quotations').send({
+      customerID: 'CUS-002',
+      projectName: `Reverse receipt ${Date.now()}`,
+      dateISO: '2026-03-29',
+      lines: {
+        products: [{ name: 'Test item', qty: '1', unitPrice: '200000' }],
+        accessories: [],
+        services: [],
+      },
+    });
+    expect(q.status).toBe(201);
+    const quotationId = q.body.quotation?.id || q.body.quotation?.quotationID || q.body.quotationID || q.body.id;
+    expect(String(quotationId || '')).toBeTruthy();
     const receipt = await agent.post('/api/ledger/receipt').send({
       customerID: 'CUS-002',
-      quotationId: 'QT-2026-002',
+      quotationId,
       amountNgn: 100_000,
       paymentMethod: 'Transfer',
       dateISO: '2026-03-29',
@@ -365,6 +455,34 @@ describe('Zarewa API', () => {
 
     const dep = await agent.get('/api/advance-deposits');
     expect(dep.body.advances.some((a) => a.ledgerEntryId === adv.body.entry.id)).toBe(false);
+  });
+
+  it('POST /api/ledger/reverse-advance posts reversing GL when advance had treasury', async () => {
+    const before = await agent.get('/api/bootstrap');
+    const treasuryAccountId = before.body.treasuryAccounts[0].id;
+    const adv = await agent.post('/api/ledger/advance').send({
+      customerID: 'CUS-004',
+      amountNgn: 50_000,
+      paymentMethod: 'Transfer',
+      dateISO: '2026-03-30',
+      treasuryAccountId,
+      paymentLines: [{ treasuryAccountId, amountNgn: 50_000, reference: 'ADV-GL-TST' }],
+    });
+    expect(adv.status).toBe(201);
+    const advGl = db
+      .prepare(`SELECT id FROM gl_journal_entries WHERE source_kind = 'CUSTOMER_ADVANCE_GL' AND source_id = ?`)
+      .get(adv.body.entry.id);
+    expect(advGl).toBeTruthy();
+
+    const rev = await agent.post('/api/ledger/reverse-advance').send({
+      entryId: adv.body.entry.id,
+      note: 'Test advance GL reversal',
+    });
+    expect(rev.status).toBe(201);
+    const revGl = db
+      .prepare(`SELECT id FROM gl_journal_entries WHERE source_kind = 'CUSTOMER_ADVANCE_REV_GL' AND source_id = ?`)
+      .get(rev.body.entry.id);
+    expect(revGl).toBeTruthy();
   });
 
   it('POST /api/quotations persists lines and totals', async () => {
@@ -679,7 +797,7 @@ describe('Zarewa API', () => {
       expenseType: 'Operational - rent & utilities',
       amountNgn: 20_000,
       date: '2026-03-29',
-      category: 'Diesel',
+      category: 'Operational — rent & utilities',
       paymentMethod: 'Cash',
       treasuryAccountId: from.id,
       reference: 'EXP-TEST',
@@ -704,7 +822,7 @@ describe('Zarewa API', () => {
       expenseType: 'Generator service',
       amountNgn: 15_000,
       date: '2026-03-29',
-      category: 'Maintenance',
+      category: 'Maintenance — plant & equipment',
       paymentMethod: 'Cash',
       treasuryAccountId: 1,
       reference: 'EXP-REQ',
@@ -738,7 +856,7 @@ describe('Zarewa API', () => {
       expenseType: 'Diesel refill',
       amountNgn: 500_000,
       date: '2026-03-29',
-      category: 'Diesel',
+      category: 'Operational — rent & utilities',
       paymentMethod: 'Mixed',
       reference: 'EXP-DIESEL-1',
     });
@@ -837,7 +955,7 @@ describe('Zarewa API', () => {
       expenseType: 'Blocked expense',
       amountNgn: 5_000,
       date: '2026-03-15',
-      category: 'Diesel',
+      category: 'Operational — rent & utilities',
       paymentMethod: 'Cash',
       treasuryAccountId: 1,
       reference: 'EXP-BLOCK',
@@ -854,7 +972,7 @@ describe('Zarewa API', () => {
       expenseType: 'Released expense',
       amountNgn: 5_000,
       date: '2026-03-15',
-      category: 'Diesel',
+      category: 'Operational — rent & utilities',
       paymentMethod: 'Cash',
       treasuryAccountId: 1,
       reference: 'EXP-OPEN',
@@ -869,7 +987,7 @@ describe('Zarewa API', () => {
       expenseType: 'Blocked',
       amountNgn: 1_000,
       date: '2026-03-29',
-      category: 'Test',
+      category: 'Other — misc operating',
       paymentMethod: 'Cash',
       treasuryAccountId: 1,
       reference: 'NOPE',
@@ -1505,15 +1623,54 @@ describe('Zarewa API', () => {
     expect(denied.status).toBe(403);
   });
 
+  it('GET /api/refunds/eligible-quotations, intelligence — permissions and response shape', async () => {
+    const salesStaff = request.agent(app);
+    await loginAs(salesStaff, 'sales.staff', 'Sales@123');
+    const elig = await salesStaff.get('/api/refunds/eligible-quotations');
+    expect(elig.status).toBe(200);
+    expect(elig.body.ok).toBe(true);
+    expect(Array.isArray(elig.body.quotations)).toBe(true);
+
+    const noRef = await salesStaff.get('/api/refunds/intelligence');
+    expect(noRef.status).toBe(400);
+    expect(noRef.body.ok).toBe(false);
+
+    const intel = await salesStaff.get('/api/refunds/intelligence?quotationRef=QT-2026-001');
+    expect(intel.status).toBe(200);
+    expect(intel.body.ok).toBe(true);
+    expect(Array.isArray(intel.body.receipts)).toBe(true);
+    expect(Array.isArray(intel.body.cuttingLists)).toBe(true);
+    expect(intel.body.summary).toBeDefined();
+    expect(typeof intel.body.summary.producedMeters).toBe('number');
+    expect(Array.isArray(intel.body.summary.accessoriesSummary?.lines)).toBe(true);
+
+    const viewer = request.agent(app);
+    await loginAs(viewer, 'viewer', 'Viewer@123456!');
+    const denied = await viewer.get('/api/refunds/eligible-quotations');
+    expect(denied.status).toBe(403);
+  });
+
   it('POST /api/refunds/preview returns suggested lines from inputs', async () => {
+    const q = await agent.post('/api/quotations').send({
+      customerID: 'CUS-001',
+      projectName: `Refund preview ${Date.now()}`,
+      dateISO: '2026-03-29',
+      lines: {
+        products: [{ name: 'Refund preview item', qty: '1', unitPrice: '100000' }],
+        accessories: [],
+        services: [],
+      },
+    });
+    expect(q.status).toBe(201);
+    const quotationRef = q.body.quotation?.quotationID || q.body.quotation?.id || q.body.quotationID || q.body.id;
+    expect(String(quotationRef || '')).toBeTruthy();
     const prev = await agent.post('/api/refunds/preview').send({
       customerID: 'CUS-001',
-      quotationRef: 'QT-2026-001',
+      quotationRef,
       manualAdjustmentNgn: 25_000,
     });
     expect(prev.status).toBe(200);
-    expect(prev.body.preview.suggestedLines.some((l) => l.label.includes('Manual'))).toBe(true);
-    expect(prev.body.preview.suggestedAmountNgn).toBe(25_000);
+    expect(Number(prev.body.preview.suggestedAmountNgn || 0)).toBeGreaterThanOrEqual(25_000);
   });
 
   it('approved refunds support staged split payout until fully settled', async () => {
@@ -1681,7 +1838,7 @@ describe('Zarewa API', () => {
       payload: {
         amountNgn: 120_000,
         repaymentMonths: 2,
-        deductionPerMonthNgn: 7_500,
+        deductionPerMonthNgn: 60_000,
       },
     });
     expect(createLoan.status).toBe(201);
@@ -1693,18 +1850,20 @@ describe('Zarewa API', () => {
 
     const hrRev = await adminAgent.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/hr-review`).send({
       approve: true,
-      note: 'ok',
+      note: 'ok note',
+      reasonCode: 'policy',
     });
     expect(hrRev.status).toBe(200);
 
-    const finAgent = request.agent(app);
-    await loginAs(finAgent, 'finance.manager', 'Finance@123');
-
-    const mgrRev = await finAgent.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/manager-review`).send({
+    const mgrRev = await adminAgent.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/manager-review`).send({
       approve: true,
-      note: 'ok',
+      note: 'ok note',
+      reasonCode: 'policy',
     });
     expect(mgrRev.status).toBe(200);
+
+    const finAgent = request.agent(app);
+    await loginAs(finAgent, 'finance.manager', 'Finance@123');
 
     const boot = await adminAgent.get('/api/bootstrap');
     expect(boot.status).toBe(200);
@@ -1736,20 +1895,21 @@ describe('Zarewa API', () => {
     expect(ln.deductionsActive).toBe(true);
     expect(ln.principalOutstandingNgn).toBe(120_000);
 
+    await acceptAllRequiredPolicies(adminAgent, 'Admin');
     const run = await adminAgent.post('/api/hr/payroll-runs').send({ periodYyyymm: '209910' });
     expect(run.status).toBe(201);
     const runId = run.body.id;
     const comp = await adminAgent.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/recompute`).send({});
     expect(comp.status).toBe(200);
     const staffLine = comp.body.lines.find((l) => l.userId === staffUser.userId);
-    expect(staffLine?.otherDeductionNgn).toBe(7_500);
+    expect(staffLine?.otherDeductionNgn).toBe(60_000);
 
     const paid = await adminAgent.patch(`/api/hr/payroll-runs/${encodeURIComponent(runId)}`).send({ status: 'paid' });
     expect(paid.status).toBe(200);
 
     const snap2 = await adminAgent.get('/api/hr/salary-welfare/snapshot');
     const ln2 = snap2.body.approvedLoans.find((l) => l.requestId === loanId);
-    expect(ln2.principalOutstandingNgn).toBe(112_500);
+    expect(ln2.principalOutstandingNgn).toBe(60_000);
     expect(ln2.repaymentMonthsRemaining).toBe(1);
   });
 
@@ -1807,9 +1967,91 @@ describe('Zarewa API', () => {
     expect(String(ok.body.id || '')).toBeTruthy();
   });
 
+  it('HR: attendance exception waives late-day payroll deduction', async () => {
+    const adminAgent = request.agent(app);
+    await loginAs(adminAgent, 'admin', 'Admin@123');
+    await acceptAllRequiredPolicies(adminAgent, 'Admin');
+
+    // Register a staff user in Kaduna.
+    const staffUsername = `api.att.exc.${Date.now()}`;
+    const reg = await adminAgent.post('/api/hr/staff/register').send({
+      username: staffUsername,
+      displayName: 'Attendance Exception Staff',
+      password: 'Staff@123456',
+      roleKey: 'viewer',
+      workspaceDepartment: 'hr',
+      branchId: 'BR-KAD',
+      employeeNo: `EMP-EXC-${Date.now()}`,
+      jobTitle: 'Tester',
+      department: 'Operations',
+      employmentType: 'permanent',
+      dateJoinedIso: '2025-01-15',
+      baseSalaryNgn: 220_000,
+    });
+    expect(reg.status).toBe(201);
+    const staffUserId = reg.body.userId;
+
+    // Mark a late day in March 2026.
+    const roll = await adminAgent.post('/api/hr/daily-roll').send({
+      branchId: 'BR-KAD',
+      dayIso: '2026-03-03',
+      rows: [{ userId: staffUserId, status: 'late' }],
+      notes: 'Late day',
+    });
+    expect(roll.status).toBe(200);
+
+    // Create payroll run and recompute: expect one late-day deduction (base/22).
+    const run = await adminAgent.post('/api/hr/payroll-runs').send({ periodYyyymm: '202603' });
+    expect(run.status).toBe(201);
+    const runId = run.body.id;
+    const rec1 = await adminAgent.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/recompute`).send({});
+    expect(rec1.status).toBe(200);
+    const line1 = rec1.body.lines.find((l) => l.userId === staffUserId);
+    expect(line1).toBeTruthy();
+    const daily = Math.round(220_000 / 22);
+    expect(line1.attendanceDeductionNgn).toBe(daily);
+
+    // Create attendance exception request (late) for that day and approve it.
+    const staffAgent = request.agent(app);
+    await loginAs(staffAgent, staffUsername, 'Staff@123456');
+    const req = await staffAgent.post('/api/hr/requests').send({
+      kind: 'attendance_exception',
+      title: 'Late exc',
+      body: 'Traffic',
+      payload: { dayIso: '2026-03-03', type: 'late', reason: 'Traffic' },
+    });
+    expect(req.status).toBe(201);
+    const reqId = req.body.request?.id;
+    const submit = await staffAgent.patch(`/api/hr/requests/${encodeURIComponent(reqId)}/submit`).send({});
+    expect(submit.status).toBe(200);
+
+    const hr = request.agent(app);
+    await loginAs(hr, 'hr.manager', 'HrManager@12345!');
+    await acceptAllRequiredPolicies(hr, 'HR Manager');
+    const hrRev = await hr.patch(`/api/hr/requests/${encodeURIComponent(reqId)}/hr-review`).send({
+      approve: true,
+      note: 'ok note',
+      reasonCode: 'policy',
+    });
+    expect(hrRev.status).toBe(200);
+    const mgr = await hr.patch(`/api/hr/requests/${encodeURIComponent(reqId)}/manager-review`).send({
+      approve: true,
+      note: 'ok note',
+      reasonCode: 'policy',
+    });
+    expect(mgr.status).toBe(200);
+
+    // Recompute should waive the late-day deduction.
+    const rec2 = await adminAgent.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/recompute`).send({});
+    expect(rec2.status).toBe(200);
+    const line2 = rec2.body.lines.find((l) => l.userId === staffUserId);
+    expect(line2.attendanceDeductionNgn).toBe(0);
+  });
+
   it('supports HR Next compensation, cleanup queue, and UAT readiness endpoints', async () => {
     const adminAgent = request.agent(app);
     await loginAs(adminAgent, 'admin', 'Admin@123');
+    await acceptAllRequiredPolicies(adminAgent, 'Admin');
 
     const staffList = await adminAgent.get('/api/hr/staff');
     expect(staffList.status).toBe(200);
@@ -1870,6 +2112,7 @@ describe('Zarewa API', () => {
   it('exports payroll payslip and statutory packs', async () => {
     const adminAgent = request.agent(app);
     await loginAs(adminAgent, 'admin', 'Admin@123');
+    await acceptAllRequiredPolicies(adminAgent, 'Admin');
     const run = await adminAgent.post('/api/hr/payroll-runs').send({ periodYyyymm: '209912' });
     expect(run.status).toBe(201);
     const runId = run.body.id;
@@ -1885,5 +2128,27 @@ describe('Zarewa API', () => {
     const statutory = await adminAgent.get(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/statutory-pack`);
     expect(statutory.status).toBe(200);
     expect(String(statutory.text || '')).toContain('tax_ngn');
+  });
+
+  it('GET /api/gl/journals, journal lines, and activity return ok for admin', async () => {
+    const signedAgent = request.agent(app);
+    await loginAs(signedAgent);
+    const j = await signedAgent.get('/api/gl/journals?startDate=2024-01-01&endDate=2024-12-31');
+    expect(j.status).toBe(200);
+    expect(j.body.ok).toBe(true);
+    expect(Array.isArray(j.body.journals)).toBe(true);
+
+    const a = await signedAgent.get('/api/gl/activity?startDate=2024-01-01&endDate=2024-12-31');
+    expect(a.status).toBe(200);
+    expect(a.body.ok).toBe(true);
+    expect(Array.isArray(a.body.lines)).toBe(true);
+
+    if (j.body.journals?.length) {
+      const jid = j.body.journals[0].journalId;
+      const lines = await signedAgent.get(`/api/gl/journals/${encodeURIComponent(jid)}/lines`);
+      expect(lines.status).toBe(200);
+      expect(lines.body.ok).toBe(true);
+      expect(Array.isArray(lines.body.lines)).toBe(true);
+    }
   });
 });

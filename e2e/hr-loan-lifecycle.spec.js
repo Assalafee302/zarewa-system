@@ -20,6 +20,23 @@ async function apiSignOut(page) {
   await page.context().clearCookies();
 }
 
+async function apiAcceptRequiredPolicies(page, signatureName) {
+  const reqs = await page.request.get('/api/hr/policy-requirements');
+  if (reqs.status() !== 200) return;
+  const json = await reqs.json().catch(() => null);
+  const missing = Array.isArray(json?.missing) ? json.missing : [];
+  for (const p of missing) {
+    await page.request.post('/api/hr/policy-acknowledgements', {
+      data: {
+        policyKey: p.key,
+        policyVersion: p.version,
+        signatureName,
+        context: { channel: 'playwright' },
+      },
+    });
+  }
+}
+
 async function pickTreasuryAccountId(page) {
   const boot = await page.request.get('/api/bootstrap');
   expect(boot.status()).toBe(200);
@@ -38,6 +55,7 @@ test.describe('HR loan lifecycle', () => {
     const periodYyyymm = '202603';
 
     await apiSignIn(page, 'admin', 'Admin@123');
+    await apiAcceptRequiredPolicies(page, 'Admin');
     const register = await page.request.post('/api/hr/staff/register', {
       data: {
         username: staffUsername,
@@ -76,13 +94,17 @@ test.describe('HR loan lifecycle', () => {
     // HR manager approves + disburses.
     await apiSignIn(page, 'hr.manager', 'HrManager@12345!');
     expect(
-      (await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/hr-review`, { data: { approve: true } }))
+      (
+        await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/hr-review`, {
+          data: { approve: true, note: 'HR ok', reasonCode: 'policy' },
+        })
+      )
         .status()
     ).toBe(200);
     expect(
       (
         await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/manager-review`, {
-          data: { approve: true },
+          data: { approve: true, note: 'Approve', reasonCode: 'policy' },
         })
       ).status()
     ).toBe(200);
@@ -112,6 +134,7 @@ test.describe('HR loan lifecycle', () => {
 
     // Maintain: set principalOutstanding < deductionPerMonth, recompute should cap.
     await apiSignIn(page, 'hr.manager', 'HrManager@12345!');
+    await apiAcceptRequiredPolicies(page, 'HR Manager');
     const maint = await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/loan-maintenance`, {
       data: { principalOutstandingNgn: 5_000, deductionPerMonthNgn: 10_000, note: 'Cap principal for test' },
     });
