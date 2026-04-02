@@ -1,24 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import {
-  Phone,
-  Mail,
-  MapPin,
-  Building2,
-  X,
-  UserCircle,
-  BadgeCheck,
-  LayoutDashboard,
-  TrendingUp,
-  Ruler,
-  Moon,
-  Trash2,
-} from 'lucide-react';
+import { X, UserCircle, TrendingUp, Ruler, Moon, Trash2 } from 'lucide-react';
 import { ModalFrame } from '../layout';
 import { useCustomers } from '../../context/CustomersContext';
 import { useToast } from '../../context/ToastContext';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { formatNgn } from '../../Data/mockData';
+import { normalizeCustomerEmailKey, normalizeCustomerPhoneKey } from '../../../shared/customerPhoneKey.js';
 
 const TODAY_ISO = '2026-03-28';
 const INSIGHT_DAYS = 90;
@@ -87,7 +75,7 @@ export default function SalesCustomersTab({
   const { customers, addCustomer, deleteCustomer } = useCustomers();
   const { show: showToast } = useToast();
   const ws = useWorkspace();
-  const canDeleteCustomer = Boolean(ws?.hasPermission?.('customers.manage') && ws?.canMutate);
+  const canDeleteCustomer = Boolean(ws?.hasPermission?.('sales.manage') && ws?.canMutate);
   const [form, setForm] = useState(emptyForm);
   const [deletingId, setDeletingId] = useState(null);
 
@@ -183,6 +171,26 @@ export default function SalesCustomersTab({
     if (!form.name.trim() || !form.phoneNumber.trim()) {
       showToast('Please enter customer name and phone number.', { variant: 'error' });
       return;
+    }
+    const pKey = normalizeCustomerPhoneKey(form.phoneNumber.trim());
+    const eKey = normalizeCustomerEmailKey(form.email);
+    if (pKey) {
+      const dup = customers.find((c) => normalizeCustomerPhoneKey(c.phoneNumber) === pKey);
+      if (dup) {
+        showToast(`This phone is already registered as ${dup.customerID} (${dup.name}).`, {
+          variant: 'error',
+        });
+        return;
+      }
+    }
+    if (eKey) {
+      const dup = customers.find((c) => normalizeCustomerEmailKey(c.email || '') === eKey);
+      if (dup) {
+        showToast(`This email is already registered as ${dup.customerID} (${dup.name}).`, {
+          variant: 'error',
+        });
+        return;
+      }
     }
     const id = form.customerID?.trim() || nextCustomerId(customers);
     const iso = new Date().toISOString().slice(0, 10);
@@ -280,29 +288,35 @@ export default function SalesCustomersTab({
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {filtered.map((c) => (
-            <div
-              key={c.customerID}
-              className="p-6 rounded-zarewa border border-gray-100 bg-gray-50/50 hover:bg-white hover:border-teal-100 hover:shadow-lg transition-all"
-            >
-              <div className="flex justify-between items-start gap-4 mb-4">
-                <div className="min-w-0">
-                  <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">
+        <div
+          className="rounded-zarewa border border-gray-100 bg-white overflow-hidden"
+          role="list"
+          aria-label="Customers"
+        >
+          {filtered.map((c) => {
+            const detailHint = [c.phoneNumber, c.email].filter(Boolean).join(' · ');
+            return (
+              <div
+                key={c.customerID}
+                role="listitem"
+                className="group flex min-h-11 flex-nowrap items-center gap-2 border-b border-gray-100 px-3 py-2 last:border-b-0 sm:gap-3 sm:px-4 sm:py-2.5"
+              >
+                <Link
+                  to={`/customers/${encodeURIComponent(c.customerID)}`}
+                  title={detailHint || undefined}
+                  className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left no-underline outline-none ring-inset transition hover:bg-teal-50/60 focus-visible:ring-2 focus-visible:ring-[#134e4a]/25 sm:gap-3 sm:-mx-2 sm:rounded-lg sm:px-2 sm:py-1"
+                >
+                  <span className="shrink-0 text-[10px] font-black uppercase tabular-nums text-gray-500">
                     {c.customerID}
-                  </p>
-                  <h3 className="text-lg font-black text-[#134e4a]">{c.name}</h3>
-                  <Link
-                    to={`/customers/${encodeURIComponent(c.customerID)}`}
-                    className="mt-2 inline-flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider text-[#134e4a] hover:text-teal-600"
-                  >
-                    <LayoutDashboard size={14} />
-                    Customer profile & transactions
-                  </Link>
-                </div>
-                <div className="flex flex-col items-end gap-1">
+                  </span>
+                  <span className="min-w-0 truncate text-sm font-black text-[#134e4a] group-hover:text-teal-700 group-hover:underline group-hover:underline-offset-2">
+                    {c.name}
+                  </span>
+                  <span className="hidden min-w-0 max-w-[6rem] shrink truncate text-xs text-slate-500 md:inline lg:max-w-[10rem]">
+                    {c.phoneNumber || '—'}
+                  </span>
                   <span
-                    className={`text-[9px] font-bold uppercase px-2 py-1 rounded-full ${
+                    className={`hidden shrink-0 text-[9px] font-bold uppercase sm:inline-flex px-2 py-0.5 rounded-full ${
                       c.status === 'Active'
                         ? 'bg-emerald-100 text-emerald-700'
                         : 'bg-gray-200 text-gray-600'
@@ -310,60 +324,30 @@ export default function SalesCustomersTab({
                   >
                     {c.status}
                   </span>
-                  <span className="text-[9px] font-bold uppercase px-2 py-1 rounded-full bg-[#134e4a]/10 text-[#134e4a]">
+                  <span className="hidden shrink-0 text-[9px] font-bold uppercase px-2 py-0.5 rounded-full bg-[#134e4a]/10 text-[#134e4a] lg:inline-flex">
                     {c.tier}
                   </span>
-                  {canDeleteCustomer ? (
-                    <button
-                      type="button"
-                      disabled={deletingId === c.customerID}
-                      onClick={() => handleDeleteCustomer(c)}
-                      className="mt-1 inline-flex items-center gap-1 rounded-lg border border-red-200 bg-white px-2 py-1 text-[9px] font-black uppercase tracking-wide text-red-700 hover:bg-red-50 disabled:opacity-50"
-                    >
-                      <Trash2 size={12} />
+                </Link>
+                {canDeleteCustomer ? (
+                  <button
+                    type="button"
+                    disabled={deletingId === c.customerID}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteCustomer(c);
+                    }}
+                    className="inline-flex shrink-0 items-center justify-center rounded-lg border border-red-200 bg-white p-1.5 text-red-700 hover:bg-red-50 disabled:opacity-50 sm:gap-1 sm:px-2 sm:py-1 sm:text-[9px] sm:font-black sm:uppercase sm:tracking-wide"
+                    aria-label={`Delete ${c.name}`}
+                  >
+                    <Trash2 size={14} className="sm:hidden" />
+                    <span className="hidden sm:inline">
                       {deletingId === c.customerID ? '…' : 'Delete'}
-                    </button>
-                  ) : null}
-                </div>
+                    </span>
+                  </button>
+                ) : null}
               </div>
-
-              <div className="space-y-2 text-xs text-gray-600">
-                <p className="flex items-center gap-2 font-medium">
-                  <Phone size={14} className="text-gray-400 shrink-0" />
-                  {c.phoneNumber}
-                </p>
-                <p className="flex items-center gap-2 font-medium">
-                  <Mail size={14} className="text-gray-400 shrink-0" />
-                  {c.email}
-                </p>
-                <p className="flex items-start gap-2 font-medium">
-                  <MapPin size={14} className="text-gray-400 shrink-0 mt-0.5" />
-                  <span>
-                    <span className="text-[10px] font-bold text-gray-400 uppercase block">Ship</span>
-                    {c.addressShipping}
-                  </span>
-                </p>
-                <p className="flex items-start gap-2 font-medium">
-                  <Building2 size={14} className="text-gray-400 shrink-0 mt-0.5" />
-                  <span>
-                    <span className="text-[10px] font-bold text-gray-400 uppercase block">Bill</span>
-                    {c.addressBilling}
-                  </span>
-                </p>
-                <p className="flex items-center gap-2 pt-2 border-t border-gray-100 font-bold text-[#134e4a]">
-                  <BadgeCheck size={14} />
-                  {c.paymentTerms}
-                </p>
-                <p className="text-[10px] text-gray-500 pt-1 border-t border-gray-100">
-                  <span className="font-bold text-gray-400 uppercase">Account officer</span>{' '}
-                  {c.createdBy || '—'}
-                  {c.createdAtISO ? (
-                    <span className="block mt-0.5 tabular-nums">On file since {c.createdAtISO}</span>
-                  ) : null}
-                </p>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

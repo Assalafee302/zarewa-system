@@ -1,4 +1,4 @@
-import { userHasPermission } from './auth.js';
+import { canUseAllBranchesRollup } from './auth.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
 
 /**
@@ -6,7 +6,7 @@ import { DEFAULT_BRANCH_ID } from './branches.js';
  * @returns {'ALL' | string}
  */
 export function resolveBootstrapBranchScope(req) {
-  if (req.workspaceViewAll && userHasPermission(req.user, 'hq.view_all_branches')) {
+  if (req.workspaceViewAll && canUseAllBranchesRollup(req.user)) {
     return 'ALL';
   }
   return String(req.workspaceBranchId || '').trim() || DEFAULT_BRANCH_ID;

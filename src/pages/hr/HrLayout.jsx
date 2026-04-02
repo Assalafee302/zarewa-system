@@ -4,12 +4,13 @@ import { HrWorkspaceProvider, useHrWorkspace } from '../../context/HrWorkspaceCo
 import { PageShell } from '../../components/layout';
 
 const links = [
-  { to: '/hr', label: 'Overview', end: true },
+  { to: '/hr/overview', label: 'Overview', end: true },
   { to: '/hr/staff', label: 'Staff' },
-  { to: '/hr/salary-welfare', label: 'Salary & welfare' },
+  { to: '/hr/salary-welfare', label: 'Salary & benefits' },
   { to: '/hr/payroll', label: 'Payroll' },
   { to: '/hr/time', label: 'Time' },
-  { to: '/hr/talent', label: 'Talent' },
+  { to: '/hr/talent', label: 'Requests' },
+  { to: '/hr/compliance', label: 'Compliance' },
 ];
 
 function HrLayoutInner() {
@@ -27,22 +28,28 @@ function HrLayoutInner() {
           HR tables are not enabled on this server — screens may be empty until the module is initialised.
         </div>
       ) : null}
-      <div className="mb-6 flex flex-wrap gap-2 border-b border-slate-200/80 pb-4">
+      <nav
+        className="mb-4 flex flex-wrap gap-1 border-b border-slate-200 pb-3 -mx-1 px-1 overflow-x-auto"
+        aria-label="HR sections"
+      >
         {links.map((l) => {
-          const active = l.end ? path === '/hr' : path === l.to || path.startsWith(`${l.to}/`);
+          const active =
+            path === l.to ||
+            path.startsWith(`${l.to}/`) ||
+            (l.to === '/hr/overview' && path === '/hr');
           return (
             <Link
               key={l.to}
               to={l.to}
-              className={`rounded-full px-3 py-1.5 text-sm font-medium transition-colors ${
-                active ? 'bg-violet-600 text-white shadow-sm' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              className={`shrink-0 rounded-lg px-3 py-2 text-xs font-bold transition-colors whitespace-nowrap ${
+                active ? 'bg-[#134e4a] text-white' : 'text-slate-700 hover:bg-slate-100'
               }`}
             >
               {l.label}
             </Link>
           );
         })}
-      </div>
+      </nav>
       <Outlet />
     </>
   );

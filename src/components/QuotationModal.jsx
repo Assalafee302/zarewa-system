@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { ModalFrame } from './layout/ModalFrame';
 import { useCustomers } from '../context/CustomersContext';
-import { bankAccountsForCustomerPayment, loadTreasuryAccounts } from '../lib/treasuryAccountsStore';
+import { bankAccountsForCustomerPayment, treasuryAccountsFromSnapshot } from '../lib/treasuryAccountsStore';
 import { ZAREWA_COMPANY_ACCOUNT_NAME } from '../Data/companyQuotation';
 import { formatNgn } from '../Data/mockData';
 import { useToast } from '../context/ToastContext';
@@ -329,6 +329,11 @@ const QuotationModal = ({
   const [saving, setSaving] = useState(false);
   const liveMasterData = ws?.snapshot?.masterData ?? null;
 
+  const treasuryPayAccountsLive = useMemo(
+    () => bankAccountsForCustomerPayment(treasuryAccountsFromSnapshot(ws?.snapshot)),
+    [ws?.snapshot]
+  );
+
   /** Master data rows first; defaults only fill names not already in setup (offline / partial setup). */
   const profileOptions = useMemo(() => {
     const fromMaster = (liveMasterData?.profiles || [])
@@ -463,7 +468,7 @@ const QuotationModal = ({
     setCustomerQuery(match ? `${match.name} · ${match.phoneNumber}` : '');
     setCustomerListOpen(false);
     setQuotationEditType('');
-    const list = bankAccountsForCustomerPayment(loadTreasuryAccounts());
+    const list = treasuryPayAccountsLive;
     setTreasuryPayAccounts(list);
     setPaymentAccountId((prev) => {
       const ok = list.some((a) => String(a.id) === String(prev));
@@ -498,6 +503,7 @@ const QuotationModal = ({
     editData?.materialDesign,
     editData?.projectName,
     editData?.quotationLines,
+    treasuryPayAccountsLive,
   ]);
 
   useEffect(() => {

@@ -78,6 +78,20 @@ export function buildWorkspaceNotifications({
     });
   }
 
+  const checks = Array.isArray(snapshot?.productionConversionChecks) ? snapshot.productionConversionChecks : [];
+  const criticalCheck = checks.find(
+    (row) => String(row.alertState || '').toLowerCase() === 'critical' && String(row.coilNo || '').trim()
+  );
+  if (canAccessModule('operations') && criticalCheck) {
+    items.push({
+      id: `coil-critical-${criticalCheck.id || criticalCheck.coilNo}`,
+      title: 'Critical coil conversion',
+      detail: `${criticalCheck.coilNo} flagged as critical in production checks.`,
+      severity: 'warning',
+      path: `/operations/coils/${encodeURIComponent(criticalCheck.coilNo)}`,
+    });
+  }
+
   const pos = Array.isArray(snapshot?.purchaseOrders) ? snapshot.purchaseOrders : [];
   const inTransit = pos.filter((p) => p.status === 'In Transit' || p.status === 'On loading');
   if (canAccessModule('procurement') && inTransit.length > 0) {

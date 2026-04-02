@@ -11,6 +11,8 @@ const DEFAULT_CAPS = {
   canManageStaff: false,
   canUploadAttendance: false,
   canLoanMaint: false,
+  canViewSensitiveHr: false,
+  canCompliance: false,
 };
 
 /** Mirrors server `hrCapsForUser` so bootstrap permissions still apply if /api/hr/caps fails. */
@@ -38,6 +40,9 @@ function hrCapsFromSessionPermissions(hasPermission) {
     canHrReview: star || has('hr.requests.hr_review') || has('hr.manage'),
     canFinalApprove: star || has('hr.requests.final_approve') || has('finance.approve'),
     canIssueLetters: star || has('hr.letters.generate') || has('hr.manage'),
+    canViewSensitiveHr:
+      star || has('hr.staff.manage') || has('hr.manage') || has('hr.payroll.manage'),
+    canCompliance: star || has('hr.manage') || has('hr.staff.manage') || has('audit.view'),
   };
 }
 
@@ -53,6 +58,8 @@ function mergeHrCaps(apiPayload, fromSession) {
     canHrReview: apiPayload.canHrReview || fromSession.canHrReview,
     canFinalApprove: apiPayload.canFinalApprove || fromSession.canFinalApprove,
     canIssueLetters: apiPayload.canIssueLetters || fromSession.canIssueLetters,
+    canViewSensitiveHr: apiPayload.canViewSensitiveHr || fromSession.canViewSensitiveHr,
+    canCompliance: apiPayload.canCompliance || fromSession.canCompliance,
   };
 }
 

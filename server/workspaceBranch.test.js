@@ -1,12 +1,25 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import request from 'supertest';
 import { createDatabase } from './db.js';
 import { createApp } from './app.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
 
+const openDbs = [];
+
+function makeApp() {
+  const db = createDatabase(':memory:');
+  openDbs.push(db);
+  return createApp(db);
+}
+
 describe('Session workspace / branch scope', () => {
+  afterAll(() => {
+    for (const db of openDbs) db.close();
+    openDbs.length = 0;
+  });
+
   it('bootstrap includes workspaceBranches and branchScope; PATCH branch updates scope', async () => {
-    const app = createApp(createDatabase(':memory:'));
+    const app = makeApp();
     const agent = request.agent(app);
     const login = await agent.post('/api/session/login').send({ username: 'admin', password: 'Admin@123' });
     expect(login.status).toBe(200);
@@ -31,7 +44,7 @@ describe('Session workspace / branch scope', () => {
   });
 
   it('admin can enable HQ all-branches rollup when permitted', async () => {
-    const app = createApp(createDatabase(':memory:'));
+    const app = makeApp();
     const agent = request.agent(app);
     await agent.post('/api/session/login').send({ username: 'admin', password: 'Admin@123' });
 
@@ -49,7 +62,7 @@ describe('Session workspace / branch scope', () => {
   });
 
   it('procurement role cannot enable HQ rollup', async () => {
-    const app = createApp(createDatabase(':memory:'));
+    const app = makeApp();
     const agent = request.agent(app);
     await agent.post('/api/session/login').send({ username: 'procurement', password: 'Procure@123' });
 

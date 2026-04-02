@@ -1015,23 +1015,6 @@ export function dashboardTotalLiquidityNgn() {
   return DASHBOARD_LIQUIDITY_BREAKDOWN.reduce((s, a) => s + a.amountNgn, 0);
 }
 
-/** Default spot ₦/m — editable on dashboard; 0.30–0.40 Aluzinc are guide rows until you fix prices. */
-export const DEFAULT_DASHBOARD_SPOT_PRICES = [
-  { id: 'az018', gaugeLabel: '0.18 mm', productType: 'Aluzinc', note: '', priceNgn: 3800 },
-  { id: 'az020', gaugeLabel: '0.20 mm', productType: 'Aluzinc', note: '', priceNgn: 4000 },
-  { id: 'az022', gaugeLabel: '0.22 mm', productType: 'Aluzinc', note: '', priceNgn: 4500 },
-  { id: 'az024', gaugeLabel: '0.24 mm', productType: 'Aluzinc', note: '', priceNgn: 4900 },
-  { id: 'az028', gaugeLabel: '0.28 mm', productType: 'Aluzinc', note: '', priceNgn: 6000 },
-  { id: 'az030', gaugeLabel: '0.30 mm', productType: 'Aluzinc', note: 'Guide — set your floor', priceNgn: 6500 },
-  { id: 'az035', gaugeLabel: '0.35 mm', productType: 'Aluzinc', note: 'Guide — set your floor', priceNgn: 7200 },
-  { id: 'az040', gaugeLabel: '0.40 mm', productType: 'Aluzinc', note: 'Guide — set your floor', priceNgn: 8000 },
-  { id: 'al045', gaugeLabel: '0.45 mm', productType: 'Aluminium', note: 'Standard', priceNgn: 4500 },
-  { id: 'al055', gaugeLabel: '0.55 mm', productType: 'Aluminium', note: 'Standard', priceNgn: 7000 },
-  { id: 'al045f', gaugeLabel: '0.45 mm', productType: 'Aluminium', note: 'Full hard', priceNgn: 10000 },
-  { id: 'al055f', gaugeLabel: '0.55 mm', productType: 'Aluminium', note: 'Full hard', priceNgn: 12000 },
-  { id: 'al070', gaugeLabel: '0.70 mm', productType: 'Aluminium', note: '', priceNgn: 14500 },
-];
-
 /** Rolling production pulse (replace with MES / dispatch API). */
 export const DASHBOARD_PRODUCTION_PULSE = {
   metersSold7d: 4250,

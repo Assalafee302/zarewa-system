@@ -1,7 +1,9 @@
 import crypto from 'node:crypto';
 import { DEFAULT_BRANCH_ID, listBranches } from './branches.js';
+import { normalizeWorkspaceDepartment } from './departmentRoleTemplates.js';
 
 export const SESSION_COOKIE = 'zarewa_session';
+export const CSRF_COOKIE = 'zarewa_csrf';
 const SESSION_TTL_HOURS = 12;
 const RESET_TOKEN_TTL_MINUTES = 60;
 /** Max stored profile image (data URL or https URL). */
@@ -45,6 +47,50 @@ export const ROLE_DEFINITIONS = {
     label: 'Administrator',
     permissions: ['*'],
   },
+  hr_manager: {
+    label: 'HR manager',
+    permissions: [
+      'dashboard.view',
+      'reports.view',
+      'hr.directory.view',
+      'hr.staff.manage',
+      'hr.requests.hr_review',
+      'hr.requests.final_approve',
+      'hr.payroll.manage',
+      'hr.attendance.upload',
+      'hr.loan_maintain',
+      'hr.letters.generate',
+      'hr.compliance',
+    ],
+  },
+  hr_officer: {
+    label: 'HR officer',
+    permissions: [
+      'dashboard.view',
+      'reports.view',
+      'hr.directory.view',
+      'hr.requests.hr_review',
+      'hr.attendance.upload',
+      'hr.letters.generate',
+    ],
+  },
+  md: {
+    label: 'Managing Director',
+    // MD can view everything and use all-branches rollups, but should not have settings/admin write access by default.
+    permissions: [
+      'dashboard.view',
+      'reports.view',
+      'sales.view',
+      'procurement.view',
+      'operations.view',
+      'finance.view',
+      'audit.view',
+    ],
+  },
+  ceo: {
+    label: 'Chief Executive Officer',
+    permissions: ['*'],
+  },
   finance_manager: {
     label: 'Finance manager',
     permissions: [
@@ -62,7 +108,17 @@ export const ROLE_DEFINITIONS = {
       'audit.view',
       'period.manage',
       'settings.view',
-      'hq.view_all_branches',
+    ],
+  },
+  cashier: {
+    label: 'Cashier',
+    permissions: [
+      'dashboard.view',
+      'sales.view',
+      'customers.manage',
+      'quotations.manage',
+      'receipts.post',
+      'refunds.request',
     ],
   },
   sales_manager: {
@@ -88,6 +144,7 @@ export const ROLE_DEFINITIONS = {
       'quotations.manage',
       'receipts.post',
       'refunds.request',
+      'hr.directory.view',
     ],
   },
   procurement_officer: {
@@ -127,13 +184,39 @@ const DEFAULT_USERS = [
     username: 'admin',
     displayName: 'Zarewa Admin',
     roleKey: 'admin',
+    department: 'it',
     password: 'Admin@123',
+  },
+  {
+    id: 'USR-HRM',
+    username: 'hr.manager',
+    displayName: 'HR Manager',
+    roleKey: 'hr_manager',
+    department: 'hr',
+    password: 'HrManager@12345!',
+  },
+  {
+    id: 'USR-HRO',
+    username: 'hr.officer',
+    displayName: 'HR Officer',
+    roleKey: 'hr_officer',
+    department: 'hr',
+    password: 'HrOfficer@12345!',
+  },
+  {
+    id: 'USR-MD',
+    username: 'md',
+    displayName: 'Managing Director',
+    roleKey: 'md',
+    department: 'leadership',
+    password: 'Md@1234567890!',
   },
   {
     id: 'USR-FIN',
     username: 'finance.manager',
     displayName: 'Finance Manager',
     roleKey: 'finance_manager',
+    department: 'finance',
     password: 'Finance@123',
   },
   {
@@ -141,6 +224,7 @@ const DEFAULT_USERS = [
     username: 'sales.manager',
     displayName: 'Sales Manager',
     roleKey: 'sales_manager',
+    department: 'sales',
     password: 'Sales@123',
   },
   {
@@ -148,6 +232,7 @@ const DEFAULT_USERS = [
     username: 'sales.staff',
     displayName: 'Sales Officer',
     roleKey: 'sales_staff',
+    department: 'customer',
     password: 'Sales@123',
   },
   {
@@ -155,6 +240,7 @@ const DEFAULT_USERS = [
     username: 'procurement',
     displayName: 'Procurement Officer',
     roleKey: 'procurement_officer',
+    department: 'purchase',
     password: 'Procure@123',
   },
   {
@@ -162,6 +248,7 @@ const DEFAULT_USERS = [
     username: 'operations',
     displayName: 'Operations Officer',
     roleKey: 'operations_officer',
+    department: 'inventory',
     password: 'Ops@123',
   },
   {
@@ -169,6 +256,7 @@ const DEFAULT_USERS = [
     username: 'viewer',
     displayName: 'Read-only viewer',
     roleKey: 'viewer',
+    department: 'reports',
     password: 'Viewer@123456!',
   },
 ];
@@ -216,6 +304,10 @@ function createSessionToken() {
   return crypto.randomBytes(24).toString('hex');
 }
 
+function createCsrfToken() {
+  return crypto.randomBytes(24).toString('hex');
+}
+
 export function roleLabel(roleKey) {
   return ROLE_DEFINITIONS[roleKey]?.label || roleKey || 'User';
 }
@@ -230,11 +322,17 @@ export function userHasPermission(user, permission) {
   return perms.includes('*') || perms.includes(permission);
 }
 
+export function canUseAllBranchesRollup(user) {
+  const roleKey = String(user?.roleKey || '').trim().toLowerCase();
+  return roleKey === 'admin' || roleKey === 'md' || roleKey === 'ceo';
+}
+
 export function publicUserFromRow(row) {
   if (!row) return null;
   const roleKey = row.role_key ?? row.roleKey;
   const emailRaw = row.email ?? null;
   const avatarRaw = row.avatar_url ?? row.avatarUrl ?? null;
+  const department = normalizeWorkspaceDepartment(row.department ?? row.workspace_department);
   return {
     id: row.id,
     username: row.username,
@@ -243,6 +341,7 @@ export function publicUserFromRow(row) {
     avatarUrl: avatarRaw && String(avatarRaw).trim() ? String(avatarRaw).trim() : null,
     roleKey,
     roleLabel: roleLabel(roleKey),
+    department,
     status: row.status ?? 'active',
     lastLoginAtISO: row.last_login_at_iso ?? row.lastLoginAtISO ?? '',
     createdAtISO: row.created_at_iso ?? row.createdAtISO ?? '',
@@ -271,26 +370,58 @@ export function actorId(actor) {
 }
 
 export function seedAuthUsers(db) {
+  // Prevent re-introducing known credentials in production by default.
+  // Enable explicitly for initial staging/testing if needed.
+  if (
+    process.env.NODE_ENV === 'production' &&
+    process.env.ZAREWA_ALLOW_SEEDED_USERS !== 'true' &&
+    process.env.ZAREWA_ALLOW_SEEDED_USERS !== '1'
+  ) {
+    return;
+  }
   const count = db.prepare(`SELECT COUNT(*) AS c FROM app_users`).get().c;
   if (count > 0) return;
-  const ins = db.prepare(
-    `INSERT INTO app_users (
+  const cols = db.prepare(`PRAGMA table_info(app_users)`).all();
+  const hasDept = cols.some((c) => c.name === 'department');
+  const ins = hasDept
+    ? db.prepare(
+        `INSERT INTO app_users (
+      id, username, display_name, password_hash, role_key, department, status, last_login_at_iso, created_at_iso
+    ) VALUES (?,?,?,?,?,?,?,?,?)`
+      )
+    : db.prepare(
+        `INSERT INTO app_users (
       id, username, display_name, password_hash, role_key, status, last_login_at_iso, created_at_iso
     ) VALUES (?,?,?,?,?,?,?,?)`
-  );
+      );
   const createdAtISO = nowIso();
   db.transaction(() => {
     for (const user of DEFAULT_USERS) {
-      ins.run(
-        user.id,
-        user.username,
-        user.displayName,
-        createPasswordHash(user.password),
-        user.roleKey,
-        'active',
-        '',
-        createdAtISO
-      );
+      const dept = normalizeWorkspaceDepartment(user.department);
+      if (hasDept) {
+        ins.run(
+          user.id,
+          user.username,
+          user.displayName,
+          createPasswordHash(user.password),
+          user.roleKey,
+          dept,
+          'active',
+          '',
+          createdAtISO
+        );
+      } else {
+        ins.run(
+          user.id,
+          user.username,
+          user.displayName,
+          createPasswordHash(user.password),
+          user.roleKey,
+          'active',
+          '',
+          createdAtISO
+        );
+      }
     }
   })();
 }
@@ -307,6 +438,7 @@ export function createAppUserRecord(db, row) {
     .toLowerCase();
   const displayName = String(row?.displayName ?? '').trim();
   const roleKey = String(row?.roleKey ?? '').trim();
+  const department = normalizeWorkspaceDepartment(row?.department ?? row?.workspaceDepartment);
   if (!username) return { ok: false, error: 'Username is required.' };
   if (!displayName) return { ok: false, error: 'Display name is required.' };
   if (!roleKey) return { ok: false, error: 'Role is required.' };
@@ -317,21 +449,40 @@ export function createAppUserRecord(db, row) {
   }
   const userId = `USR-${crypto.randomBytes(8).toString('hex').toUpperCase()}`;
   const createdAtISO = nowIso();
+  const hasDeptCol = db.prepare(`PRAGMA table_info(app_users)`).all().some((c) => c.name === 'department');
   try {
-    db.prepare(
-      `INSERT INTO app_users (
+    if (hasDeptCol) {
+      db.prepare(
+        `INSERT INTO app_users (
+        id, username, display_name, password_hash, role_key, department, status, last_login_at_iso, created_at_iso
+      ) VALUES (?,?,?,?,?,?,?,?,?)`
+      ).run(
+        userId,
+        username,
+        displayName,
+        createPasswordHash(String(row.password)),
+        roleKey,
+        department,
+        'active',
+        '',
+        createdAtISO
+      );
+    } else {
+      db.prepare(
+        `INSERT INTO app_users (
         id, username, display_name, password_hash, role_key, status, last_login_at_iso, created_at_iso
       ) VALUES (?,?,?,?,?,?,?,?)`
-    ).run(
-      userId,
-      username,
-      displayName,
-      createPasswordHash(String(row.password)),
-      roleKey,
-      'active',
-      '',
-      createdAtISO
-    );
+      ).run(
+        userId,
+        username,
+        displayName,
+        createPasswordHash(String(row.password)),
+        roleKey,
+        'active',
+        '',
+        createdAtISO
+      );
+    }
   } catch (e) {
     if (e && (e.code === 'SQLITE_CONSTRAINT_UNIQUE' || e.code === 'SQLITE_CONSTRAINT_PRIMARYKEY')) {
       return { ok: false, error: 'Username already exists.' };
@@ -358,6 +509,7 @@ function findSessionRow(db, token) {
          u.email,
          u.avatar_url,
          u.role_key,
+         u.department,
          u.status,
          u.last_login_at_iso,
          u.created_at_iso
@@ -391,11 +543,13 @@ export function attachAuthContext(db) {
   return (req, res, next) => {
     const cookies = parseCookies(req.headers.cookie || '');
     const token = cookies[SESSION_COOKIE];
+    const csrfToken = cookies[CSRF_COOKIE];
     req.sessionToken = token || null;
     req.user = null;
     req.session = buildSessionPayload(null);
     req.workspaceBranchId = DEFAULT_BRANCH_ID;
     req.workspaceViewAll = false;
+    req.csrfToken = csrfToken || null;
 
     if (!token) return next();
 
@@ -416,7 +570,7 @@ export function attachAuthContext(db) {
     const baseBranch = defaultBranchIdForDb(db);
     const currentBranchId = String(row.current_branch_id || '').trim() || baseBranch;
     const rawViewAll = Number(row.view_all_branches) === 1;
-    const viewAllBranches = rawViewAll && userHasPermission(user, 'hq.view_all_branches');
+    const viewAllBranches = rawViewAll && canUseAllBranchesRollup(user);
     req.workspaceBranchId = currentBranchId;
     req.workspaceViewAll = viewAllBranches;
     req.session = {
@@ -438,21 +592,51 @@ function sessionCookieFlags() {
   return secure ? '; Secure' : '';
 }
 
+function pushSetCookie(res, value) {
+  const existing = res.getHeader('Set-Cookie');
+  if (!existing) {
+    res.setHeader('Set-Cookie', value);
+    return;
+  }
+  if (Array.isArray(existing)) {
+    res.setHeader('Set-Cookie', [...existing, value]);
+  } else {
+    res.setHeader('Set-Cookie', [String(existing), value]);
+  }
+}
+
 export function setSessionCookie(res, token) {
   const extra = sessionCookieFlags();
-  res.setHeader(
-    'Set-Cookie',
-    `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL_HOURS * 60 * 60}${extra}`
+  pushSetCookie(
+    res,
+    `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_HOURS * 60 * 60}${extra}`
   );
 }
 
 export function clearSessionCookie(res) {
   const extra = sessionCookieFlags();
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${extra}`);
+  pushSetCookie(res, `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${extra}`);
+}
+
+export function setCsrfCookie(res, token = createCsrfToken()) {
+  const extra = sessionCookieFlags();
+  // Non-HttpOnly on purpose: the SPA must read it and send it back in `X-CSRF-Token`.
+  pushSetCookie(
+    res,
+    `${CSRF_COOKIE}=${token}; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_HOURS * 60 * 60}${extra}`
+  );
+}
+
+export function clearCsrfCookie(res) {
+  const extra = sessionCookieFlags();
+  pushSetCookie(res, `${CSRF_COOKIE}=; SameSite=Strict; Path=/; Max-Age=0${extra}`);
 }
 
 export function loginWithPassword(db, username, password) {
-  const row = db.prepare(`SELECT * FROM app_users WHERE username = ?`).get(String(username || '').trim());
+  const key = String(username || '').trim().toLowerCase();
+  const row = db
+    .prepare(`SELECT * FROM app_users WHERE lower(trim(username)) = ?`)
+    .get(key);
   if (!row || row.status !== 'active') {
     return { ok: false, error: 'Invalid username or password.' };
   }
@@ -577,6 +761,30 @@ export function updateUserProfile(db, userId, patch) {
   return { ok: true, user: publicUserFromRow(next) };
 }
 
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {object} actorUser
+ * @param {string} targetUserId
+ * @param {string} rawDepartment
+ */
+export function patchAppUserWorkspaceDepartment(db, actorUser, targetUserId, rawDepartment) {
+  if (!userHasPermission(actorUser, 'settings.view') && !userHasPermission(actorUser, '*')) {
+    return { ok: false, error: 'You do not have permission to assign workspace departments.' };
+  }
+  const tid = String(targetUserId || '').trim();
+  if (!tid) return { ok: false, error: 'User id is required.' };
+  const cols = db.prepare(`PRAGMA table_info(app_users)`).all();
+  if (!cols.some((c) => c.name === 'department')) {
+    return { ok: false, error: 'Workspace department is not available on this database version.' };
+  }
+  const row = db.prepare(`SELECT * FROM app_users WHERE id = ?`).get(tid);
+  if (!row) return { ok: false, error: 'User not found.' };
+  const department = normalizeWorkspaceDepartment(rawDepartment);
+  db.prepare(`UPDATE app_users SET department = ? WHERE id = ?`).run(department, tid);
+  const next = db.prepare(`SELECT * FROM app_users WHERE id = ?`).get(tid);
+  return { ok: true, user: publicUserFromRow(next) };
+}
+
 function findUserByIdentifier(db, identifier) {
   const id = String(identifier || '').trim();
   if (!id) return null;
@@ -610,7 +818,8 @@ export function requestPasswordReset(db, identifier) {
     ).run(id, row.id, tokenHash, createdAtISO, expiresAtISO);
 
     const expose =
-      process.env.ZAREWA_DEV_RESET_TOKEN === '1' || process.env.ZAREWA_DEV_RESET_TOKEN === 'true';
+      process.env.NODE_ENV !== 'production' &&
+      (process.env.ZAREWA_DEV_RESET_TOKEN === '1' || process.env.ZAREWA_DEV_RESET_TOKEN === 'true');
     if (expose) {
       return { ok: true, devResetToken: plain };
     }
@@ -670,6 +879,24 @@ export function completePasswordReset(db, identifier, token, newPassword) {
 export function requireAuth(req, res, next) {
   if (!req.user) {
     return res.status(401).json({ ok: false, error: 'Sign in required.', code: 'AUTH_REQUIRED' });
+  }
+
+  if (process.env.NODE_ENV === 'test' && process.env.ZAREWA_TEST_ENFORCE_CSRF !== '1') {
+    return next();
+  }
+
+  // CSRF protection for cookie-authenticated state-changing requests.
+  // Double-submit pattern:
+  // - server sets a random `zarewa_csrf` cookie on login
+  // - frontend must echo it back as `X-CSRF-Token`
+  const method = String(req.method || '').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+    const cookieToken = req.csrfToken || null;
+    const headerToken = String(req.headers['x-csrf-token'] || req.headers['X-CSRF-Token'] || '')
+      .trim();
+    if (!cookieToken || !headerToken || headerToken !== cookieToken) {
+      return res.status(403).json({ ok: false, error: 'Invalid CSRF token.', code: 'CSRF_INVALID' });
+    }
   }
   return next();
 }

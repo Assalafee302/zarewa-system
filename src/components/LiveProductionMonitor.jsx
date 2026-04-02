@@ -14,12 +14,15 @@ import {
   Trash2,
 } from 'lucide-react';
 import { apiFetch } from '../lib/apiBase';
+import { coilVersusJobProductWarning } from '../lib/coilSpecVersusProduct';
+import { productionJobNeedsManagerReviewAttention } from '../lib/productionReview';
 import { useToast } from '../context/ToastContext';
 import { useWorkspace } from '../context/WorkspaceContext';
 
 function createDraftLine(row = {}) {
+  const hasPersistedId = row.id != null && row.id !== '';
   return {
-    id: row.id || `draft-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    id: hasPersistedId ? row.id : `draft-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     coilNo: row.coilNo || '',
     openingWeightKg:
       row.openingWeightKg != null && row.openingWeightKg !== 0 ? String(row.openingWeightKg) : '',
@@ -77,6 +80,23 @@ function statusTone(status) {
   }
 }
 
+function isDraftAllocationRow(row) {
+  return String(row?.id ?? '').startsWith('draft-');
+}
+
+function completionLineFromDraft(row) {
+  const line = {
+    coilNo: row.coilNo.trim(),
+    closingWeightKg: Number(row.closingWeightKg),
+    metersProduced: Number(row.metersProduced),
+    note: row.note.trim(),
+  };
+  if (!isDraftAllocationRow(row) && row.id != null && row.id !== '') {
+    return { ...line, allocationId: row.id };
+  }
+  return line;
+}
+
 /**
  * @param {{ focusCuttingListId?: string | null; hideJobSidebar?: boolean; inModal?: boolean; viewOnly?: boolean }} [props]
  */
@@ -91,6 +111,8 @@ export function LiveProductionMonitor({
   const [selectedJobId, setSelectedJobId] = useState('');
   const [draftAllocations, setDraftAllocations] = useState([createDraftLine()]);
   const [savingAction, setSavingAction] = useState('');
+  const [signoffRemark, setSignoffRemark] = useState('');
+  const [signoffSaving, setSignoffSaving] = useState(false);
 
   const productionJobs = useMemo(
     () => (ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.productionJobs) ? ws.snapshot.productionJobs : []),
@@ -109,6 +131,10 @@ export function LiveProductionMonitor({
   );
   const coilLots = useMemo(
     () => (ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.coilLots) ? ws.snapshot.coilLots : []),
+    [ws]
+  );
+  const products = useMemo(
+    () => (ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.products) ? ws.snapshot.products : []),
     [ws]
   );
   const coilAllocationCountByJob = useMemo(() => {
@@ -134,7 +160,6 @@ export function LiveProductionMonitor({
     () => (focusCuttingListId != null ? String(focusCuttingListId).trim() : ''),
     [focusCuttingListId]
   );
-  const useClScopedApi = Boolean(focusClTrim);
 
   const selectedJob = useMemo(() => {
     const found = sortedJobs.find((job) => job.jobID === selectedJobId);
@@ -153,6 +178,10 @@ export function LiveProductionMonitor({
     () => conversionChecks.filter((row) => row.jobID === selectedJob?.jobID),
     [conversionChecks, selectedJob?.jobID]
   );
+  const jobProductAttrs = useMemo(() => {
+    const p = products.find((x) => x.productID === selectedJob?.productID);
+    return p?.dashboardAttrs ?? null;
+  }, [products, selectedJob?.productID]);
   const coilByNo = useMemo(
     () => Object.fromEntries(coilLots.map((lot) => [lot.coilNo, lot])),
     [coilLots]
@@ -228,12 +257,7 @@ export function LiveProductionMonitor({
     if (!canRunConversionPreview || !selectedJob?.jobID) return '';
     return JSON.stringify({
       job: selectedJob.jobID,
-      lines: draftAllocations.map((row) => ({
-        coilNo: row.coilNo.trim(),
-        closingWeightKg: Number(row.closingWeightKg),
-        metersProduced: Number(row.metersProduced),
-        note: row.note.trim(),
-      })),
+      lines: draftAllocations.map((row) => completionLineFromDraft(row)),
     });
   }, [canRunConversionPreview, draftAllocations, selectedJob]);
 
@@ -243,7 +267,6 @@ export function LiveProductionMonitor({
   const [conversionPreviewError, setConversionPreviewError] = useState('');
   const [conversionPreviewLoading, setConversionPreviewLoading] = useState(false);
 
-  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (focusClTrim) {
       const j = productionJobs.find((x) => x.cuttingListId === focusClTrim);
@@ -276,6 +299,10 @@ export function LiveProductionMonitor({
   }, [selectedJob, selectedJobAllocations]);
 
   useEffect(() => {
+    setSignoffRemark('');
+  }, [selectedJob?.jobID]);
+
+  useEffect(() => {
     if (conversionPreviewTimerRef.current) {
       clearTimeout(conversionPreviewTimerRef.current);
       conversionPreviewTimerRef.current = null;
@@ -294,9 +321,7 @@ export function LiveProductionMonitor({
       conversionPreviewTimerRef.current = null;
       void (async () => {
         const parsed = JSON.parse(conversionPreviewKey);
-        const previewPath = useClScopedApi
-          ? `/api/cutting-lists/${encodeURIComponent(focusClTrim)}/production/conversion-preview`
-          : `/api/production-jobs/${encodeURIComponent(parsed.job)}/conversion-preview`;
+        const previewPath = `/api/production-jobs/${encodeURIComponent(parsed.job)}/conversion-preview`;
         const { ok, data } = await apiFetch(previewPath, {
           method: 'POST',
           body: JSON.stringify({ allocations: parsed.lines }),
@@ -318,35 +343,130 @@ export function LiveProductionMonitor({
         conversionPreviewTimerRef.current = null;
       }
     };
-  }, [conversionPreviewKey, selectedJob?.jobID, useClScopedApi, focusClTrim]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+  }, [conversionPreviewKey, selectedJob?.jobID]);
 
   const readOnly = Boolean(viewOnly) || selectedJob?.status === 'Completed';
-  const canEditAllocation = selectedJob?.status === 'Planned' && !readOnly;
+  const canEditPlannedAllocations = selectedJob?.status === 'Planned' && !readOnly;
+  const canAddSupplementalCoil = selectedJob?.status === 'Running' && !readOnly;
   const canCaptureRun = selectedJob?.status === 'Running' && !readOnly;
+  const completionValidation = useMemo(() => {
+    const errors = [];
+    const seenCoils = new Set();
+    let validLineCount = 0;
+    draftAllocations.forEach((row, idx) => {
+      const label = `Line ${idx + 1}`;
+      const coil = row.coilNo?.trim();
+      const opening = Number(row.openingWeightKg);
+      const closing = Number(row.closingWeightKg);
+      const meters = Number(row.metersProduced);
+      if (!coil && !row.openingWeightKg && !row.closingWeightKg && !row.metersProduced) return;
+      if (!coil) errors.push(`${label}: select a coil.`);
+      if (!Number.isFinite(opening) || opening <= 0) errors.push(`${label}: opening kg must be greater than 0.`);
+      if (!Number.isFinite(closing) || closing < 0) errors.push(`${label}: closing kg is required.`);
+      if (Number.isFinite(opening) && Number.isFinite(closing) && closing > opening) {
+        errors.push(`${label}: closing kg cannot exceed opening kg.`);
+      }
+      if (!Number.isFinite(meters) || meters <= 0) errors.push(`${label}: meters produced must be greater than 0.`);
+      if (coil) {
+        if (seenCoils.has(coil)) errors.push(`${label}: duplicate coil ${coil}.`);
+        seenCoils.add(coil);
+      }
+      if (
+        coil &&
+        Number.isFinite(opening) &&
+        opening > 0 &&
+        Number.isFinite(closing) &&
+        closing >= 0 &&
+        closing <= opening &&
+        Number.isFinite(meters) &&
+        meters > 0
+      ) {
+        validLineCount += 1;
+      }
+    });
+    return { validLineCount, errors, canComplete: validLineCount > 0 && errors.length === 0 };
+  }, [draftAllocations]);
+
+  const appendSaveReady = useMemo(
+    () =>
+      draftAllocations.some(
+        (r) => isDraftAllocationRow(r) && r.coilNo?.trim() && Number(r.openingWeightKg) > 0
+      ),
+    [draftAllocations]
+  );
+  const plannedAllocSaveReady = useMemo(
+    () => draftAllocations.some((r) => r.coilNo?.trim() && Number(r.openingWeightKg) > 0),
+    [draftAllocations]
+  );
+  const canManageConversionSignoff =
+    Boolean(ws?.hasPermission?.('production.release')) ||
+    Boolean(ws?.hasPermission?.('operations.manage')) ||
+    Boolean(ws?.hasPermission?.('production.manage'));
+  const plannedMetersValue = Number(selectedJob?.plannedMeters || 0);
+  const hasPlannedMeters = Number.isFinite(plannedMetersValue) && plannedMetersValue > 0;
+  const overProducedMeters =
+    hasPlannedMeters && Number.isFinite(recordedMeters) ? recordedMeters - plannedMetersValue : 0;
+  const requiresManagerOverrunApproval = overProducedMeters > 0.01;
+
+  const submitManagerSignoff = async () => {
+    if (!selectedJob?.jobID) return;
+    const remark = signoffRemark.trim();
+    if (remark.length < 3) {
+      showToast('Enter a sign-off remark (at least 3 characters).', { variant: 'error' });
+      return;
+    }
+    if (!ws?.canMutate) {
+      showToast('Reconnect to sign off — workspace is read-only.', { variant: 'error' });
+      return;
+    }
+    /** Always use job-scoped URL — cutting-list routes require `production_registered` and can 404 on legacy rows. */
+    const path = `/api/production-jobs/${encodeURIComponent(selectedJob.jobID)}/manager-review-signoff`;
+    setSignoffSaving(true);
+    try {
+      const { ok, data } = await apiFetch(path, {
+        method: 'PATCH',
+        body: JSON.stringify({ remark }),
+      });
+      if (!ok || !data?.ok) {
+        showToast(data?.error || `Could not record sign-off (${data?.code || 'request failed'}).`, {
+          variant: 'error',
+        });
+        return;
+      }
+      await ws.refresh();
+      showToast('Manager sign-off recorded.');
+      setSignoffRemark('');
+    } catch (e) {
+      showToast(e?.message || 'Network error — could not reach server.', { variant: 'error' });
+    } finally {
+      setSignoffSaving(false);
+    }
+  };
 
   const updateDraftRow = (id, patch) => {
     setDraftAllocations((prev) => prev.map((row) => (row.id === id ? { ...row, ...patch } : row)));
   };
 
   const addDraftRow = () => {
-    if (!canEditAllocation) return;
+    if (!canEditPlannedAllocations && !canAddSupplementalCoil) return;
     setDraftAllocations((prev) => [...prev, createDraftLine()]);
   };
 
   const removeDraftRow = (id) => {
-    if (!canEditAllocation) return;
-    setDraftAllocations((prev) => (prev.length <= 1 ? [createDraftLine()] : prev.filter((row) => row.id !== id)));
+    const row = draftAllocations.find((r) => r.id === id);
+    if (!row) return;
+    if (canEditPlannedAllocations) {
+      setDraftAllocations((prev) => (prev.length <= 1 ? [createDraftLine()] : prev.filter((r) => r.id !== id)));
+      return;
+    }
+    if (canAddSupplementalCoil && isDraftAllocationRow(row)) {
+      setDraftAllocations((prev) => (prev.length <= 1 ? [createDraftLine()] : prev.filter((r) => r.id !== id)));
+    }
   };
 
   const buildCompleteBody = () => ({
     completedAtISO: new Date().toISOString().slice(0, 10),
-    allocations: draftAllocations.map((row) => ({
-      coilNo: row.coilNo.trim(),
-      closingWeightKg: Number(row.closingWeightKg),
-      metersProduced: Number(row.metersProduced),
-      note: row.note.trim(),
-    })),
+    allocations: draftAllocations.map((row) => completionLineFromDraft(row)),
   });
 
   const persist = async (type) => {
@@ -360,36 +480,81 @@ export function LiveProductionMonitor({
       );
       return;
     }
-    const clBase = useClScopedApi
-      ? `/api/cutting-lists/${encodeURIComponent(focusClTrim)}/production`
-      : null;
+    const jobApi = `/api/production-jobs/${encodeURIComponent(selectedJob.jobID)}`;
     const listLabel = selectedJob.cuttingListId || selectedJob.jobID;
     setSavingAction(type);
     let path = '';
     let body = {};
     if (type === 'allocations') {
-      path = clBase
-        ? `${clBase}/allocations`
-        : `/api/production-jobs/${encodeURIComponent(selectedJob.jobID)}/allocations`;
-      body = {
-        allocations: draftAllocations
-          .map((row) => ({
+      path = `${jobApi}/allocations`;
+      if (selectedJob.status === 'Running') {
+        const toAppend = draftAllocations.filter(
+          (row) => isDraftAllocationRow(row) && row.coilNo?.trim() && Number(row.openingWeightKg) > 0
+        );
+        if (!toAppend.length) {
+          showToast('Add a new coil row with opening kg, then save to attach it to this run.', { variant: 'info' });
+          setSavingAction('');
+          return;
+        }
+        body = {
+          append: true,
+          allocations: toAppend.map((row) => ({
             coilNo: row.coilNo.trim(),
             openingWeightKg: Number(row.openingWeightKg),
             note: row.note.trim(),
-          }))
-          .filter((row) => row.coilNo && row.openingWeightKg > 0),
-      };
+          })),
+        };
+      } else {
+        body = {
+          allocations: draftAllocations
+            .map((row) => ({
+              coilNo: row.coilNo.trim(),
+              openingWeightKg: Number(row.openingWeightKg),
+              note: row.note.trim(),
+            }))
+            .filter((row) => row.coilNo && row.openingWeightKg > 0),
+        };
+      }
     } else if (type === 'start') {
-      path = clBase
-        ? `${clBase}/start`
-        : `/api/production-jobs/${encodeURIComponent(selectedJob.jobID)}/start`;
+      path = `${jobApi}/start`;
       body = { startedAtISO: new Date().toISOString().slice(0, 10) };
     } else {
+      if (!completionValidation.canComplete) {
+        showToast(
+          completionValidation.errors[0] ||
+            'Complete run log fields (coil, opening, closing, meters) before completion.',
+          { variant: 'error' }
+        );
+        setSavingAction('');
+        return;
+      }
+      if (requiresManagerOverrunApproval) {
+        if (!canManageConversionSignoff) {
+          showToast(
+            `Recorded meters (${recordedMeters.toFixed(2)}m) exceed planned (${plannedMetersValue.toFixed(2)}m). Seek manager approval to complete.`,
+            { variant: 'error' }
+          );
+          setSavingAction('');
+          return;
+        }
+        const remark = signoffRemark.trim();
+        if (remark.length < 3) {
+          showToast('Manager approval remark is required for meter overrun (at least 3 characters).', {
+            variant: 'error',
+          });
+          setSavingAction('');
+          return;
+        }
+        const proceedOverrun = window.confirm(
+          `Meters recorded exceed plan by ${overProducedMeters.toFixed(2)}m. Continue as manager-approved overrun?`
+        );
+        if (!proceedOverrun) {
+          setSavingAction('');
+          return;
+        }
+      }
       const completeBody = buildCompleteBody();
-      const previewUrl = clBase
-        ? `${clBase}/conversion-preview`
-        : `/api/production-jobs/${encodeURIComponent(selectedJob.jobID)}/conversion-preview`;
+      const previewUrl = `${jobApi}/conversion-preview`;
       const prev = await apiFetch(previewUrl, {
         method: 'POST',
         body: JSON.stringify(completeBody),
@@ -404,7 +569,7 @@ export function LiveProductionMonitor({
           return;
         }
       }
-      path = clBase ? `${clBase}/complete` : `/api/production-jobs/${encodeURIComponent(selectedJob.jobID)}/complete`;
+      path = `${jobApi}/complete`;
       body = completeBody;
     }
     const { ok, data } = await apiFetch(path, {
@@ -418,7 +583,11 @@ export function LiveProductionMonitor({
     }
     await ws.refresh();
     if (type === 'allocations') {
-      showToast(`Coil allocation saved for ${listLabel}.`);
+      showToast(
+        selectedJob.status === 'Running'
+          ? `Supplemental coil(s) saved on ${listLabel}.`
+          : `Coil allocation saved for ${listLabel}.`
+      );
     } else if (type === 'start') {
       showToast(`Production started for ${listLabel}.`);
     } else {
@@ -465,6 +634,11 @@ export function LiveProductionMonitor({
             enough to qualify.
           </>
         )}
+        <div className="mt-4">
+          <button type="button" className="z-btn-secondary" onClick={() => void ws?.refresh?.()}>
+            Refresh workspace
+          </button>
+        </div>
       </div>
     );
   }
@@ -475,7 +649,11 @@ export function LiveProductionMonitor({
         inModal ? 'mb-0' : 'mb-8'
       } rounded-zarewa border border-[#134e4a]/15 bg-gradient-to-br from-[#134e4a]/[0.04] via-white to-teal-50/30 shadow-sm overflow-hidden`}
     >
-      <div className="flex flex-col gap-3 border-b border-slate-100 bg-white/80 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+      <div
+        className={`flex flex-col gap-2 border-b border-slate-100 bg-white/90 ${
+          inModal ? 'px-4 py-3 sm:px-5 sticky top-0 z-20 backdrop-blur' : 'px-5 py-4 sm:px-6'
+        } sm:flex-row sm:items-center sm:justify-between`}
+      >
         <div className="flex items-center gap-3">
           <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#134e4a] text-[#5eead4]">
             <Gauge size={22} />
@@ -484,13 +662,20 @@ export function LiveProductionMonitor({
             <h3 className="text-sm font-black uppercase tracking-widest text-[#134e4a]">
               Production traceability
             </h3>
-            <p className="mt-0.5 text-[10px] text-slate-500">
+            <p className="mt-0.5 text-[10px] text-slate-500 leading-relaxed">
               Reserve coils before start, record kg before and after, and compare actual conversion against
               standard, supplier, gauge history, and coil history.
             </p>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className={`flex flex-wrap items-center gap-2 ${inModal ? 'sm:justify-end' : ''}`}>
+          <span className="rounded-full border border-slate-200 bg-white px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-600">
+            {selectedJob.status === 'Planned'
+              ? 'Step 1: allocate'
+              : selectedJob.status === 'Running'
+                ? 'Step 2: run log'
+                : 'Step 3: review'}
+          </span>
           {readOnly ? (
             <span className="text-[11px] font-semibold text-slate-500 rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5">
               Read-only record
@@ -500,29 +685,45 @@ export function LiveProductionMonitor({
               <button
                 type="button"
                 onClick={() => void persist('allocations')}
-                disabled={!canEditAllocation || savingAction !== ''}
-                className="z-btn-secondary"
+                disabled={
+                  savingAction !== '' ||
+                  (selectedJob.status === 'Planned' && (!canEditPlannedAllocations || !plannedAllocSaveReady)) ||
+                  (selectedJob.status === 'Running' && (!canAddSupplementalCoil || !appendSaveReady))
+                }
+                className={`z-btn-secondary ${inModal ? 'text-[11px] px-3 py-2' : ''}`}
               >
-                <Save size={16} /> {savingAction === 'allocations' ? 'Saving...' : 'Save allocations'}
+                <Save size={16} />{' '}
+                {savingAction === 'allocations'
+                  ? 'Saving...'
+                  : selectedJob.status === 'Running'
+                    ? 'Save supplemental coil(s)'
+                    : 'Save allocations'}
               </button>
               <button
                 type="button"
                 onClick={() => void persist('start')}
-                disabled={!canEditAllocation || savingAction !== '' || !hasPersistedCoilAllocations}
+                disabled={
+                  selectedJob.status !== 'Planned' || savingAction !== '' || !hasPersistedCoilAllocations
+                }
                 title={
                   !hasPersistedCoilAllocations
                     ? 'Save at least one coil with opening kg before starting.'
                     : undefined
                 }
-                className="z-btn-primary"
+                className={`z-btn-primary ${inModal ? 'text-[11px] px-3 py-2' : ''}`}
               >
                 <Play size={16} /> {savingAction === 'start' ? 'Starting...' : 'Start job'}
               </button>
               <button
                 type="button"
                 onClick={() => void persist('complete')}
-                disabled={!canCaptureRun || savingAction !== ''}
-                className="z-btn-primary"
+                disabled={!canCaptureRun || savingAction !== '' || !completionValidation.canComplete}
+                title={
+                  completionValidation.canComplete
+                    ? undefined
+                    : completionValidation.errors[0] || 'Complete all run-log fields before completion.'
+                }
+                className={`z-btn-primary ${inModal ? 'text-[11px] px-3 py-2' : ''}`}
               >
                 <CheckCircle2 size={16} /> {savingAction === 'complete' ? 'Completing...' : 'Complete job'}
               </button>
@@ -536,16 +737,36 @@ export function LiveProductionMonitor({
           actions stay disabled.
         </div>
       ) : null}
-      {canEditAllocation && !hasPersistedCoilAllocations ? (
-        <div className="border-b border-amber-100 bg-amber-50/90 px-5 py-3 text-[11px] font-semibold text-amber-950 sm:px-6">
+      {canEditPlannedAllocations && !hasPersistedCoilAllocations ? (
+        <div className="border-b border-amber-100 bg-amber-50/90 px-4 py-2.5 text-[10px] font-semibold text-amber-950 sm:px-5">
           Save coil allocations (coil number and opening kg) before starting — production cannot run without a posted
           allocation.
         </div>
       ) : null}
+      {canAddSupplementalCoil ? (
+        <div className="border-b border-sky-100 bg-sky-50/80 px-4 py-2 text-[10px] font-medium text-sky-950 sm:px-5">
+          Job is running — use <strong className="font-semibold">Add coil</strong> for extra material if the first coil
+          does not cover planned metres. Save opens kg on the new coil only; existing lines stay locked.
+        </div>
+      ) : null}
+      {canCaptureRun && !completionValidation.canComplete ? (
+        <div className="border-b border-red-100 bg-red-50/80 px-4 py-2 text-[10px] font-medium text-red-900 sm:px-5">
+          Completion blocked: {completionValidation.errors[0] || 'fill all required run-log fields.'}
+        </div>
+      ) : null}
+      {canCaptureRun && requiresManagerOverrunApproval ? (
+        <div className="border-b border-amber-100 bg-amber-50/90 px-4 py-2 text-[10px] font-medium text-amber-950 sm:px-5">
+          Overrun detected: recorded {recordedMeters.toFixed(2)}m vs planned {plannedMetersValue.toFixed(2)}m
+          ({overProducedMeters.toFixed(2)}m above plan).{' '}
+          {canManageConversionSignoff
+            ? 'Manager approval remark is required before completion.'
+            : 'Seek manager approval before completion.'}
+        </div>
+      ) : null}
 
       <div
-        className={`grid gap-6 p-5 sm:p-6 ${
-          hideJobSidebar ? '' : 'sm:grid-cols-[18rem_minmax(0,1fr)]'
+        className={`grid ${inModal ? 'gap-3 p-3 sm:p-4' : 'gap-4 p-4 sm:p-5'} ${
+          hideJobSidebar ? '' : 'sm:grid-cols-[16rem_minmax(0,1fr)]'
         }`}
       >
         {!hideJobSidebar ? (
@@ -556,10 +777,10 @@ export function LiveProductionMonitor({
                 key={job.jobID}
                 type="button"
                 onClick={() => setSelectedJobId(job.jobID)}
-                className={`w-full rounded-2xl border p-4 text-left transition-all ${
+                className={`w-full rounded-2xl border p-4 text-left transition-all duration-200 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/25 ${
                   selectedJob.jobID === job.jobID
-                    ? 'border-[#134e4a]/30 bg-white shadow-sm'
-                    : 'border-slate-200/80 bg-white/70 hover:border-teal-200'
+                    ? 'border-[#134e4a]/35 bg-white shadow-sm ring-1 ring-[#134e4a]/10'
+                    : 'border-slate-200/80 bg-white/70 hover:border-teal-200 hover:shadow-sm'
                 }`}
               >
                 <div className="flex items-start justify-between gap-3">
@@ -598,87 +819,146 @@ export function LiveProductionMonitor({
           </aside>
         ) : null}
 
-        <div className="space-y-5 min-w-0">
-          <div className="grid gap-4 lg:grid-cols-4">
-            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm lg:col-span-2">
-              <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className={`min-w-0 ${inModal ? 'space-y-3' : 'space-y-4'}`}>
+          <div className={`grid ${inModal ? 'gap-2.5' : 'gap-3'} lg:grid-cols-4`}>
+            <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm transition-colors duration-200 hover:border-slate-300 lg:col-span-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Cutting list</p>
-                  <p className="mt-1 text-lg font-black text-[#134e4a] font-mono">
+                  <p className="text-[8px] font-black uppercase tracking-widest text-slate-400">Cutting list</p>
+                  <p className="mt-0.5 text-base font-black text-[#134e4a] font-mono">
                     {selectedJob.cuttingListId || '—'}
                   </p>
-                  <p className="mt-1 text-xs text-slate-600">
+                  <p className="mt-0.5 text-[11px] text-slate-600">
                     {selectedJob.customerName || '—'} · {selectedJob.productName || selectedJob.productID || '—'}
                   </p>
                 </div>
                 <span
-                  className={`rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-wide ${statusTone(selectedJob.status)}`}
+                  className={`rounded-full px-2.5 py-0.5 text-[9px] font-black uppercase tracking-wide ${statusTone(selectedJob.status)}`}
                 >
                   {selectedJob.status}
                 </span>
               </div>
-              <div className="mt-4 grid gap-3 sm:grid-cols-2 text-xs">
-                <div className="rounded-xl border border-slate-100 bg-slate-50/80 p-3">
+              <div className="mt-3 grid gap-2 sm:grid-cols-2 text-[11px]">
+                <div className="rounded-lg border border-slate-100 bg-slate-50/80 p-2">
                   <p className="font-semibold text-slate-400">Quotation</p>
-                  <p className="mt-1 font-bold text-slate-700">{selectedJob.quotationRef || '—'}</p>
+                  <p className="mt-0.5 font-bold text-slate-700">{selectedJob.quotationRef || '—'}</p>
                 </div>
-                <div className="rounded-xl border border-slate-100 bg-slate-50/80 p-3">
+                <div className="rounded-lg border border-slate-100 bg-slate-50/80 p-2">
                   <p className="font-semibold text-slate-400">Machine</p>
-                  <p className="mt-1 font-bold text-slate-700">{selectedJob.machineName || 'Production line'}</p>
+                  <p className="mt-0.5 font-bold text-slate-700">{selectedJob.machineName || 'Production line'}</p>
                 </div>
               </div>
             </div>
 
-            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Reserved</p>
-              <p className="mt-1 text-2xl font-black text-[#134e4a]">{formatKg(reservedKg)}</p>
-              <p className="mt-1 text-[10px] text-slate-500">Opening kg locked before start</p>
+            <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm transition-colors duration-200 hover:border-slate-300">
+              <p className="text-[8px] font-black uppercase tracking-widest text-slate-400">Reserved</p>
+              <p className="mt-0.5 text-xl font-black text-[#134e4a]">{formatKg(reservedKg)}</p>
+              <p className="mt-0.5 text-[9px] text-slate-500">Opening kg locked on this job</p>
             </div>
 
-            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Recorded output</p>
-              <p className="mt-1 text-2xl font-black text-[#134e4a]">{formatMeters(recordedMeters)}</p>
-              <p className="mt-1 text-[10px] text-slate-500">{formatKg(recordedConsumedKg)} consumed so far</p>
+            <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm transition-colors duration-200 hover:border-slate-300">
+              <p className="text-[8px] font-black uppercase tracking-widest text-slate-400">Recorded output</p>
+              <p className="mt-0.5 text-xl font-black text-[#134e4a]">{formatMeters(recordedMeters)}</p>
+              <p className="mt-0.5 text-[9px] text-slate-500">{formatKg(recordedConsumedKg)} consumed so far</p>
             </div>
           </div>
 
-          {selectedJob.managerReviewRequired ? (
-            <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+          {selectedJob.status === 'Completed' && selectedJob.managerReviewSignedAtISO ? (
+            <div className="rounded-2xl border border-emerald-200 bg-emerald-50/90 px-4 py-3 text-sm text-emerald-950">
               <div className="flex items-start gap-2">
-                <FileWarning size={18} className="mt-0.5 shrink-0" />
-                <div>
-                  <p className="font-black uppercase tracking-wide">Manager review required</p>
-                  <p className="mt-1 text-xs">
-                    The conversion result for this job moved outside the expected range. Review the four
-                    reference values before closing the variance.
+                <CheckCircle2 size={18} className="mt-0.5 shrink-0 text-emerald-700" />
+                <div className="min-w-0 space-y-1">
+                  <p className="font-black uppercase tracking-wide text-emerald-900">Manager sign-off recorded</p>
+                  <p className="text-xs text-emerald-900/90">
+                    <span className="font-semibold">{selectedJob.managerReviewSignedByName || 'Manager'}</span>
+                    {selectedJob.managerReviewSignedAtISO ? (
+                      <span className="text-emerald-800/80">
+                        {' '}
+                        · {String(selectedJob.managerReviewSignedAtISO).slice(0, 10)}
+                      </span>
+                    ) : null}
+                  </p>
+                  {selectedJob.managerReviewRemark ? (
+                    <p className="text-xs text-emerald-900/85 border-t border-emerald-200/80 pt-2 mt-2 whitespace-pre-wrap">
+                      {selectedJob.managerReviewRemark}
+                    </p>
+                  ) : null}
+                  <p className="text-[10px] text-emerald-800/70 pt-1">
+                    Conversion alert on this job remains visible below for audit; dashboards no longer flag it for
+                    action.
                   </p>
                 </div>
               </div>
             </div>
           ) : null}
 
-          <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-4">
+          {productionJobNeedsManagerReviewAttention(selectedJob) ? (
+            <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-900 space-y-3">
+              <div className="flex items-start gap-2">
+                <FileWarning size={18} className="mt-0.5 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="font-black uppercase tracking-wide">Manager review required</p>
+                  <p className="mt-1 text-xs">
+                    Conversion is outside the expected band (High/Low versus references). Review the four-reference
+                    checks below, then sign off with a short remark when satisfied.
+                  </p>
+                </div>
+              </div>
+              {canManageConversionSignoff ? (
+                <div className="rounded-xl border border-red-200/80 bg-white/80 p-3 space-y-2">
+                  <label className="block text-[10px] font-black uppercase tracking-widest text-red-900/80">
+                    Sign-off remark
+                  </label>
+                  <textarea
+                    value={signoffRemark}
+                    onChange={(e) => setSignoffRemark(e.target.value)}
+                    rows={3}
+                    placeholder="e.g. Variance explained — coil edge trim / scale loss. Approved to close."
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-800 outline-none focus:ring-2 focus:ring-red-200 resize-y min-h-[4rem]"
+                  />
+                  <button
+                    type="button"
+                    disabled={signoffSaving || !ws?.canMutate}
+                    onClick={() => void submitManagerSignoff()}
+                    className="z-btn-primary w-full sm:w-auto justify-center"
+                  >
+                    <CheckCircle2 size={16} /> {signoffSaving ? 'Saving…' : 'Record manager sign-off'}
+                  </button>
+                </div>
+              ) : (
+                <p className="text-[11px] text-red-900/85 font-medium">
+                  Sign-off requires <strong className="font-semibold">Production manage</strong>,{' '}
+                  <strong className="font-semibold">Production release</strong>, or{' '}
+                  <strong className="font-semibold">Operations manage</strong> (admin has full access).
+                </p>
+              )}
+            </div>
+          ) : null}
+
+          <div className="rounded-xl border border-slate-200 bg-white shadow-sm transition-colors duration-200 hover:border-slate-300">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-3 py-2.5">
               <div>
-                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">
+                <p className="text-[8px] font-black uppercase tracking-widest text-slate-400">
                   Coil allocation and run log
                 </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  {canEditAllocation
+                <p className="mt-0.5 text-[11px] text-slate-500 leading-relaxed">
+                  {canEditPlannedAllocations
                     ? 'Pick one or more coils, reserve opening kg, then save before starting.'
-                    : canCaptureRun
-                      ? 'Capture closing kg and meters produced for every allocated coil.'
-                      : 'Job is closed. Allocation and conversion details are read-only.'}
+                    : canAddSupplementalCoil
+                      ? 'Add another coil if you need more material mid-run; save reserves opening kg on new lines only.'
+                      : canCaptureRun
+                        ? 'Capture closing kg and metres for every allocated coil.'
+                        : 'Job is closed. Allocation and conversion details are read-only.'}
                 </p>
               </div>
-              {canEditAllocation ? (
-                <button type="button" onClick={addDraftRow} className="z-btn-secondary">
-                  <Plus size={16} /> Add coil
+              {canEditPlannedAllocations || canAddSupplementalCoil ? (
+                <button type="button" onClick={addDraftRow} className="z-btn-secondary text-xs py-1.5 px-2.5">
+                  <Plus size={14} /> Add coil
                 </button>
               ) : null}
             </div>
 
-            <div className="space-y-4 p-4">
+            <div className={`${inModal ? 'space-y-2 p-2.5' : 'space-y-2.5 p-3'}`}>
               {draftAllocations.map((row, index) => {
                 const lot = coilByNo[row.coilNo];
                 const addBackThisJob = row.coilNo ? savedOpeningKgByCoil.get(row.coilNo) ?? 0 : 0;
@@ -688,21 +968,30 @@ export function LiveProductionMonitor({
                       Number(lot.qtyRemaining || 0) - Number(lot.qtyReserved || 0) + addBackThisJob
                     )
                   : 0;
+                const draftRow = isDraftAllocationRow(row);
+                const canPickCoilAndOpening =
+                  canEditPlannedAllocations || (canAddSupplementalCoil && draftRow);
+                const specWarn = lot && jobProductAttrs ? coilVersusJobProductWarning(lot, jobProductAttrs) : null;
+                const showRemove =
+                  canEditPlannedAllocations ||
+                  (canAddSupplementalCoil && draftRow && draftAllocations.length > 1);
                 return (
                   <div
                     key={row.id}
-                    className="grid gap-3 rounded-2xl border border-slate-100 bg-slate-50/60 p-4 lg:grid-cols-[1.4fr_repeat(3,minmax(0,0.8fr))_1fr_auto]"
+                    className={`grid gap-2 rounded-lg border border-slate-100 bg-slate-50/60 ${
+                      inModal ? 'p-2' : 'p-2.5'
+                    } lg:grid-cols-[1.35fr_repeat(3,minmax(0,0.75fr))_1fr_auto] transition-all duration-200 hover:border-slate-200 hover:bg-slate-50`}
                   >
                     <div>
-                      <label className="ml-1 mb-1 block text-[9px] font-black uppercase tracking-widest text-slate-400">
+                      <label className="ml-0.5 mb-0.5 block text-[8px] font-black uppercase tracking-widest text-slate-400">
                         Coil {index + 1}
                       </label>
                       <div className="relative">
                         <select
-                          disabled={!canEditAllocation}
+                          disabled={!canPickCoilAndOpening}
                           value={row.coilNo}
                           onChange={(e) => updateDraftRow(row.id, { coilNo: e.target.value })}
-                          className="w-full rounded-xl border border-slate-200 bg-white py-2.5 px-3 text-xs font-bold text-[#134e4a] outline-none disabled:opacity-70"
+                          className="w-full rounded-lg border border-slate-200 bg-white py-1.5 px-2 text-[11px] font-bold text-[#134e4a] outline-none transition-all duration-150 focus:border-[#134e4a]/35 focus:ring-2 focus:ring-[#134e4a]/15 disabled:opacity-70"
                         >
                           <option value="">Select coil...</option>
                           {availableCoils.map((coil) => {
@@ -720,33 +1009,39 @@ export function LiveProductionMonitor({
                           })}
                         </select>
                       </div>
+                      {specWarn ? (
+                        <p className="mt-1.5 flex items-start gap-1 rounded border border-amber-200 bg-amber-50/90 px-2 py-1 text-[9px] font-semibold text-amber-950">
+                          <AlertTriangle size={12} className="mt-0.5 shrink-0" aria-hidden />
+                          {specWarn}
+                        </p>
+                      ) : null}
                       {lot ? (
-                        <p className="mt-2 text-[10px] text-slate-500">
-                          {lot.productID} - remaining {formatKg(lot.qtyRemaining)} - free {formatKg(freeKg)}
+                        <p className="mt-1 text-[9px] text-slate-500">
+                          {lot.productID} · rem {formatKg(lot.qtyRemaining)} · free {formatKg(freeKg)}
                         </p>
                       ) : (
-                        <p className="mt-2 text-[10px] text-slate-400">Pick a received coil to continue.</p>
+                        <p className="mt-1 text-[9px] text-slate-400">Pick a received coil to continue.</p>
                       )}
                     </div>
 
                     <div>
-                      <label className="ml-1 mb-1 block text-[9px] font-black uppercase tracking-widest text-slate-400">
+                      <label className="ml-0.5 mb-0.5 block text-[8px] font-black uppercase tracking-widest text-slate-400">
                         Opening kg
                       </label>
                       <input
                         type="number"
                         min="0"
                         step="0.01"
-                        disabled={!canEditAllocation}
+                        disabled={!canPickCoilAndOpening}
                         value={row.openingWeightKg}
                         onChange={(e) => updateDraftRow(row.id, { openingWeightKg: e.target.value })}
-                        className="w-full rounded-xl border border-slate-200 bg-white py-2.5 px-3 text-sm font-black text-[#134e4a] outline-none disabled:opacity-70"
+                        className="w-full rounded-lg border border-slate-200 bg-white py-1.5 px-2 text-xs font-black text-[#134e4a] outline-none transition-all duration-150 focus:border-[#134e4a]/35 focus:ring-2 focus:ring-[#134e4a]/15 disabled:opacity-70"
                       />
                     </div>
 
                     <div>
-                      <label className="ml-1 mb-1 flex items-center gap-1 text-[9px] font-black uppercase tracking-widest text-slate-400">
-                        <Scale size={12} /> Closing kg
+                      <label className="ml-0.5 mb-0.5 flex items-center gap-1 text-[8px] font-black uppercase tracking-widest text-slate-400">
+                        <Scale size={11} /> Closing kg
                       </label>
                       <input
                         type="number"
@@ -755,13 +1050,13 @@ export function LiveProductionMonitor({
                         disabled={!canCaptureRun}
                         value={row.closingWeightKg}
                         onChange={(e) => updateDraftRow(row.id, { closingWeightKg: e.target.value })}
-                        className="w-full rounded-xl border border-slate-200 bg-white py-2.5 px-3 text-sm font-black text-[#134e4a] outline-none disabled:opacity-70"
+                        className="w-full rounded-lg border border-slate-200 bg-white py-1.5 px-2 text-xs font-black text-[#134e4a] outline-none transition-all duration-150 focus:border-[#134e4a]/35 focus:ring-2 focus:ring-[#134e4a]/15 disabled:opacity-70"
                       />
                     </div>
 
                     <div>
-                      <label className="ml-1 mb-1 flex items-center gap-1 text-[9px] font-black uppercase tracking-widest text-slate-400">
-                        <Ruler size={12} /> Meters
+                      <label className="ml-0.5 mb-0.5 flex items-center gap-1 text-[8px] font-black uppercase tracking-widest text-slate-400">
+                        <Ruler size={11} /> Meters
                       </label>
                       <input
                         type="number"
@@ -770,41 +1065,44 @@ export function LiveProductionMonitor({
                         disabled={!canCaptureRun}
                         value={row.metersProduced}
                         onChange={(e) => updateDraftRow(row.id, { metersProduced: e.target.value })}
-                        className="w-full rounded-xl border border-slate-200 bg-white py-2.5 px-3 text-sm font-black text-[#134e4a] outline-none disabled:opacity-70"
+                        className="w-full rounded-lg border border-slate-200 bg-white py-1.5 px-2 text-xs font-black text-[#134e4a] outline-none transition-all duration-150 focus:border-[#134e4a]/35 focus:ring-2 focus:ring-[#134e4a]/15 disabled:opacity-70"
                       />
                     </div>
 
                     <div>
-                      <label className="ml-1 mb-1 block text-[9px] font-black uppercase tracking-widest text-slate-400">
+                      <label className="ml-0.5 mb-0.5 block text-[8px] font-black uppercase tracking-widest text-slate-400">
                         Notes
                       </label>
                       <input
                         type="text"
                         value={row.note}
                         onChange={(e) => updateDraftRow(row.id, { note: e.target.value })}
-                        disabled={selectedJob.status === 'Completed'}
+                        disabled={
+                          selectedJob.status === 'Completed' ||
+                          (selectedJob.status === 'Running' && !draftRow)
+                        }
                         placeholder="Operator note"
-                        className="w-full rounded-xl border border-slate-200 bg-white py-2.5 px-3 text-xs font-semibold text-slate-700 outline-none disabled:opacity-70"
+                        className="w-full rounded-lg border border-slate-200 bg-white py-1.5 px-2 text-[11px] font-semibold text-slate-700 outline-none transition-all duration-150 focus:border-[#134e4a]/30 focus:ring-2 focus:ring-[#134e4a]/10 disabled:opacity-70"
                       />
                     </div>
 
-                    <div className="flex items-end justify-between gap-3">
-                      <div className="text-right text-[10px] text-slate-500">
+                    <div className="flex items-end justify-between gap-2">
+                      <div className="text-right text-[9px] text-slate-500">
                         <p className="font-semibold">Consumed</p>
-                        <p className="mt-1 font-black text-[#134e4a]">
+                        <p className="mt-0.5 font-black text-[#134e4a] tabular-nums">
                           {Number(row.openingWeightKg) >= Number(row.closingWeightKg || 0) && row.closingWeightKg !== ''
                             ? formatKg(Number(row.openingWeightKg) - Number(row.closingWeightKg || 0))
                             : '—'}
                         </p>
                       </div>
-                      {canEditAllocation ? (
+                      {showRemove ? (
                         <button
                           type="button"
                           onClick={() => removeDraftRow(row.id)}
-                          className="rounded-xl p-2 text-slate-300 transition-colors hover:bg-red-50 hover:text-red-600"
+                          className="rounded-lg p-1.5 text-slate-300 transition-all duration-150 hover:scale-105 hover:bg-red-50 hover:text-red-600"
                           aria-label="Remove coil row"
                         >
-                          <Trash2 size={16} />
+                          <Trash2 size={14} />
                         </button>
                       ) : null}
                     </div>
@@ -815,8 +1113,8 @@ export function LiveProductionMonitor({
           </div>
 
           {canCaptureRun ? (
-            <div className="rounded-2xl border border-dashed border-[#134e4a]/25 bg-white shadow-sm">
-              <div className="border-b border-slate-100 px-4 py-4">
+            <div className="rounded-2xl border border-dashed border-[#134e4a]/25 bg-white shadow-sm transition-colors duration-200 hover:border-[#134e4a]/35">
+              <div className={`${inModal ? 'border-b border-slate-100 px-3 py-3' : 'border-b border-slate-100 px-4 py-4'}`}>
                 <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">
                   Pre-submit conversion preview
                 </p>
@@ -825,7 +1123,7 @@ export function LiveProductionMonitor({
                   closing kg and metres. Nothing is posted until you press Complete job.
                 </p>
               </div>
-              <div className="p-4">
+              <div className={inModal ? 'p-3' : 'p-4'}>
                 {!canRunConversionPreview ? (
                   <p className="text-sm text-slate-500">
                     Enter closing kg and metres for every allocated coil to see expected conversion and alerts.
@@ -857,12 +1155,16 @@ export function LiveProductionMonitor({
                       ) : null}
                     </div>
                     <div className="grid gap-3 lg:grid-cols-2">
-                      {conversionPreview.rows.map((row) => {
+                      {conversionPreview.rows.map((row, rowIdx) => {
                         const lot = coilByNo[row.coilNo];
                         return (
                           <div
-                            key={row.coilNo}
-                            className={`rounded-2xl border p-3 text-sm shadow-sm ${alertTone(row.alertState)}`}
+                            key={
+                              row.allocationId != null && row.allocationId !== ''
+                                ? `conv-${row.allocationId}`
+                                : `conv-${row.coilNo}-${rowIdx}`
+                            }
+                            className={`rounded-2xl border p-3 text-sm shadow-sm transition-all duration-200 hover:-translate-y-[1px] hover:shadow ${alertTone(row.alertState)}`}
                           >
                             <div className="flex flex-wrap items-start justify-between gap-2">
                               <div>
@@ -918,8 +1220,8 @@ export function LiveProductionMonitor({
             </div>
           ) : null}
 
-          <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-            <div className="border-b border-slate-100 px-4 py-4">
+          <div className="rounded-2xl border border-slate-200 bg-white shadow-sm transition-colors duration-200 hover:border-slate-300">
+            <div className={inModal ? 'border-b border-slate-100 px-3 py-3' : 'border-b border-slate-100 px-4 py-4'}>
               <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">
                 Four-reference conversion check
               </p>
@@ -930,7 +1232,7 @@ export function LiveProductionMonitor({
               </p>
             </div>
 
-            <div className="grid gap-4 p-4 lg:grid-cols-2">
+            <div className={`grid ${inModal ? 'gap-3 p-3' : 'gap-4 p-4'} lg:grid-cols-2`}>
               {selectedChecks.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 px-4 py-5 text-sm text-slate-500 lg:col-span-2">
                   Conversion checks will appear here after the job is completed with closing weights and actual
@@ -940,7 +1242,7 @@ export function LiveProductionMonitor({
                 selectedChecks.map((check) => (
                   <div
                     key={check.id}
-                    className={`rounded-2xl border p-4 text-sm shadow-sm ${alertTone(check.alertState)}`}
+                    className={`rounded-2xl border p-4 text-sm shadow-sm transition-all duration-200 hover:-translate-y-[1px] hover:shadow ${alertTone(check.alertState)}`}
                   >
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
@@ -1003,7 +1305,7 @@ export function LiveProductionMonitor({
             </div>
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-3">
+          <div className={`grid ${inModal ? 'gap-3' : 'gap-4'} lg:grid-cols-3`}>
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
               <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Planned</p>
               <p className="mt-1 text-2xl font-black text-[#134e4a]">{formatMeters(selectedJob.plannedMeters)}</p>

@@ -8,6 +8,8 @@ import { apiFetch } from '../../lib/apiBase';
 import { downloadPayrollTreasuryPack } from '../../lib/hrDownload';
 import { formatNgn } from '../../hr/hrFormat';
 import HrCapsLoading from './hrCapsLoading';
+import { statusChipClass } from '../../hr/hrFormat';
+import { HrOpsToolbar, HrSectionCard } from './hrUx';
 
 export default function HrPayroll() {
   const { caps } = useHrWorkspace();
@@ -161,13 +163,13 @@ export default function HrPayroll() {
     <>
       <PageHeader
         title="Payroll runs"
-        subtitle="Draft → recompute → lock for treasury export → mark paid when complete."
+        subtitle="Draft → recompute → lock for treasury export → mark paid when complete. Staff files can set individual PAYE and pension; lines show effective % after recompute."
         actions={
           <button
             type="button"
             onClick={() => load()}
             disabled={busy}
-            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black uppercase text-[#7028e6] disabled:opacity-50"
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black uppercase text-[#134e4a] disabled:opacity-50"
           >
             <RefreshCw size={14} className={busy ? 'animate-spin' : ''} />
             Refresh
@@ -175,9 +177,39 @@ export default function HrPayroll() {
         }
       />
       <MainPanel>
+        <HrOpsToolbar
+          left={
+            <>
+              <span className={`rounded px-2 py-1 text-[10px] font-bold ${statusChipClass('draft')}`}>1 Draft</span>
+              <span className={`rounded px-2 py-1 text-[10px] font-bold ${statusChipClass('hr_review', 'bg-amber-100 text-amber-900')}`}>2 Recompute</span>
+              <span className={`rounded px-2 py-1 text-[10px] font-bold ${statusChipClass('locked')}`}>3 Lock</span>
+              <span className={`rounded px-2 py-1 text-[10px] font-bold ${statusChipClass('paid')}`}>4 Pay</span>
+            </>
+          }
+          right={
+            <form onSubmit={createRun} className="flex flex-wrap items-end gap-2">
+              <label className="text-xs font-bold text-slate-700">
+                Period
+                <input
+                  className="ml-2 w-28 rounded-lg border border-slate-200 px-2 py-1 text-xs"
+                  value={period}
+                  onChange={(e) => setPeriod(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={busy}
+                className="rounded-lg bg-[#134e4a] px-3 py-1.5 text-[11px] font-black uppercase text-white disabled:opacity-50"
+              >
+                Create draft
+              </button>
+            </form>
+          }
+        />
+        <HrSectionCard title="Run creation + links">
         <form
           onSubmit={createRun}
-          className="mb-8 flex flex-wrap items-end gap-3 rounded-2xl border border-slate-200/90 bg-white p-4 shadow-[var(--shadow-zarewa-card)]"
+          className="mb-2 flex flex-wrap items-end gap-3 rounded-2xl border border-slate-200/90 bg-white p-4 shadow-[var(--shadow-zarewa-card)]"
         >
           <label className="text-xs font-bold text-slate-700">
             New period (YYYYMM)
@@ -190,7 +222,7 @@ export default function HrPayroll() {
           <button
             type="submit"
             disabled={busy}
-            className="rounded-xl bg-[#7028e6] px-4 py-2 text-[11px] font-black uppercase text-white disabled:opacity-50"
+            className="rounded-xl bg-[#134e4a] px-4 py-2 text-[11px] font-black uppercase text-white disabled:opacity-50"
           >
             Create draft
           </button>
@@ -198,7 +230,7 @@ export default function HrPayroll() {
             to="/hr/salary-welfare"
             className="text-[11px] font-black uppercase text-slate-500 no-underline hover:underline"
           >
-            Salary &amp; welfare →
+            Salary &amp; benefits →
           </Link>
           <Link
             to="/hr/time"
@@ -207,6 +239,7 @@ export default function HrPayroll() {
             Attendance →
           </Link>
         </form>
+        </HrSectionCard>
 
         {runs.length === 0 ? (
           <p className="text-sm text-slate-600">No payroll runs yet. Create a draft for the period you want to pay.</p>
@@ -217,35 +250,29 @@ export default function HrPayroll() {
                 <tr>
                   <th className="px-4 py-3">Period</th>
                   <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3">Tax %</th>
-                  <th className="px-4 py-3">Pension %</th>
+                  <th className="px-4 py-3 hidden md:table-cell">Tax %</th>
+                  <th className="px-4 py-3 hidden md:table-cell">Pension %</th>
                   <th className="px-4 py-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {runs.map((r) => (
-                  <tr key={r.id} className="border-t border-slate-100 hover:bg-violet-50/40">
+                  <tr key={r.id} className="border-t border-slate-100 hover:bg-teal-50/40">
                     <td className="px-4 py-3 font-semibold text-slate-900">{r.periodYyyymm}</td>
                     <td className="px-4 py-3">
                       <span
-                        className={`inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-bold capitalize ${
-                          r.status === 'paid'
-                            ? 'bg-emerald-100 text-emerald-900'
-                            : r.status === 'locked'
-                              ? 'bg-amber-100 text-amber-950'
-                              : 'bg-slate-100 text-slate-700'
-                        }`}
+                        className={`inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-bold capitalize ${statusChipClass(r.status)}`}
                       >
                         {r.status}
                       </span>
                     </td>
-                    <td className="px-4 py-3 tabular-nums">{r.taxPercent}</td>
-                    <td className="px-4 py-3 tabular-nums">{r.pensionPercent}</td>
+                    <td className="px-4 py-3 tabular-nums hidden md:table-cell">{r.taxPercent}</td>
+                    <td className="px-4 py-3 tabular-nums hidden md:table-cell">{r.pensionPercent}</td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex flex-wrap items-center justify-end gap-2">
                         <button
                           type="button"
-                          className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-black uppercase text-[#7028e6]"
+                          className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-black uppercase text-[#134e4a]"
                           onClick={() => openDetail(r.id)}
                         >
                           View lines
@@ -254,7 +281,7 @@ export default function HrPayroll() {
                           <>
                             <button
                               type="button"
-                              className="text-[11px] font-black uppercase text-[#7028e6] disabled:opacity-50"
+                              className="text-[11px] font-black uppercase text-[#134e4a] disabled:opacity-50"
                               disabled={busy}
                               onClick={() => recompute(r.id)}
                             >
@@ -321,14 +348,14 @@ export default function HrPayroll() {
 
       <ModalFrame isOpen={Boolean(detailRun)} onClose={() => setDetailRun(null)}>
         <div className="w-full max-w-4xl rounded-[28px] border border-slate-200/90 bg-white shadow-xl overflow-hidden">
-          <div className="flex items-start justify-between gap-4 border-b border-slate-100 bg-gradient-to-r from-violet-600 to-violet-700 px-6 py-4 text-white">
+          <div className="flex items-start justify-between gap-4 border-b border-slate-100 bg-gradient-to-r from-[#134e4a] to-[#0f3d39] px-6 py-4 text-white">
             <div>
-              <p className="text-[10px] font-black uppercase tracking-wider text-violet-200">Payroll run</p>
+              <p className="text-[10px] font-black uppercase tracking-wider text-teal-100">Payroll run</p>
               <h2 className="text-lg font-black">
                 {detailLoading ? 'Loading…' : detailRun?.periodYyyymm || '—'}
               </h2>
               {!detailLoading && detailRun ? (
-                <p className="mt-1 text-xs text-violet-100 capitalize">Status: {detailRun.status}</p>
+                <p className="mt-1 text-xs text-teal-100 capitalize">Status: {detailRun.status}</p>
               ) : null}
             </div>
             <button
@@ -346,11 +373,13 @@ export default function HrPayroll() {
               <p className="text-sm text-slate-500">Loading lines…</p>
             ) : detailRun?.status === 'draft' ? (
               <div className="mb-6 rounded-xl border border-slate-200 bg-slate-50/80 p-4">
-                <h3 className="flex items-center gap-2 text-xs font-black uppercase text-[#7028e6]">
+                <h3 className="flex items-center gap-2 text-xs font-black uppercase text-[#134e4a]">
                   <Pencil size={14} />
                   Draft settings
                 </h3>
-                <p className="mt-1 text-xs text-slate-500">Adjust tax and pension before recomputing lines.</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  These are defaults for the whole run. Individual staff can override PAYE / pension on their HR file.
+                </p>
                 <div className="mt-4 grid gap-3 sm:grid-cols-3">
                   <label className="text-xs font-bold text-slate-700">
                     Tax %
@@ -385,7 +414,7 @@ export default function HrPayroll() {
                   type="button"
                   disabled={busy}
                   onClick={saveDraftMeta}
-                  className="mt-3 rounded-xl bg-[#7028e6] px-4 py-2 text-[11px] font-black uppercase text-white disabled:opacity-50"
+                  className="mt-3 rounded-xl bg-[#134e4a] px-4 py-2 text-[11px] font-black uppercase text-white disabled:opacity-50"
                 >
                   Save settings
                 </button>
@@ -394,9 +423,9 @@ export default function HrPayroll() {
 
             {!detailLoading && detailRun ? (
               <div className="mb-4 flex flex-wrap gap-4 text-sm">
-                <div className="rounded-xl border border-violet-100 bg-violet-50/50 px-4 py-2">
-                  <span className="text-[10px] font-black uppercase text-violet-800">Employees</span>
-                  <p className="font-black tabular-nums text-violet-950">{totals.count}</p>
+                <div className="rounded-xl border border-teal-100 bg-teal-50/50 px-4 py-2">
+                  <span className="text-[10px] font-black uppercase text-[#134e4a]">Employees</span>
+                  <p className="font-black tabular-nums text-[#134e4a]">{totals.count}</p>
                 </div>
                 <div className="rounded-xl border border-slate-200 px-4 py-2">
                   <span className="text-[10px] font-black uppercase text-slate-500">Total gross</span>
@@ -404,7 +433,7 @@ export default function HrPayroll() {
                 </div>
                 <div className="rounded-xl border border-slate-200 px-4 py-2">
                   <span className="text-[10px] font-black uppercase text-slate-500">Total net</span>
-                  <p className="font-black tabular-nums text-[#7028e6]">₦{formatNgn(totals.net)}</p>
+                  <p className="font-black tabular-nums text-[#134e4a]">₦{formatNgn(totals.net)}</p>
                 </div>
               </div>
             ) : null}
@@ -417,7 +446,9 @@ export default function HrPayroll() {
                       <th className="px-3 py-2">Name</th>
                       <th className="px-3 py-2 text-right">Gross</th>
                       <th className="px-3 py-2 text-right">Attend.</th>
-                      <th className="px-3 py-2 text-right">Loans</th>
+                      <th className="px-3 py-2 text-right">Other ded.</th>
+                      <th className="px-3 py-2 text-right hidden sm:table-cell">PAYE %</th>
+                      <th className="px-3 py-2 text-right hidden sm:table-cell">Pen. %</th>
                       <th className="px-3 py-2 text-right">Tax</th>
                       <th className="px-3 py-2 text-right">Pension</th>
                       <th className="px-3 py-2 text-right">Net</th>
@@ -426,7 +457,15 @@ export default function HrPayroll() {
                   <tbody>
                     {detailLines.map((l) => (
                       <tr key={l.userId} className="border-t border-slate-100">
-                        <td className="px-3 py-2 font-medium text-slate-800">{l.displayName}</td>
+                        <td className="px-3 py-2 font-medium text-slate-800">
+                          {l.userId ? (
+                            <Link to={`/hr/staff/${encodeURIComponent(l.userId)}`} className="text-[#134e4a] hover:underline">
+                              {l.displayName}
+                            </Link>
+                          ) : (
+                            l.displayName
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-right tabular-nums">₦{formatNgn(l.grossNgn)}</td>
                         <td className="px-3 py-2 text-right tabular-nums text-amber-900">
                           ₦{formatNgn(l.attendanceDeductionNgn)}
@@ -434,9 +473,15 @@ export default function HrPayroll() {
                         <td className="px-3 py-2 text-right tabular-nums text-rose-800">
                           ₦{formatNgn(l.otherDeductionNgn)}
                         </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-600 hidden sm:table-cell">
+                          {l.impliedTaxPercent != null ? `${l.impliedTaxPercent}%` : '—'}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-slate-600 hidden sm:table-cell">
+                          {l.impliedPensionPercent != null ? `${l.impliedPensionPercent}%` : '—'}
+                        </td>
                         <td className="px-3 py-2 text-right tabular-nums">₦{formatNgn(l.taxNgn)}</td>
                         <td className="px-3 py-2 text-right tabular-nums">₦{formatNgn(l.pensionNgn)}</td>
-                        <td className="px-3 py-2 text-right font-semibold tabular-nums text-[#7028e6]">
+                        <td className="px-3 py-2 text-right font-semibold tabular-nums text-[#134e4a]">
                           ₦{formatNgn(l.netNgn)}
                         </td>
                       </tr>

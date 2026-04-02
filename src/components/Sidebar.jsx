@@ -80,7 +80,7 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
       icon: <Users size={18} />,
       label: 'HR',
       path: '/hr',
-      active: pathMatches(p, '/hr'),
+      active: pathMatches(p, '/hr') || pathMatches(p, '/hr-next'),
       visible: ws?.canAccessModule?.('hr') ?? true,
     },
     {

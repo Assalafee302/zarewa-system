@@ -166,6 +166,18 @@ export function runMigrations(db) {
   if (!productionJobs.has('manager_review_required')) {
     db.exec(`ALTER TABLE production_jobs ADD COLUMN manager_review_required INTEGER NOT NULL DEFAULT 0`);
   }
+  if (!productionJobs.has('manager_review_signed_at_iso')) {
+    db.exec(`ALTER TABLE production_jobs ADD COLUMN manager_review_signed_at_iso TEXT`);
+  }
+  if (!productionJobs.has('manager_review_signed_by_user_id')) {
+    db.exec(`ALTER TABLE production_jobs ADD COLUMN manager_review_signed_by_user_id TEXT`);
+  }
+  if (!productionJobs.has('manager_review_signed_by_name')) {
+    db.exec(`ALTER TABLE production_jobs ADD COLUMN manager_review_signed_by_name TEXT`);
+  }
+  if (!productionJobs.has('manager_review_remark')) {
+    db.exec(`ALTER TABLE production_jobs ADD COLUMN manager_review_remark TEXT`);
+  }
 
   const refunds = tableCols('customer_refunds');
   if (!refunds.has('suggested_lines_json')) {
@@ -225,6 +237,7 @@ export function runMigrations(db) {
       title TEXT,
       detail TEXT NOT NULL,
       created_by_name TEXT,
+      branch_id TEXT,
       FOREIGN KEY (customer_id) REFERENCES customers(customer_id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_crm_interactions_customer ON customer_crm_interactions(customer_id, at_iso DESC);
@@ -286,6 +299,10 @@ export function runMigrations(db) {
       actual_weight_kg REAL NOT NULL DEFAULT 0,
       conversion_alert_state TEXT NOT NULL DEFAULT 'Pending',
       manager_review_required INTEGER NOT NULL DEFAULT 0,
+      manager_review_signed_at_iso TEXT,
+      manager_review_signed_by_user_id TEXT,
+      manager_review_signed_by_name TEXT,
+      manager_review_remark TEXT,
       FOREIGN KEY (cutting_list_id) REFERENCES cutting_lists(id)
     );
 
@@ -423,6 +440,7 @@ export function runMigrations(db) {
       display_name TEXT NOT NULL,
       password_hash TEXT NOT NULL,
       role_key TEXT NOT NULL,
+      department TEXT NOT NULL DEFAULT 'general',
       status TEXT NOT NULL DEFAULT 'active',
       last_login_at_iso TEXT,
       created_at_iso TEXT NOT NULL
@@ -485,6 +503,7 @@ export function runMigrations(db) {
   `);
 
   migrateBranches(db);
+  migrateCoilMaterialOps(db);
   migrateWorkflowExtensions(db);
   migratePrd101ToCoilAlu(db);
   migrateMaterialTypeLabels(db);
@@ -505,6 +524,12 @@ function migrateHrStaffProfileColumns(db) {
   const hr = tableCols('hr_staff_profiles');
   if (hr.size && !hr.has('academic_qualification')) {
     db.exec(`ALTER TABLE hr_staff_profiles ADD COLUMN academic_qualification TEXT`);
+  }
+  if (hr.size && !hr.has('paye_tax_percent')) {
+    db.exec(`ALTER TABLE hr_staff_profiles ADD COLUMN paye_tax_percent REAL`);
+  }
+  if (hr.size && !hr.has('pension_percent_override')) {
+    db.exec(`ALTER TABLE hr_staff_profiles ADD COLUMN pension_percent_override REAL`);
   }
   migrateHrModule(db);
 }
@@ -537,6 +562,8 @@ function migrateHrModule(db) {
       welfare_notes TEXT,
       training_summary TEXT,
       profile_extra_json TEXT,
+      paye_tax_percent REAL,
+      pension_percent_override REAL,
       updated_at_iso TEXT,
       updated_by_user_id TEXT,
       FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE
@@ -613,6 +640,19 @@ function migrateHrModule(db) {
       created_at_iso TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS hr_daily_roll_calls (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      day_iso TEXT NOT NULL,
+      recorded_by_user_id TEXT,
+      notes TEXT,
+      rows_json TEXT NOT NULL,
+      created_at_iso TEXT NOT NULL,
+      updated_at_iso TEXT NOT NULL,
+      UNIQUE(branch_id, day_iso)
+    );
+    CREATE INDEX IF NOT EXISTS idx_hr_daily_roll_branch_day ON hr_daily_roll_calls(branch_id, day_iso);
+
     CREATE TABLE IF NOT EXISTS hr_employment_letters (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -621,6 +661,108 @@ function migrateHrModule(db) {
       issued_at_iso TEXT NOT NULL,
       issued_by_user_id TEXT,
       FOREIGN KEY (user_id) REFERENCES app_users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS hr_policy_acknowledgements (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      policy_key TEXT NOT NULL,
+      policy_version TEXT NOT NULL,
+      accepted_at_iso TEXT NOT NULL,
+      signature_name TEXT,
+      accepted_by_user_id TEXT,
+      context_json TEXT,
+      record_hash TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES app_users(id),
+      FOREIGN KEY (accepted_by_user_id) REFERENCES app_users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_hr_policy_ack_user ON hr_policy_acknowledgements(user_id, accepted_at_iso DESC);
+    CREATE INDEX IF NOT EXISTS idx_hr_policy_ack_policy ON hr_policy_acknowledgements(policy_key, policy_version);
+
+    CREATE TABLE IF NOT EXISTS hr_audit_events (
+      id TEXT PRIMARY KEY,
+      occurred_at_iso TEXT NOT NULL,
+      actor_user_id TEXT,
+      actor_display_name TEXT,
+      action TEXT NOT NULL,
+      entity_kind TEXT NOT NULL,
+      entity_id TEXT,
+      branch_id TEXT,
+      reason TEXT,
+      details_json TEXT,
+      correlation_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_hr_audit_events_time ON hr_audit_events(occurred_at_iso DESC);
+
+    CREATE TABLE IF NOT EXISTS hr_leave_balances (
+      user_id TEXT NOT NULL,
+      leave_type TEXT NOT NULL,
+      period_yyyymm TEXT NOT NULL,
+      opening_days REAL NOT NULL DEFAULT 0,
+      accrued_days REAL NOT NULL DEFAULT 0,
+      used_days REAL NOT NULL DEFAULT 0,
+      adjusted_days REAL NOT NULL DEFAULT 0,
+      closing_days REAL NOT NULL DEFAULT 0,
+      updated_at_iso TEXT NOT NULL,
+      PRIMARY KEY (user_id, leave_type, period_yyyymm),
+      FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS hr_leave_accrual_ledger (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      leave_type TEXT NOT NULL,
+      period_yyyymm TEXT NOT NULL,
+      movement_kind TEXT NOT NULL,
+      days REAL NOT NULL,
+      reference_id TEXT,
+      note TEXT,
+      created_at_iso TEXT NOT NULL,
+      created_by_user_id TEXT,
+      FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS hr_attendance_events (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      branch_id TEXT NOT NULL,
+      event_date_iso TEXT NOT NULL,
+      status TEXT NOT NULL,
+      minutes_late INTEGER NOT NULL DEFAULT 0,
+      source_kind TEXT NOT NULL DEFAULT 'upload',
+      source_id TEXT,
+      created_at_iso TEXT NOT NULL,
+      created_by_user_id TEXT,
+      FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS hr_request_leave (
+      request_id TEXT PRIMARY KEY,
+      leave_type TEXT,
+      start_date_iso TEXT,
+      end_date_iso TEXT,
+      days_requested REAL,
+      handover_to TEXT,
+      contact_during_leave TEXT,
+      FOREIGN KEY (request_id) REFERENCES hr_requests(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS hr_request_loan (
+      request_id TEXT PRIMARY KEY,
+      amount_ngn INTEGER,
+      repayment_months INTEGER,
+      deduction_per_month_ngn INTEGER,
+      purpose TEXT,
+      FOREIGN KEY (request_id) REFERENCES hr_requests(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS hr_request_discipline (
+      request_id TEXT PRIMARY KEY,
+      case_type TEXT,
+      severity TEXT,
+      incident_date_iso TEXT,
+      summary TEXT,
+      FOREIGN KEY (request_id) REFERENCES hr_requests(id) ON DELETE CASCADE
     );
   `);
 }
@@ -642,6 +784,20 @@ function migrateUserProfileAndPasswordReset(db) {
   }
   if (users.size && !users.has('avatar_url')) {
     db.exec(`ALTER TABLE app_users ADD COLUMN avatar_url TEXT`);
+  }
+  if (users.size && !users.has('department')) {
+    db.exec(`ALTER TABLE app_users ADD COLUMN department TEXT NOT NULL DEFAULT 'general'`);
+    db.prepare(
+      `UPDATE app_users SET department = CASE role_key
+        WHEN 'admin' THEN 'it'
+        WHEN 'finance_manager' THEN 'finance'
+        WHEN 'sales_manager' THEN 'sales'
+        WHEN 'sales_staff' THEN 'sales'
+        WHEN 'procurement_officer' THEN 'purchase'
+        WHEN 'operations_officer' THEN 'inventory'
+        WHEN 'viewer' THEN 'reports'
+        ELSE 'general' END`
+    ).run();
   }
 
   try {
@@ -704,6 +860,44 @@ function migrateWorkflowExtensions(db) {
   }
 }
 
+/** Coil split lineage + scrap SKU for off-cuts / scrap posting. */
+function migrateCoilMaterialOps(db) {
+  const tableCols = (name) => {
+    try {
+      const rows = db.prepare(`PRAGMA table_info(${name})`).all();
+      return new Set(rows.map((c) => c.name));
+    } catch {
+      return new Set();
+    }
+  };
+  const cl = tableCols('coil_lots');
+  if (cl.size && !cl.has('parent_coil_no')) {
+    db.exec(`ALTER TABLE coil_lots ADD COLUMN parent_coil_no TEXT`);
+  }
+  if (cl.size && !cl.has('material_origin_note')) {
+    db.exec(`ALTER TABLE coil_lots ADD COLUMN material_origin_note TEXT`);
+  }
+  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='products'`).get()) return;
+  if (!db.prepare(`SELECT 1 FROM products WHERE product_id = 'SCRAP-COIL'`).get()) {
+    db.prepare(
+      `INSERT INTO products (product_id, name, stock_level, unit, low_stock_threshold, reorder_qty, gauge, colour, material_type, dashboard_attrs_json, branch_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+    ).run(
+      'SCRAP-COIL',
+      'Coil scrap / off-cuts (kg)',
+      0,
+      'kg',
+      0,
+      0,
+      'Mixed',
+      'Mixed',
+      'Scrap',
+      '{}',
+      'BR-KAD'
+    );
+  }
+}
+
 /** Branches + branch_id on operational tables + session workspace columns. */
 function migrateBranches(db) {
   const tableCols = (name) => {
@@ -745,9 +939,13 @@ function migrateBranches(db) {
   const defaultBranch = 'BR-KAD';
   const addBranch = (table) => {
     const cols = tableCols(table);
-    if (!cols.size || cols.has('branch_id')) return;
-    db.exec(`ALTER TABLE ${table} ADD COLUMN branch_id TEXT`);
-    db.prepare(`UPDATE ${table} SET branch_id = ? WHERE branch_id IS NULL`).run(defaultBranch);
+    if (!cols.size) return;
+    if (!cols.has('branch_id')) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN branch_id TEXT`);
+    }
+    db.prepare(
+      `UPDATE ${table} SET branch_id = ? WHERE branch_id IS NULL OR TRIM(COALESCE(branch_id, '')) = ''`
+    ).run(defaultBranch);
   };
 
   addBranch('quotations');
@@ -760,6 +958,11 @@ function migrateBranches(db) {
   addBranch('production_jobs');
   addBranch('customer_refunds');
   addBranch('expenses');
+  addBranch('customers');
+  addBranch('customer_crm_interactions');
+  addBranch('suppliers');
+  addBranch('transport_agents');
+  addBranch('products');
 }
 
 /** Align setup material type names with product.material_type (Aluminium / Aluzinc). */
@@ -793,8 +996,8 @@ function migratePrd101ToCoilAlu(db) {
     const oldRow = db.prepare(`SELECT * FROM products WHERE product_id = 'PRD-101'`).get();
     if (!hasNew) {
       db.prepare(
-        `INSERT INTO products (product_id, name, stock_level, unit, low_stock_threshold, reorder_qty, gauge, colour, material_type, dashboard_attrs_json)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`
+        `INSERT INTO products (product_id, name, stock_level, unit, low_stock_threshold, reorder_qty, gauge, colour, material_type, dashboard_attrs_json, branch_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
       ).run(
         'COIL-ALU',
         'Aluminium coil (kg)',
@@ -805,7 +1008,8 @@ function migratePrd101ToCoilAlu(db) {
         'Per PO / coil',
         'Per PO / coil (HMB, GB, TB, …)',
         'Aluminium',
-        dashJson
+        dashJson,
+        'BR-KAD'
       );
     } else {
       const cur = db.prepare(`SELECT stock_level FROM products WHERE product_id = 'COIL-ALU'`).get();

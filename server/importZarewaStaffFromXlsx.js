@@ -29,7 +29,10 @@ function findCol(headerToKey, ...want) {
   for (const w of want) {
     const nw = normHeader(w);
     for (const [h, orig] of headerToKey) {
-      if (h === nw || h.includes(nw) || nw.includes(h)) return orig;
+      if (h === nw) return orig;
+      // Avoid matching one-letter / two-letter headers like "L" / "S".
+      if (h.length < 3 || nw.length < 3) continue;
+      if (h.includes(nw) || nw.includes(h)) return orig;
     }
   }
   return null;
@@ -83,6 +86,7 @@ function mapRoleKey(raw) {
   if (!s) return 'sales_staff';
   if (/human\s*resource|^hr\b|hr\s*admin|personnel/.test(s)) return 'hr_admin';
   if (/finance|accountant|account\s*officer/.test(s)) return 'finance_manager';
+  if (/cashier|cash\s*office/.test(s)) return 'cashier';
   if (/branch\s*manager|\bbm\b/.test(s)) return 'branch_manager';
   if (/sales\s*manager|commercial\s*manager/.test(s)) return 'sales_manager';
   if (/procurement|buyer/.test(s)) return 'procurement_officer';
@@ -103,6 +107,16 @@ function mapBranchId(raw) {
     if (id.startsWith('BR-')) return id;
   }
   return DEFAULT_BRANCH_ID;
+}
+
+function branchIdFromSectionLabel(label) {
+  const s = String(label ?? '').trim().toLowerCase();
+  if (!s) return null;
+  if (s === 'kaduna') return 'BR-KAD';
+  if (s === 'yola') return 'BR-YOL';
+  if (s === 'maiduguri') return 'BR-MAI';
+  if (s === 'jalingo') return null;
+  return null;
 }
 
 function rowIsJalingo(row, branchCol, extraCols) {
@@ -156,7 +170,45 @@ function main() {
   const wb = XLSX.readFile(file, { cellDates: true });
   const sheetName = wb.SheetNames[0];
   const sheet = wb.Sheets[sheetName];
-  const rows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+  const preview = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
+  const headerRowIdx = (() => {
+    const wantExact = new Set(
+      [
+        'full name',
+        'name',
+        'staff name',
+        'employee name',
+        'names',
+        'surname',
+      ].map(normHeader)
+    );
+    for (let i = 0; i < preview.length; i += 1) {
+      const row = preview[i];
+      if (!Array.isArray(row) || row.length === 0) continue;
+      const cells = row.map((c) => normHeader(c)).filter(Boolean);
+      if (cells.some((c) => wantExact.has(c))) {
+        return i;
+      }
+    }
+    return -1;
+  })();
+
+  if (headerRowIdx < 0) {
+    const firstNonEmpty = preview.find((r) => Array.isArray(r) && r.some((c) => String(c ?? '').trim()));
+    console.error('Could not find a header row containing a name column.');
+    console.error('Tip: ensure the sheet has a column titled like "Name" / "Full name".');
+    console.error('First non-empty row preview:', firstNonEmpty);
+    process.exit(1);
+  }
+
+  const sheetRange = sheet['!ref'] ? XLSX.utils.decode_range(sheet['!ref']) : null;
+  const rows = XLSX.utils.sheet_to_json(sheet, {
+    defval: '',
+    raw: false,
+    range: sheetRange
+      ? { s: { r: headerRowIdx, c: 0 }, e: sheetRange.e }
+      : { s: { r: headerRowIdx, c: 0 }, e: { r: headerRowIdx + 5000, c: 50 } },
+  });
   if (!rows.length) {
     console.error('No data rows in first sheet:', sheetName);
     process.exit(1);
@@ -166,13 +218,17 @@ function main() {
   const headerToKey = new Map(firstKeys.map((k) => [normHeader(k), k]));
 
   const colName = findCol(headerToKey, 'full name', 'name', 'staff name', 'employee name', 'names', 'surname');
-  const colEmp = findCol(headerToKey, 'employee no', 'emp no', 'staff id', 'id', 'employee id', 'code');
-  const colBranch = findCol(headerToKey, 'branch', 'location', 'site', 'office', 'station');
+  const colEmp = findCol(headerToKey, 'employee no', 'emp no', 'staff no', 'staff id', 'employee id');
+  const colBranch = findCol(headerToKey, 'branch', 'location', 'site', 'station');
+  const colOffice = findCol(headerToKey, 'office');
   const colDept = findCol(headerToKey, 'department', 'dept', 'unit');
   const colJob = findCol(headerToKey, 'job title', 'position', 'designation', 'role title');
   const colRole = findCol(headerToKey, 'app role', 'system role', 'role key', 'user role', 'role');
   const colBase = findCol(
     headerToKey,
+    'propsed salary',
+    'proposed salary',
+    'current salary',
     'basic salary',
     'base salary',
     'monthly gross',
@@ -202,7 +258,7 @@ function main() {
     process.exit(1);
   }
 
-  const siteCols = [colBranch, findCol(headerToKey, 'region', 'area')].filter(Boolean);
+  const siteCols = [colBranch, colOffice, findCol(headerToKey, 'region', 'area')].filter(Boolean);
 
   let created = 0;
   let updated = 0;
@@ -216,10 +272,25 @@ function main() {
       .map((r) => r.u)
   );
 
+  let currentSectionBranchId = DEFAULT_BRANCH_ID;
+
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     const displayName = String(row[colName] ?? '').trim();
     if (!displayName || /^total|^subtotal|^grand/i.test(displayName)) {
+      skipped++;
+      continue;
+    }
+
+    const sectionBranch = branchIdFromSectionLabel(displayName);
+    if (sectionBranch === null && displayName.trim().toLowerCase() === 'jalingo') {
+      console.log(`Skip section (Jalingo): ${displayName}`);
+      skipped++;
+      continue;
+    }
+    if (sectionBranch) {
+      currentSectionBranchId = sectionBranch;
+      console.log(`Section: ${displayName} → ${currentSectionBranchId}`);
       skipped++;
       continue;
     }
@@ -232,7 +303,8 @@ function main() {
 
     const employeeNo = colEmp ? String(row[colEmp] ?? '').trim() : '';
     const branchRaw = colBranch ? String(row[colBranch] ?? '').trim() : '';
-    const branchId = mapBranchId(branchRaw);
+    const mapped = branchRaw ? mapBranchId(branchRaw) : null;
+    const branchId = mapped || currentSectionBranchId || DEFAULT_BRANCH_ID;
     if (branchId == null) {
       console.log(`Skip (Jalingo branch text): ${displayName}`);
       skipped++;
@@ -245,7 +317,8 @@ function main() {
     const transport = colTrans ? parseMoney(row[colTrans]) : 0;
     const department = colDept ? String(row[colDept] ?? '').trim() : '';
     const jobTitle = colJob ? String(row[colJob] ?? '').trim() : '';
-    const roleKey = mapRoleKey(colRole ? row[colRole] : jobTitle);
+    const officeTitle = colOffice ? String(row[colOffice] ?? '').trim() : '';
+    const roleKey = mapRoleKey(colRole ? row[colRole] : officeTitle || jobTitle);
     const dateJoinedIso = colJoined ? parseDateIso(row[colJoined]) : '';
     const academicQualification = colQual ? String(row[colQual] ?? '').trim() : '';
     const minimumQualification = colMinQual ? String(row[colMinQual] ?? '').trim() : '';
@@ -260,7 +333,11 @@ function main() {
       }
       username = u;
     }
-    username = username.toLowerCase();
+    username = username
+      .toLowerCase()
+      .replace(/\s+/g, '.')
+      .replace(/\.+/g, '.')
+      .replace(/^\.+|\.+$/g, '');
     if (!username || username.length < 2) {
       errors.push({ row: i + 2, displayName, error: 'Bad username' });
       continue;
@@ -291,6 +368,8 @@ function main() {
     }
 
     if (existingByEmp?.user_id) {
+      // Keep app role in sync with the salary register.
+      db.prepare(`UPDATE app_users SET role_key = ? WHERE id = ?`).run(roleKey, existingByEmp.user_id);
       const r = upsertHrStaffProfile(db, actorUserId, {
         userId: existingByEmp.user_id,
         ...profilePayload,
@@ -301,6 +380,8 @@ function main() {
     }
 
     if (existingByUser?.id) {
+      // Keep app role in sync with the salary register.
+      db.prepare(`UPDATE app_users SET role_key = ? WHERE id = ?`).run(roleKey, existingByUser.id);
       const r = upsertHrStaffProfile(db, actorUserId, {
         userId: existingByUser.id,
         ...profilePayload,

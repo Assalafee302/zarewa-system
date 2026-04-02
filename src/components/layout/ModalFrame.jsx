@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion';
  * Full-viewport modal shell rendered via Radix Portal.
  * Handles accessible focus-trapping, escape-to-close, and Framer Motion layout transitions.
  */
-export function ModalFrame({ isOpen, onClose, children }) {
+export function ModalFrame({ isOpen, onClose, children, title = 'Dialog', description }) {
   return (
     <DialogPrimitive.Root open={isOpen} onOpenChange={(open) => { if (!open) onClose?.(); }}>
       <AnimatePresence>
@@ -23,6 +23,10 @@ export function ModalFrame({ isOpen, onClose, children }) {
             </DialogPrimitive.Overlay>
             <DialogPrimitive.Content asChild>
               <div className="fixed inset-0 z-[1060] flex items-start justify-center sm:items-center px-4 py-10 sm:px-6 sm:py-12 overflow-y-auto overscroll-contain outline-none">
+                <DialogPrimitive.Title className="sr-only">{title}</DialogPrimitive.Title>
+                <DialogPrimitive.Description className="sr-only">
+                  {description ?? 'Modal dialog content.'}
+                </DialogPrimitive.Description>
                 <motion.div
                   initial={{ opacity: 0, scale: 0.96, y: 20 }}
                   animate={{ opacity: 1, scale: 1, y: 0 }}

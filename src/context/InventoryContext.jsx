@@ -7,10 +7,6 @@ import React, {
   useMemo,
   useState,
 } from 'react';
-import {
-  INVENTORY_PRODUCTS_MOCK,
-  PURCHASE_ORDERS_MOCK,
-} from '../Data/mockData';
 import { apiFetch } from '../lib/apiBase';
 import { useWorkspace } from './WorkspaceContext';
 
@@ -31,7 +27,7 @@ function nextPoId(list) {
   return `PO-2026-${String(n).padStart(3, '0')}`;
 }
 
-function normalizePoLine(l, idx, catalog = INVENTORY_PRODUCTS_MOCK) {
+function normalizePoLine(l, idx, catalog = []) {
   const p = catalog.find((x) => x.productID === l.productID);
   const kg = Number(l.qtyOrdered) || 0;
   const perKg =
@@ -56,7 +52,7 @@ function normalizePoLine(l, idx, catalog = INVENTORY_PRODUCTS_MOCK) {
   };
 }
 
-function normalizePurchaseOrder(po) {
+function normalizePurchaseOrder(po, catalog = []) {
   return {
     ...po,
     transportAgentId: po.transportAgentId ?? '',
@@ -68,7 +64,7 @@ function normalizePurchaseOrder(po) {
     transportPaid: Boolean(po.transportPaid),
     transportPaidAtISO: po.transportPaidAtISO ?? '',
     supplierPaidNgn: Number(po.supplierPaidNgn) || 0,
-    lines: po.lines.map((l, i) => normalizePoLine(l, i)),
+    lines: po.lines.map((l, i) => normalizePoLine(l, i, catalog)),
   };
 }
 
@@ -83,12 +79,8 @@ function findPoLine(po, entry) {
 
 export function InventoryProvider({ children }) {
   const ws = useWorkspace();
-  const [products, setProducts] = useState(() =>
-    INVENTORY_PRODUCTS_MOCK.map((p) => ({ ...p }))
-  );
-  const [purchaseOrders, setPurchaseOrders] = useState(() =>
-    PURCHASE_ORDERS_MOCK.map((po) => clonePo(normalizePurchaseOrder(po)))
-  );
+  const [products, setProducts] = useState([]);
+  const [purchaseOrders, setPurchaseOrders] = useState([]);
   const [movements, setMovements] = useState([]);
   const [coilLots, setCoilLots] = useState([]);
   const [wipByProduct, setWipByProduct] = useState({});
@@ -96,10 +88,20 @@ export function InventoryProvider({ children }) {
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     const s = ws?.snapshot;
-    if (!s) return;
-    if (s.products?.length) setProducts(s.products.map((p) => ({ ...p })));
-    if (s.purchaseOrders?.length) {
-      setPurchaseOrders(s.purchaseOrders.map((po) => clonePo(normalizePurchaseOrder(po))));
+    if (!s) {
+      setProducts([]);
+      setPurchaseOrders([]);
+      setMovements([]);
+      setCoilLots([]);
+      setWipByProduct({});
+      return;
+    }
+    if (Array.isArray(s.products)) {
+      setProducts(s.products.map((p) => ({ ...p })));
+    }
+    if (Array.isArray(s.purchaseOrders)) {
+      const catalog = Array.isArray(s.products) ? s.products : [];
+      setPurchaseOrders(s.purchaseOrders.map((po) => clonePo(normalizePurchaseOrder(po, catalog))));
     }
     if (Array.isArray(s.movements)) {
       setMovements(s.movements.map((m) => ({ ...m })));
@@ -126,6 +128,8 @@ export function InventoryProvider({ children }) {
           supplierID: lot.supplierID,
           supplierName: lot.supplierName,
           receivedAtISO: lot.receivedAtISO,
+          parentCoilNo: lot.parentCoilNo ?? '',
+          materialOriginNote: lot.materialOriginNote ?? '',
         }))
       );
     }
@@ -177,7 +181,8 @@ export function InventoryProvider({ children }) {
               unitPriceNgn: l.unitPriceNgn ?? l.unitPricePerKgNgn,
               qtyReceived: 0,
             },
-            idx
+            idx,
+            products
           )
         );
       if (!normalizedLines.length) return { ok: false, error: 'Add at least one valid line.' };
@@ -217,25 +222,28 @@ export function InventoryProvider({ children }) {
       setPurchaseOrders((prev) => {
         const poID = nextPoId(prev);
         createdId = poID;
-        const row = normalizePurchaseOrder({
-          poID,
-          supplierID,
-          supplierName,
-          orderDateISO: orderDateISO || new Date().toISOString().slice(0, 10),
-          expectedDeliveryISO: expectedDeliveryISO || '',
-          status,
-          invoiceNo: '',
-          invoiceDateISO: '',
-          deliveryDateISO: '',
-          transportAgentId: '',
-          transportAgentName: '',
-          transportReference: '',
-          transportNote: '',
-          transportPaid: false,
-          transportPaidAtISO: '',
-          supplierPaidNgn: 0,
-          lines: normalizedLines,
-        });
+        const row = normalizePurchaseOrder(
+          {
+            poID,
+            supplierID,
+            supplierName,
+            orderDateISO: orderDateISO || new Date().toISOString().slice(0, 10),
+            expectedDeliveryISO: expectedDeliveryISO || '',
+            status,
+            invoiceNo: '',
+            invoiceDateISO: '',
+            deliveryDateISO: '',
+            transportAgentId: '',
+            transportAgentName: '',
+            transportReference: '',
+            transportNote: '',
+            transportPaid: false,
+            transportPaidAtISO: '',
+            supplierPaidNgn: 0,
+            lines: normalizedLines,
+          },
+          products
+        );
         return [row, ...prev];
       });
       appendMovement({
@@ -245,7 +253,7 @@ export function InventoryProvider({ children }) {
       });
       return { ok: true, poID: createdId };
     },
-    [appendMovement, ws]
+    [appendMovement, products, ws]
   );
 
   const linkTransportToPurchaseOrder = useCallback(
@@ -616,11 +624,11 @@ export function InventoryProvider({ children }) {
   );
 
   const adjustStock = useCallback(
-    async (productID, type, qty, reasonCode, note, dateISO) => {
+    async (productID, type, qty, reasonCode, note, dateISO, opts = {}) => {
       const q = Number(qty);
       if (Number.isNaN(q) || q <= 0) return { ok: false, error: 'Invalid quantity.' };
       if (ws?.canMutate) {
-        const { ok, data } = await apiFetch('/api/inventory/adjust', {
+        const { ok, status, data } = await apiFetch('/api/inventory/adjust', {
           method: 'POST',
           body: JSON.stringify({
             productID,
@@ -629,8 +637,17 @@ export function InventoryProvider({ children }) {
             reasonCode,
             note,
             dateISO: dateISO || new Date().toISOString().slice(0, 10),
+            acknowledgeCoilSkuDrift: Boolean(opts.acknowledgeCoilSkuDrift),
           }),
         });
+        if (status === 409 && data?.code === 'COIL_SKU_DRIFT') {
+          return {
+            ok: false,
+            code: data.code,
+            error: data?.error || 'Coil lots exist for this SKU.',
+            coilLotCount: data?.coilLotCount,
+          };
+        }
         if (!ok || !data?.ok) {
           return { ok: false, error: data?.error || 'Adjustment failed on server.' };
         }

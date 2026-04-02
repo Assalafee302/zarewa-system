@@ -1,8 +1,42 @@
 import React from 'react';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { InventoryProvider, useInventory } from './InventoryContext.jsx';
+
+const MOCK_WS = {
+  canMutate: false,
+  snapshot: {
+    products: [{ productID: 'P-TEST-1', name: 'Test Coil', stockLevel: 50 }],
+    purchaseOrders: [
+      {
+        poID: 'PO-TEST-1',
+        supplierID: 'SUP-1',
+        supplierName: 'Supplier',
+        orderDateISO: '2026-03-01',
+        expectedDeliveryISO: '2026-03-05',
+        status: 'In Transit',
+        lines: [
+          {
+            lineKey: 'L1-P-TEST-1',
+            productID: 'P-TEST-1',
+            productName: 'Test Coil',
+            qtyOrdered: 200,
+            qtyReceived: 0,
+            unitPriceNgn: 1000,
+          },
+        ],
+      },
+    ],
+    movements: [],
+    coilLots: [],
+    wipByProduct: {},
+  },
+};
+
+vi.mock('./WorkspaceContext', () => ({
+  useWorkspace: () => MOCK_WS,
+}));
 
 /** Minimal harness: receive one line on first in-transit PO */
 function ReceiveHarness() {

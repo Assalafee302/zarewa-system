@@ -1,19 +1,9 @@
 import { test, expect } from '@playwright/test';
-
-async function signIn(page, username, password) {
-  await page.goto('/');
-  await expect(page.getByRole('heading', { name: /open your workspace/i })).toBeVisible({
-    timeout: 15_000,
-  });
-  await page.getByLabel('Username').fill(username);
-  await page.getByLabel('Password').fill(password);
-  await page.getByRole('button', { name: /enter workspace/i }).click();
-  await expect(page.getByRole('navigation', { name: 'Modules' })).toBeVisible({ timeout: 15_000 });
-}
+import { signInViaApi } from './helpers/auth';
 
 test.describe('Role-based access (API + UI)', () => {
   test('viewer: customers API forbidden; reports summary allowed', async ({ page }) => {
-    await signIn(page, 'viewer', 'Viewer@123456!');
+    await signInViaApi(page, 'viewer', 'Viewer@123456!');
     const customers = await page.request.get('/api/customers');
     expect(customers.status()).toBe(403);
     const body = await customers.json();
@@ -28,20 +18,22 @@ test.describe('Role-based access (API + UI)', () => {
   });
 
   test('viewer: employment letters API forbidden', async ({ page }) => {
-    await signIn(page, 'viewer', 'Viewer@123456!');
+    await signInViaApi(page, 'viewer', 'Viewer@123456!');
     const res = await page.request.get('/api/hr/employment-letters');
     expect(res.status()).toBe(403);
   });
 
   test('viewer: Reports shows count-only overview', async ({ page }) => {
-    await signIn(page, 'viewer', 'Viewer@123456!');
+    await signInViaApi(page, 'viewer', 'Viewer@123456!');
     await page.getByRole('navigation', { name: 'Modules' }).getByRole('link', { name: 'Reports' }).click();
     await expect(page).toHaveURL(/\/reports$/);
-    await expect(page.getByText(/count-only overview/i)).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: /count-only overview/i })).toBeVisible({
+      timeout: 20_000,
+    });
   });
 
   test('procurement: customers forbidden; suppliers allowed', async ({ page }) => {
-    await signIn(page, 'procurement', 'Procure@123');
+    await signInViaApi(page, 'procurement', 'Procure@123');
     const customers = await page.request.get('/api/customers');
     expect(customers.status()).toBe(403);
 
@@ -53,7 +45,7 @@ test.describe('Role-based access (API + UI)', () => {
   });
 
   test('procurement: ledger endpoint forbidden', async ({ page }) => {
-    await signIn(page, 'procurement', 'Procure@123');
+    await signInViaApi(page, 'procurement', 'Procure@123');
     const ledger = await page.request.get('/api/ledger');
     expect(ledger.status()).toBe(403);
   });

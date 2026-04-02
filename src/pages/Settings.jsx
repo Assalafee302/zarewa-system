@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   Save,
@@ -20,138 +20,27 @@ import {
 } from 'lucide-react';
 import { PageHeader, PageShell, MainPanel, PageTabs } from '../components/layout';
 import MasterDataWorkbench from '../components/settings/MasterDataWorkbench';
-import { loadDashboardPrefs, saveDashboardPrefs } from '../lib/dashboardPrefs';
+import { mergeDashboardPrefs, persistDashboardPrefsToServer } from '../lib/dashboardPrefs';
+import { WORKSPACE_GUIDE_ENTRIES, WORKSPACE_DEPARTMENT_LABELS } from '../lib/departmentWorkspace';
 import { apiFetch, apiUrl } from '../lib/apiBase';
 import { useToast } from '../context/ToastContext';
 import { useWorkspace } from '../context/WorkspaceContext';
 
-/** Reference: how each department maps to modules in this demo app. */
-const DEPARTMENT_GUIDE = [
-  {
-    id: 'customer',
-    title: 'Customer department',
-    icon: Users,
-    primary:
-      'Owns customer relationships from first contact through post-sale service — accurate profiles and responsive follow-up.',
-    bullets: [
-      'Profiling: create and maintain customer records, terms, and tiers.',
-      'Quotations: pricing and status tracking (tight coupling with Sales workspace).',
-      'Interaction: inquiries, complaints, follow-ups (see customer dashboard timeline & notes).',
-      'Orders: align approved quotes with fulfillment via inventory and production.',
-    ],
-    links: [
-      { to: '/sales', label: 'Sales' },
-      { to: '/sales', label: 'Customers (Sales → Customers tab)', state: { focusSalesTab: 'customers' } },
-    ],
-  },
-  {
-    id: 'sales',
-    title: 'Sales department',
-    icon: ShoppingCart,
-    primary:
-      'Drives revenue — pipeline discipline, order execution, collections, and performance visibility.',
-    bullets: [
-      'Leads & pipeline: qualify prospects and register them as customers when ready.',
-      'Sales orders: quotations, cutting lists, and dispatch handoff.',
-      'Payments: receipts posted against quotations; supports partial and full settlement.',
-      'Reporting: trends and KPIs via Reports and the main dashboard.',
-    ],
-    links: [
-      { to: '/sales', label: 'Sales' },
-      { to: '/reports', label: 'Reports' },
-    ],
-  },
-  {
-    id: 'inventory',
-    title: 'Production (store)',
-    icon: Package,
-    primary:
-      'Physical stock — GRN from approved POs, coil traceability, transfers, adjustments, and alerts.',
-    bullets: [
-      'Reception: Store GRN with coil / weight / location; validates against PO open qty.',
-      'Movement: store → production transfers and finished-goods back to sellable stock.',
-      'Deliveries: dispatch board under Production → Deliveries tab.',
-      'Reporting: low stock strip, live levels in Reports.',
-    ],
-    links: [
-      { to: '/operations', label: 'Production' },
-      { to: '/operations', label: 'Deliveries (Production tab)', state: { focusOpsTab: 'deliveries' } },
-    ],
-  },
-  {
-    id: 'production',
-    title: 'Production department',
-    icon: Factory,
-    primary:
-      'Converts raw materials to finished goods — planning, consumption visibility, quality, and yield.',
-    bullets: [
-      'Planning: production queue and job IDs linked to material transfers.',
-      'Consumption: raw issue from store (WIP tracked on the Production page).',
-      'Output: finished goods receipt into FG SKUs for sales.',
-      'Efficiency: conversion and scrap narratives on dashboard / future dedicated reports.',
-    ],
-    links: [{ to: '/operations', label: 'Production' }],
-  },
-  {
-    id: 'purchase',
-    title: 'Purchase department',
-    icon: Truck,
-    primary:
-      'Sourcing and supplier performance — PO lifecycle, invoices on file, coordination with store GRN.',
-    bullets: [
-      'Suppliers: directory and transport agents (Purchases / Transportation tabs).',
-      'Purchase orders: multi-line POs, totals, Pending → Approved / Rejected; assign transport (on loading), then post to in transit (optional treasury-linked haulage) before GRN.',
-      'Invoices: supplier invoice metadata on PO; quantities finalized at store receipt.',
-      'Spend: tie-in to Finance payables for procurement cost views.',
-    ],
-    links: [
-      { to: '/procurement', label: 'Purchase' },
-      { to: '/accounts', label: 'Finance (payables)' },
-    ],
-  },
-  {
-    id: 'finance',
-    title: 'Financial / accounting',
-    icon: Landmark,
-    primary:
-      'Liquidity, AR/AP, expenses, approvals, movements, audit and bank reconciliation.',
-    bullets: [
-      'Receivables: summary from Finance sidebar; detail in Sales receipts / customer dashboards.',
-      'Payables: supplier balances and payments from bank/cash.',
-      'Expenses & requests: vouchers and approval workflow.',
-      'Control: reconciliation lines, audit checklist, reporting exports (stubs).',
-    ],
-    links: [{ to: '/accounts', label: 'Finance & accounts' }],
-  },
-  {
-    id: 'reports',
-    title: 'Reports & analytics',
-    icon: BarChart3,
-    primary:
-      'Cross-cutting insight — sales, inventory movement log, financial previews, exports.',
-    bullets: [
-      'Sales and receivables snapshots with date filters (demo scope).',
-      'Inventory overview and live movement log from Production / Procurement activity.',
-      'Financial packs (P&L, cash flow) when the ledger API is connected.',
-      'Production efficiency packs as metrics mature.',
-    ],
-    links: [{ to: '/reports', label: 'Reports' }],
-  },
-  {
-    id: 'it',
-    title: 'IT & support',
-    icon: LifeBuoy,
-    primary:
-      'Platform health, user enablement, security, and access governance.',
-    bullets: [
-      'Maintenance: uptime, releases, and environment hygiene (outside this UI demo).',
-      'Training & support: onboarding staff on each module above.',
-      'Security: authentication, roles, and audit when backend auth ships.',
-      'Demo role below previews future per-module visibility.',
-    ],
-    links: [{ to: '/settings', label: 'Settings (this page)' }],
-  },
-];
+const DEPT_GUIDE_ICONS = {
+  customer: Users,
+  sales: ShoppingCart,
+  inventory: Package,
+  production: Factory,
+  purchase: Truck,
+  finance: Landmark,
+  reports: BarChart3,
+  it: LifeBuoy,
+};
+
+const DEPARTMENT_GUIDE = WORKSPACE_GUIDE_ENTRIES.map((e) => ({
+  ...e,
+  icon: DEPT_GUIDE_ICONS[e.id] || Users,
+}));
 
 const SETTINGS_TABS = [
   { id: 'account', label: 'Account & display', icon: <User size={14} /> },
@@ -165,7 +54,7 @@ const Settings = () => {
   const { show: showToast } = useToast();
   const ws = useWorkspace();
   const [settingsTab, setSettingsTab] = useState('account');
-  const [prefs, setPrefs] = useState(loadDashboardPrefs);
+  const [prefs, setPrefs] = useState(() => mergeDashboardPrefs());
   const [passwordForm, setPasswordForm] = useState({
     currentPassword: '',
     newPassword: '',
@@ -175,6 +64,8 @@ const Settings = () => {
     periodKey: new Date().toISOString().slice(0, 7),
     reason: '',
   });
+  const [branchAudit, setBranchAudit] = useState(null);
+  const [branchAuditBusy, setBranchAuditBusy] = useState(false);
   const currentUser = ws?.session?.user;
   const permissions = ws?.permissions ?? [];
   const periodLocks = ws?.snapshot?.periodLocks ?? [];
@@ -191,10 +82,19 @@ const Settings = () => {
     procurementCatalog: [],
   };
 
-  const persist = () => {
-    saveDashboardPrefs(prefs);
-    showToast('Preferences saved. Returning to dashboard.');
-    navigate('/', { replace: true });
+  useEffect(() => {
+    setPrefs(mergeDashboardPrefs(ws?.snapshot?.dashboardPrefs));
+  }, [ws?.snapshot?.dashboardPrefs, ws?.refreshEpoch]);
+
+  const persist = async () => {
+    try {
+      await persistDashboardPrefsToServer(prefs);
+      showToast('Preferences saved. Returning to dashboard.');
+      await ws.refresh();
+      navigate('/', { replace: true });
+    } catch (e) {
+      showToast(String(e.message || e), { variant: 'error' });
+    }
   };
 
   const downloadAuditNdjson = async () => {
@@ -268,8 +168,29 @@ const Settings = () => {
 
   const showPeriodControls = Boolean(ws?.hasPermission?.('period.manage'));
   const showAuditExport = permissions.includes('*') || permissions.includes('audit.view');
+  const showBranchAudit = permissions.includes('*') || permissions.includes('settings.view');
   const governanceHasContent =
-    showPeriodControls || showAuditExport || auditLog.length > 0;
+    showPeriodControls || showAuditExport || showBranchAudit || auditLog.length > 0;
+
+  const loadBranchAudit = useCallback(async () => {
+    if (!showBranchAudit) return;
+    setBranchAuditBusy(true);
+    try {
+      const { ok, data } = await apiFetch('/api/branches/strict-audit');
+      if (!ok || !data?.ok) {
+        showToast(data?.error || 'Could not load branch integrity audit.', { variant: 'error' });
+        return;
+      }
+      setBranchAudit(data);
+    } finally {
+      setBranchAuditBusy(false);
+    }
+  }, [showBranchAudit, showToast]);
+
+  useEffect(() => {
+    if (settingsTab !== 'governance' || !showBranchAudit) return;
+    void loadBranchAudit();
+  }, [settingsTab, showBranchAudit, loadBranchAudit]);
 
   return (
     <PageShell>
@@ -295,7 +216,8 @@ const Settings = () => {
                     <Shield size={14} /> Access profile
                   </h3>
                   <p className="text-xs text-gray-500 mb-4">
-                    The UI follows the signed-in server role instead of a local demo toggle.
+                    Permissions control what you can do; workspace department drives home shortcuts and the
+                    team guide. Both come from the server.
                   </p>
                   <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
                     <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">
@@ -307,6 +229,12 @@ const Settings = () => {
                     <p className="mt-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
                       {currentUser?.roleLabel || 'No active role'}
                     </p>
+                    {currentUser?.department ? (
+                      <p className="mt-2 text-[10px] font-bold uppercase tracking-wide text-teal-800/90">
+                        Workspace dept:{' '}
+                        {WORKSPACE_DEPARTMENT_LABELS[currentUser.department] || currentUser.department}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="mt-4 flex flex-wrap gap-2">
                     {permissions.map((perm) => (
@@ -562,6 +490,70 @@ const Settings = () => {
                 </section>
               ) : null}
 
+              {showBranchAudit ? (
+                <section className="rounded-3xl border border-slate-200/90 bg-white p-6 shadow-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <h3 className="z-section-title flex items-center gap-2 mb-0">
+                      <Shield size={14} /> Branch isolation audit
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={loadBranchAudit}
+                      disabled={branchAuditBusy}
+                      className="z-btn-secondary text-xs"
+                    >
+                      {branchAuditBusy ? 'Refreshing…' : 'Refresh audit'}
+                    </button>
+                  </div>
+                  <p className="mt-2 text-xs text-slate-500">
+                    Checks branch-enabled tables for missing or invalid branch IDs.
+                  </p>
+                  {branchAudit ? (
+                    <>
+                      <div
+                        className={`mt-4 rounded-xl border px-4 py-3 text-xs ${
+                          branchAudit.strictBranchIsolationOk
+                            ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                            : 'border-red-200 bg-red-50 text-red-800'
+                        }`}
+                      >
+                        <p className="font-black uppercase tracking-[0.14em]">
+                          {branchAudit.strictBranchIsolationOk
+                            ? 'Strict branch isolation: OK'
+                            : 'Strict branch isolation: Issues found'}
+                        </p>
+                        <p className="mt-1">
+                          Missing branch IDs: {branchAudit.totals?.missingBranchIdRows ?? 0} · Invalid branch
+                          IDs: {branchAudit.totals?.invalidBranchIdRows ?? 0}
+                        </p>
+                      </div>
+                      <div className="mt-4 space-y-2 max-h-[280px] overflow-y-auto pr-1">
+                        {(branchAudit.tables || []).map((row) => (
+                          <div
+                            key={row.table}
+                            className="rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-2"
+                          >
+                            <p className="text-[11px] font-black text-slate-700">{row.table}</p>
+                            <p className="mt-1 text-[11px] text-slate-600">
+                              Missing: {row.missingBranchIdRows} · Invalid: {row.invalidBranchIdRows}
+                            </p>
+                            {Array.isArray(row.sampleIds) && row.sampleIds.length > 0 ? (
+                              <p className="mt-1 text-[10px] text-slate-500">
+                                Sample IDs: {row.sampleIds.join(', ')}
+                              </p>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="mt-4 rounded-xl border border-dashed border-slate-200 bg-slate-50/70 px-4 py-4 text-xs text-slate-500">
+                      No audit loaded yet.
+                    </div>
+                  )}
+                </section>
+              ) : null}
+
               {auditLog.length > 0 ? (
                 <section className="rounded-3xl border border-slate-200/90 bg-white p-6 shadow-sm">
                   <h3 className="z-section-title flex items-center gap-2">
@@ -599,7 +591,10 @@ const Settings = () => {
               <h3 className="z-section-title text-[#134e4a] mb-2">Department roles in Zarewa</h3>
               <p className="text-xs text-gray-500 mb-6 leading-relaxed">
                 Each team owns part of the workflow. Expand a card for responsibilities and shortcuts to the
-                right screens.
+                right screens. Access still follows permissions; workspace department only shapes defaults and
+                shortcuts. Suggested roles for new accounts are exposed in the live bootstrap payload as{' '}
+                <code className="rounded bg-slate-100 px-1 py-0.5 text-[10px]">suggestedRoleByDepartment</code>{' '}
+                for HR tooling.
               </p>
               <div className="space-y-4">
                 {DEPARTMENT_GUIDE.map((d) => {
@@ -633,9 +628,9 @@ const Settings = () => {
                           ))}
                         </ul>
                         <div className="mt-4 flex flex-wrap gap-2">
-                          {d.links.map((l) => (
+                          {d.links.map((l, li) => (
                             <Link
-                              key={`${l.to}-${l.label}`}
+                              key={`${l.to}-${l.label}-${li}`}
                               to={l.to}
                               state={l.state}
                               className="inline-flex items-center gap-1 rounded-xl border border-gray-200 bg-white px-3 py-2 text-[10px] font-black uppercase tracking-wide text-[#134e4a] hover:border-teal-200 hover:bg-teal-50/50 transition-colors"

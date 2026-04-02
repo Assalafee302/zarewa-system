@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import { createDatabase } from './db.js';
 import { createApp } from './app.js';
@@ -6,6 +6,7 @@ import { createApp } from './app.js';
 describe('Zarewa API', () => {
   let app;
   let agent;
+  let db;
 
   async function loginAs(client, username = 'admin', password = 'Admin@123') {
     const res = await client.post('/api/session/login').send({ username, password });
@@ -15,9 +16,15 @@ describe('Zarewa API', () => {
   }
 
   beforeEach(async () => {
-    app = createApp(createDatabase(':memory:'));
+    db = createDatabase(':memory:');
+    app = createApp(db);
     agent = request.agent(app);
     await loginAs(agent);
+  });
+
+  afterEach(() => {
+    db?.close();
+    db = undefined;
   });
 
   it('GET /api/health', async () => {
@@ -39,6 +46,7 @@ describe('Zarewa API', () => {
     });
     expect(loginRes.status).toBe(200);
     expect(loginRes.body.user.username).toBe('admin');
+    expect(loginRes.body.user.department).toBe('it');
 
     const signedAgent = request.agent(app);
     await loginAs(signedAgent);
@@ -58,6 +66,28 @@ describe('Zarewa API', () => {
     expect(res.body.masterData).toBeDefined();
     expect(Array.isArray(res.body.masterData.quoteItems)).toBe(true);
     expect(res.body.masterData.quoteItems.length).toBeGreaterThan(0);
+    expect(res.body.dashboardPrefs).toBeDefined();
+    expect(typeof res.body.dashboardPrefs).toBe('object');
+    expect(Array.isArray(res.body.workspaceDepartmentIds)).toBe(true);
+    expect(res.body.workspaceDepartmentIds).toContain('sales');
+    expect(res.body.suggestedRoleByDepartment?.sales).toBe('sales_staff');
+  });
+
+  it('PATCH /api/session/dashboard-prefs persists and returns on bootstrap', async () => {
+    const signedAgent = request.agent(app);
+    await loginAs(signedAgent);
+    const patch = await signedAgent.patch('/api/session/dashboard-prefs').send({
+      showCharts: false,
+      showReportsStrip: true,
+      showAlertBanner: false,
+    });
+    expect(patch.status).toBe(200);
+    expect(patch.body.ok).toBe(true);
+    expect(patch.body.dashboardPrefs.showCharts).toBe(false);
+    const boot = await signedAgent.get('/api/bootstrap');
+    expect(boot.status).toBe(200);
+    expect(boot.body.dashboardPrefs.showCharts).toBe(false);
+    expect(boot.body.dashboardPrefs.showAlertBanner).toBe(false);
   });
 
   it('GET /api/customers returns seeded customers', async () => {
@@ -137,6 +167,52 @@ describe('Zarewa API', () => {
     expect(del.body.ok).toBe(true);
     const get = await agent.get('/api/customers/CUS-DELETE-EMPTY');
     expect(get.status).toBe(404);
+  });
+
+  it('DELETE /api/customers/:id is forbidden for sales officer (sales manager only)', async () => {
+    const staff = request.agent(app);
+    await loginAs(staff, 'sales.staff', 'Sales@123');
+    const created = await staff.post('/api/customers').send({
+      customerID: 'CUS-STAFF-NODEL',
+      name: 'Staff Cannot Delete',
+    });
+    expect(created.status).toBe(201);
+    const del = await staff.delete('/api/customers/CUS-STAFF-NODEL');
+    expect(del.status).toBe(403);
+    expect(del.body.code).toBe('FORBIDDEN');
+  });
+
+  it('POST /api/customers rejects duplicate phone in branch (normalized)', async () => {
+    const res = await agent.post('/api/customers').send({
+      customerID: 'CUS-DUP-PHONE',
+      name: 'Dup Phone Test',
+      phoneNumber: '08035550142',
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('DUPLICATE_CUSTOMER_REGISTRATION');
+    expect(res.body.conflictField).toBe('phone');
+    expect(res.body.existingCustomerId).toBe('CUS-001');
+  });
+
+  it('POST /api/customers rejects duplicate email in branch', async () => {
+    const res = await agent.post('/api/customers').send({
+      customerID: 'CUS-DUP-EMAIL',
+      name: 'Dup Email Test',
+      phoneNumber: '+234 999 000 7700',
+      email: 'Musa.roofing@example.com',
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('DUPLICATE_CUSTOMER_REGISTRATION');
+    expect(res.body.conflictField).toBe('email');
+  });
+
+  it('PATCH /api/customers/:id rejects phone already used by another customer', async () => {
+    const patch = await agent.patch('/api/customers/CUS-002').send({
+      phoneNumber: '+234 803 555 0142',
+    });
+    expect(patch.status).toBe(409);
+    expect(patch.body.code).toBe('DUPLICATE_CUSTOMER_REGISTRATION');
+    expect(patch.body.conflictField).toBe('phone');
   });
 
   it('PATCH /api/bank-reconciliation/:lineId updates match status', async () => {
@@ -989,9 +1065,85 @@ describe('Zarewa API', () => {
     expect(prev.status).toBe(200);
     expect(prev.body.rows).toHaveLength(2);
     const row0 = prev.body.rows[0];
+    expect(row0.allocationId).toBeTruthy();
+    expect(prev.body.rows[1].allocationId).toBeTruthy();
     expect(row0.standardConversionKgPerM).toBeGreaterThan(0);
     expect(row0.supplierConversionKgPerM).toBeGreaterThan(0);
     expect(row0).toHaveProperty('variances');
+
+    const listAlloc = await agent.get(`/api/production-jobs/${encodeURIComponent(jobId)}/coil-allocations`);
+    expect(listAlloc.status).toBe(200);
+    const allocRows = listAlloc.body.allocations;
+    expect(allocRows).toHaveLength(2);
+    const byId = await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/conversion-preview`).send({
+      allocations: [
+        {
+          allocationId: allocRows[0].id,
+          coilNo: coilA,
+          closingWeightKg: 520,
+          metersProduced: 433,
+        },
+        {
+          allocationId: allocRows[1].id,
+          coilNo: coilB,
+          closingWeightKg: 520,
+          metersProduced: 433,
+        },
+      ],
+    });
+    expect(byId.status).toBe(200);
+    expect(byId.body.rows).toHaveLength(2);
+  });
+
+  it('coil split, scrap, and return-material update lots, lineage, and stock movements', async () => {
+    const { coilA } = await seedTwoCoilsForProduction(agent);
+    const d = '2026-03-29';
+
+    const split = await agent.post(`/api/coil-lots/${encodeURIComponent(coilA)}/split`).send({
+      splitKg: 400,
+      note: 'Off-cut line',
+      dateISO: d,
+    });
+    expect(split.status).toBe(200);
+    expect(split.body.ok).toBe(true);
+    const child = split.body.newCoilNo;
+    expect(child && String(child).length).toBeGreaterThan(3);
+
+    const boot1 = await agent.get('/api/bootstrap');
+    expect(boot1.status).toBe(200);
+    const lotA = boot1.body.coilLots.find((c) => c.coilNo === coilA);
+    const lotC = boot1.body.coilLots.find((c) => c.coilNo === child);
+    expect(lotA.qtyRemaining).toBeCloseTo(2600, 1);
+    expect(lotC.qtyRemaining).toBeCloseTo(400, 1);
+    expect(lotC.parentCoilNo).toBe(coilA);
+
+    const scrap = await agent.post(`/api/coil-lots/${encodeURIComponent(coilA)}/scrap`).send({
+      kg: 100,
+      reason: 'Damage',
+      note: 'Edge crush',
+      dateISO: d,
+      creditScrapInventory: true,
+      scrapProductID: 'SCRAP-COIL',
+    });
+    expect(scrap.status).toBe(200);
+    expect(scrap.body.ok).toBe(true);
+
+    const boot2 = await agent.get('/api/bootstrap');
+    const scrapProd = boot2.body.products.find((p) => p.productID === 'SCRAP-COIL');
+    expect(scrapProd).toBeTruthy();
+    expect(Number(scrapProd.stockLevel)).toBeGreaterThanOrEqual(99.9);
+
+    const ret = await agent.post(`/api/coil-lots/${encodeURIComponent(coilA)}/return-material`).send({
+      kg: 50,
+      reason: 'Weighbridge / count correction',
+      dateISO: d,
+    });
+    expect(ret.status).toBe(200);
+    expect(ret.body.ok).toBe(true);
+
+    const boot3 = await agent.get('/api/bootstrap');
+    const lotA2 = boot3.body.coilLots.find((c) => c.coilNo === coilA);
+    expect(lotA2.qtyRemaining).toBeCloseTo(2550, 1);
   });
 
   it('one coil can back two production jobs with separate allocations', async () => {
@@ -1156,6 +1308,189 @@ describe('Zarewa API', () => {
     expect(prev.body.rows[0].managerReviewRequired).toBe(true);
   });
 
+  it('POST allocations with append adds a coil while job is running', async () => {
+    const sup = await agent.post('/api/suppliers').send({ name: 'Append Test Sup', city: 'Test' });
+    expect(sup.status).toBe(201);
+    const mkGrn = async (coilNo, lineKey) => {
+      const po = await agent.post('/api/purchase-orders').send({
+        supplierID: sup.body.supplierID,
+        supplierName: 'Append Test Sup',
+        orderDateISO: '2026-04-01',
+        expectedDeliveryISO: '',
+        status: 'Approved',
+        lines: [
+          {
+            lineKey,
+            productID: 'COIL-ALU',
+            productName: 'Aluminium coil (kg)',
+            color: 'IV',
+            gauge: '0.24',
+            metersOffered: 2000,
+            conversionKgPerM: 5000 / 2000,
+            qtyOrdered: 5000,
+            unitPricePerKgNgn: 100,
+            unitPriceNgn: 100,
+            qtyReceived: 0,
+          },
+        ],
+      });
+      expect(po.status).toBe(201);
+      await agent.post(`/api/purchase-orders/${encodeURIComponent(po.body.poID)}/grn`).send({
+        entries: [
+          {
+            lineKey,
+            productID: 'COIL-ALU',
+            qtyReceived: 5000,
+            weightKg: 5000,
+            coilNo,
+            location: 'Bay',
+            gaugeLabel: '0.24mm',
+            materialTypeName: 'Aluminium',
+            supplierExpectedMeters: 2000,
+            supplierConversionKgPerM: 5000 / 2000,
+          },
+        ],
+        supplierID: sup.body.supplierID,
+        supplierName: 'Append Test Sup',
+      });
+    };
+    await mkGrn('CL-APPEND-A', 'L-AP-A');
+    await mkGrn('CL-APPEND-B', 'L-AP-B');
+    const cutting = await agent.post('/api/cutting-lists').send({
+      quotationRef: 'QT-2026-001',
+      customerID: 'CUS-001',
+      productID: 'FG-101',
+      productName: 'Longspan thin',
+      dateISO: '2026-04-01',
+      machineName: 'M1',
+      operatorName: 'QA',
+      lines: [{ sheets: 1, lengthM: 5 }],
+    });
+    const job = await agent.post('/api/production-jobs').send({
+      cuttingListId: cutting.body.id,
+      productID: 'FG-101',
+      productName: 'Longspan thin',
+      plannedMeters: 5,
+      plannedSheets: 1,
+      status: 'Planned',
+    });
+    const jobId = job.body.jobID;
+    await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/allocations`).send({
+      allocations: [{ coilNo: 'CL-APPEND-A', openingWeightKg: 2000 }],
+    });
+    await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/start`).send({ startedAtISO: '2026-04-01' });
+    const app = await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/allocations`).send({
+      append: true,
+      allocations: [{ coilNo: 'CL-APPEND-B', openingWeightKg: 1500 }],
+    });
+    expect(app.status).toBe(200);
+    expect(app.body.ok).toBe(true);
+    const boot = await agent.get('/api/bootstrap');
+    const coils = boot.body.productionJobCoils.filter((c) => c.jobID === jobId);
+    expect(coils.length).toBe(2);
+  });
+
+  it('PATCH manager-review-signoff records remark and clears open review flag', async () => {
+    const sup = await agent.post('/api/suppliers').send({ name: 'Signoff Supplier', city: 'Kano' });
+    expect(sup.status).toBe(201);
+    const po = await agent.post('/api/purchase-orders').send({
+      supplierID: sup.body.supplierID,
+      supplierName: 'Signoff Supplier',
+      orderDateISO: '2026-03-29',
+      expectedDeliveryISO: '',
+      status: 'Approved',
+      lines: [
+        {
+          lineKey: 'L-SO',
+          productID: 'COIL-ALU',
+          productName: 'Aluminium coil (kg)',
+          color: 'IV',
+          gauge: '0.24',
+          metersOffered: 2650,
+          conversionKgPerM: 6000 / 2650,
+          qtyOrdered: 6000,
+          unitPricePerKgNgn: 100,
+          unitPriceNgn: 100,
+          qtyReceived: 0,
+        },
+      ],
+    });
+    expect(po.status).toBe(201);
+    await agent.post(`/api/purchase-orders/${encodeURIComponent(po.body.poID)}/grn`).send({
+      entries: [
+        {
+          lineKey: 'L-SO',
+          productID: 'COIL-ALU',
+          qtyReceived: 6000,
+          weightKg: 6000,
+          coilNo: 'CL-API-SIGNOFF',
+          location: 'Bay',
+          gaugeLabel: '0.24mm',
+          materialTypeName: 'Aluminium',
+          supplierExpectedMeters: 2650,
+          supplierConversionKgPerM: 6000 / 2650,
+        },
+      ],
+      supplierID: sup.body.supplierID,
+      supplierName: 'Signoff Supplier',
+    });
+    const cutting = await agent.post('/api/cutting-lists').send({
+      quotationRef: 'QT-2026-001',
+      customerID: 'CUS-001',
+      productID: 'FG-101',
+      productName: 'Longspan thin',
+      dateISO: '2026-03-29',
+      machineName: 'M1',
+      operatorName: 'QA',
+      lines: [{ sheets: 1, lengthM: 5 }],
+    });
+    const job = await agent.post('/api/production-jobs').send({
+      cuttingListId: cutting.body.id,
+      productID: 'FG-101',
+      productName: 'Longspan thin',
+      plannedMeters: 5,
+      plannedSheets: 1,
+      status: 'Planned',
+    });
+    const jobId = job.body.jobID;
+    await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/allocations`).send({
+      allocations: [{ coilNo: 'CL-API-SIGNOFF', openingWeightKg: 5000 }],
+    });
+    await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/start`).send({ startedAtISO: '2026-03-29' });
+    const done = await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/complete`).send({
+      completedAtISO: '2026-03-29',
+      allocations: [{ coilNo: 'CL-API-SIGNOFF', closingWeightKg: 0, metersProduced: 50 }],
+    });
+    expect(done.status).toBe(200);
+    expect(done.body.managerReviewRequired).toBe(true);
+
+    const so = await agent.patch(`/api/production-jobs/${encodeURIComponent(jobId)}/manager-review-signoff`).send({
+      remark: 'Reviewed variance — acceptable scrap margin.',
+    });
+    expect(so.status).toBe(200);
+    expect(so.body.ok).toBe(true);
+    expect(so.body.managerReviewRemark).toContain('scrap');
+
+    const boot = await agent.get('/api/bootstrap');
+    const pj = boot.body.productionJobs.find((j) => j.jobID === jobId);
+    expect(pj).toBeDefined();
+    expect(pj.managerReviewRequired).toBe(false);
+    expect(pj.managerReviewSignedAtISO).toBeTruthy();
+    expect(pj.managerReviewRemark).toContain('scrap');
+
+    const dup = await agent.patch(`/api/production-jobs/${encodeURIComponent(jobId)}/manager-review-signoff`).send({
+      remark: 'Second attempt',
+    });
+    expect(dup.status).toBe(400);
+
+    const viewer = request.agent(app);
+    await loginAs(viewer, 'viewer', 'Viewer@123456!');
+    const denied = await viewer
+      .patch(`/api/production-jobs/${encodeURIComponent(jobId)}/manager-review-signoff`)
+      .send({ remark: 'Should not work' });
+    expect(denied.status).toBe(403);
+  });
+
   it('POST /api/refunds/preview returns suggested lines from inputs', async () => {
     const prev = await agent.post('/api/refunds/preview').send({
       customerID: 'CUS-001',
@@ -1254,6 +1589,18 @@ describe('Zarewa API', () => {
 
     const afterDel = await agent.get('/api/setup');
     expect(afterDel.body.masterData.colours.length).toBe(beforeCount);
+  });
+
+  it('GET /api/branches/strict-audit reports branch integrity', async () => {
+    const res = await agent.get('/api/branches/strict-audit');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(typeof res.body.strictBranchIsolationOk).toBe('boolean');
+    expect(Array.isArray(res.body.knownBranches)).toBe(true);
+    expect(Array.isArray(res.body.tables)).toBe(true);
+    expect(res.body.tables.some((t) => t.table === 'customers')).toBe(true);
+    expect(typeof res.body.totals?.missingBranchIdRows).toBe('number');
+    expect(typeof res.body.totals?.invalidBranchIdRows).toBe('number');
   });
 
   it('HR: caps, payroll recompute, treasury CSV when locked', async () => {
@@ -1389,5 +1736,139 @@ describe('Zarewa API', () => {
     const ln2 = snap2.body.approvedLoans.find((l) => l.requestId === loanId);
     expect(ln2.principalOutstandingNgn).toBe(112_500);
     expect(ln2.repaymentMonthsRemaining).toBe(1);
+  });
+
+  it('supports handbook acknowledgement and HR observability endpoints', async () => {
+    const adminAgent = request.agent(app);
+    await loginAs(adminAgent, 'admin', 'Admin@123');
+
+    const ack = await adminAgent.post('/api/hr/policy-acknowledgements').send({
+      policyKey: 'employee_handbook',
+      policyVersion: '2026.04',
+      signatureName: 'Admin User',
+      context: { channel: 'web' },
+    });
+    expect(ack.status).toBe(201);
+    expect(ack.body.ok).toBe(true);
+    expect(ack.body.recordHash).toBeTruthy();
+
+    const list = await adminAgent.get('/api/hr/policy-acknowledgements').query({
+      policyKey: 'employee_handbook',
+    });
+    expect(list.status).toBe(200);
+    expect(list.body.acknowledgements.length).toBeGreaterThan(0);
+
+    const obs = await adminAgent.get('/api/hr/observability');
+    expect(obs.status).toBe(200);
+    expect(obs.body.ok).toBe(true);
+    expect(typeof obs.body.summary.totalEvents).toBe('number');
+  });
+
+  it('HR: payroll endpoints are blocked until required policy acknowledgements exist', async () => {
+    const hr = request.agent(app);
+    await loginAs(hr, 'hr.manager', 'HrManager@12345!');
+
+    const blocked = await hr.post('/api/hr/payroll-runs').send({ periodYyyymm: '209911' });
+    expect(blocked.status).toBe(403);
+    expect(blocked.body.code).toBe('POLICY_ACK_REQUIRED');
+    expect(Array.isArray(blocked.body.missing)).toBe(true);
+    expect(blocked.body.missing.length).toBeGreaterThan(0);
+
+    // Accept required policies then retry.
+    const reqs = await hr.get('/api/hr/policy-requirements').send();
+    expect(reqs.status).toBe(200);
+    for (const p of reqs.body.missing || []) {
+      const ack = await hr.post('/api/hr/policy-acknowledgements').send({
+        policyKey: p.key,
+        policyVersion: p.version,
+        signatureName: 'HR Manager',
+        context: { channel: 'api.test' },
+      });
+      expect(ack.status).toBe(201);
+    }
+
+    const ok = await hr.post('/api/hr/payroll-runs').send({ periodYyyymm: '209911' });
+    expect(ok.status).toBe(201);
+    expect(String(ok.body.id || '')).toBeTruthy();
+  });
+
+  it('supports HR Next compensation, cleanup queue, and UAT readiness endpoints', async () => {
+    const adminAgent = request.agent(app);
+    await loginAs(adminAgent, 'admin', 'Admin@123');
+
+    const staffList = await adminAgent.get('/api/hr/staff');
+    expect(staffList.status).toBe(200);
+    const staffUser = staffList.body.staff.find((s) => s.username === 'sales.staff') || staffList.body.staff[0];
+    expect(staffUser?.userId).toBeTruthy();
+
+    const patch = await adminAgent.patch(`/api/hr/staff/${encodeURIComponent(staffUser.userId)}`).send({
+      employmentType: 'weird-temp-type',
+    });
+    expect(patch.status).toBe(200);
+
+    const comp = await adminAgent.get('/api/hr/compensation-insights');
+    expect(comp.status).toBe(200);
+    expect(comp.body.ok).toBe(true);
+    expect(typeof comp.body.summary?.medianBaseSalaryNgn).toBe('number');
+
+    const queue = await adminAgent.get('/api/hr/data-cleanup-queue');
+    expect(queue.status).toBe(200);
+    expect(queue.body.ok).toBe(true);
+    expect(Array.isArray(queue.body.queue)).toBe(true);
+    const hit = queue.body.queue.find((q) => q.userId === staffUser.userId);
+    expect(hit).toBeTruthy();
+
+    const resolve = await adminAgent.post('/api/hr/data-cleanup-queue/resolve').send({
+      userId: staffUser.userId,
+      action: 'normalize_employment_type',
+      targetValue: 'permanent',
+    });
+    expect(resolve.status).toBe(200);
+    expect(resolve.body.ok).toBe(true);
+
+    const uat = await adminAgent.get('/api/hr/next-uat-readiness');
+    expect(uat.status).toBe(200);
+    expect(uat.body.ok).toBe(true);
+    expect(typeof uat.body.canCutover).toBe('boolean');
+    expect(typeof uat.body.gates?.qualityCoveragePct).toBe('number');
+    expect(uat.body.signoff == null || typeof uat.body.signoff).toBeTruthy();
+
+    const signoff = await adminAgent.post('/api/hr/next-uat-signoff').send({
+      approve: true,
+      note: 'UAT signed off by QA lead',
+    });
+    expect(signoff.status).toBe(200);
+    expect(signoff.body.ok).toBe(true);
+    expect(signoff.body.signoff?.approvedAtIso).toBeTruthy();
+
+    const uatAfter = await adminAgent.get('/api/hr/next-uat-readiness');
+    expect(uatAfter.status).toBe(200);
+    expect(uatAfter.body.ok).toBe(true);
+    expect(uatAfter.body.signoff?.approvedAtIso).toBeTruthy();
+
+    const revoke = await adminAgent.post('/api/hr/next-uat-signoff').send({ approve: false });
+    expect(revoke.status).toBe(200);
+    expect(revoke.body.ok).toBe(true);
+    expect(revoke.body.signoff).toBeNull();
+  });
+
+  it('exports payroll payslip and statutory packs', async () => {
+    const adminAgent = request.agent(app);
+    await loginAs(adminAgent, 'admin', 'Admin@123');
+    const run = await adminAgent.post('/api/hr/payroll-runs').send({ periodYyyymm: '209912' });
+    expect(run.status).toBe(201);
+    const runId = run.body.id;
+    const rec = await adminAgent.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/recompute`).send({});
+    expect(rec.status).toBe(200);
+    const lock = await adminAgent.patch(`/api/hr/payroll-runs/${encodeURIComponent(runId)}`).send({ status: 'locked' });
+    expect(lock.status).toBe(200);
+
+    const payslip = await adminAgent.get(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/payslips-pack`);
+    expect(payslip.status).toBe(200);
+    expect(String(payslip.text || '')).toContain('period_yyyymm');
+
+    const statutory = await adminAgent.get(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/statutory-pack`);
+    expect(statutory.status).toBe(200);
+    expect(String(statutory.text || '')).toContain('tax_ngn');
   });
 });

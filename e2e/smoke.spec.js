@@ -1,30 +1,17 @@
 import { test, expect } from '@playwright/test';
-
-async function signIn(page, username = 'admin', password = 'Admin@123') {
-  await page.goto('/');
-  await expect(page.getByRole('heading', { name: /open your workspace/i })).toBeVisible({
-    timeout: 15_000,
-  });
-  await page.getByLabel('Username').fill(username);
-  await page.getByLabel('Password').fill(password);
-  await page.getByRole('button', { name: /enter workspace/i }).click();
-  await expect(page.getByRole('heading', { name: /operations dashboard/i })).toBeVisible({
-    timeout: 15_000,
-  });
-}
+import { signInViaUi } from './helpers/auth';
 
 test.describe.configure({ timeout: 60_000 });
 
 test.describe('Authenticated app flows', () => {
   test('dashboard loads after sign-in with active user identity', async ({ page }) => {
-    await signIn(page);
-    await expect(
-      page.getByRole('button', { name: /signed in as zarewa admin/i })
-    ).toBeVisible();
+    await signInViaUi(page, 'admin', 'Admin@123');
+    await expect(page.getByRole('heading', { name: /operations dashboard/i })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('group', { name: /signed in as zarewa admin/i })).toBeVisible();
   });
 
   test('sidebar navigates through protected modules', async ({ page }) => {
-    await signIn(page);
+    await signInViaUi(page, 'admin', 'Admin@123');
 
     const modulesNav = page.getByRole('navigation', { name: 'Modules' });
 
@@ -50,7 +37,7 @@ test.describe('Authenticated app flows', () => {
   });
 
   test('settings exposes access profile and period lock controls', async ({ page }) => {
-    await signIn(page);
+    await signInViaUi(page, 'admin', 'Admin@123');
     await page.getByRole('navigation', { name: 'Modules' }).getByRole('link', { name: 'Settings' }).click();
     await expect(page.getByRole('heading', { name: /settings/i })).toBeVisible();
     const main = page.locator('#main-content');
@@ -67,7 +54,7 @@ test.describe('Authenticated app flows', () => {
   });
 
   test('procurement role hides finance navigation', async ({ page }) => {
-    await signIn(page, 'procurement', 'Procure@123');
+    await signInViaUi(page, 'procurement', 'Procure@123');
     await expect(page.getByRole('button', { name: /procurement officer/i })).toBeVisible();
     await expect(
       page.getByRole('navigation', { name: 'Modules' }).getByRole('link', { name: 'Finance' })
@@ -85,7 +72,7 @@ test.describe('Authenticated app flows', () => {
   });
 
   test('settings master data workspace can add a colour', async ({ page }) => {
-    await signIn(page);
+    await signInViaUi(page, 'admin', 'Admin@123');
     await page.getByRole('navigation', { name: 'Modules' }).getByRole('link', { name: 'Settings' }).click();
     await page.getByRole('tab', { name: /data & pricing/i }).click();
     await expect(page.getByRole('heading', { name: /master lists/i })).toBeVisible();
@@ -103,7 +90,7 @@ test.describe('Authenticated app flows', () => {
   });
 
   test('sales refunds tab opens request modal with preview and payout guidance', async ({ page }) => {
-    await signIn(page, 'sales.staff', 'Sales@123');
+    await signInViaUi(page, 'sales.staff', 'Sales@123');
     await page.getByRole('navigation', { name: 'Modules' }).getByRole('link', { name: 'Sales' }).click();
     await expect(page).toHaveURL(/\/sales$/);
     await page.getByRole('tab', { name: 'Refunds' }).click();

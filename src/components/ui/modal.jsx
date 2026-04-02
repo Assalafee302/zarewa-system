@@ -43,6 +43,10 @@ const ModalContent = React.forwardRef(({ className, children, ...props }, ref) =
           )}
           {...props}
         >
+          <DialogPrimitive.Title className="sr-only">Dialog</DialogPrimitive.Title>
+          <DialogPrimitive.Description className="sr-only">
+            Modal dialog content.
+          </DialogPrimitive.Description>
           {children}
           <DialogPrimitive.Close className="absolute right-4 top-4 rounded-full p-2 opacity-70 border border-transparent ring-offset-background transition-colors hover:opacity-100 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
             <X className="h-4 w-4" />

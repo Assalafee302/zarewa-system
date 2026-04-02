@@ -13,9 +13,9 @@ import {
   Upload,
 } from 'lucide-react';
 import { PageTabs, ModalFrame } from '../layout';
-import { DELIVERIES_MOCK } from '../../Data/mockData';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { apiFetch } from '../../lib/apiBase';
+import { WORKSPACE_TABLE_HEAD } from '../../lib/workspaceListStyle';
 
 const STATUS_STYLES = {
   Scheduled: 'bg-slate-100 text-slate-700',
@@ -32,9 +32,7 @@ const STATUS_STYLES = {
 export default function ProductionDeliveriesTab({ onShellBlur }) {
   const { show: showToast } = useToast();
   const ws = useWorkspace();
-  const [shipments, setShipments] = useState(() =>
-    DELIVERIES_MOCK.map((d) => ({ ...d }))
-  );
+  const [shipments, setShipments] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -63,10 +61,14 @@ export default function ProductionDeliveriesTab({ onShellBlur }) {
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    if (ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.deliveries)) {
-      setShipments(ws.snapshot.deliveries.map((d) => ({ ...d })));
+    const s = ws?.snapshot;
+    if (!s) {
+      setShipments([]);
+      return;
     }
-  }, [ws?.hasWorkspaceData, ws?.snapshot?.deliveries, ws?.refreshEpoch]);
+    const list = s.deliveries;
+    setShipments(Array.isArray(list) ? list.map((d) => ({ ...d })) : []);
+  }, [ws?.snapshot, ws?.refreshEpoch]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const handleStatusTab = (id) => {
@@ -266,7 +268,7 @@ export default function ProductionDeliveriesTab({ onShellBlur }) {
         </div>
       ) : (
         <div className="space-y-4">
-          <div className="hidden md:grid grid-cols-12 px-4 text-[10px] font-bold text-gray-400 uppercase tracking-widest">
+          <div className={WORKSPACE_TABLE_HEAD}>
             <div className="col-span-2">Dispatch</div>
             <div className="col-span-2">Quotation</div>
             <div className="col-span-2">Customer</div>
@@ -277,9 +279,9 @@ export default function ProductionDeliveriesTab({ onShellBlur }) {
           {filtered.map((d) => (
             <div
               key={d.id}
-              className="grid grid-cols-1 md:grid-cols-12 gap-4 md:gap-2 items-start md:items-center p-5 md:px-4 md:py-4 bg-gray-50/50 rounded-2xl border border-transparent hover:border-teal-100 hover:bg-white transition-all"
+              className="z-list-row grid grid-cols-1 sm:grid-cols-12 gap-4 sm:gap-2 items-start sm:items-center"
             >
-              <div className="md:col-span-2 flex md:block items-center justify-between gap-2">
+              <div className="col-span-12 sm:col-span-2 flex sm:block items-center justify-between gap-2">
                 <div>
                   <p className="text-xs font-black text-[#134e4a]">{d.id}</p>
                   <span
@@ -289,9 +291,9 @@ export default function ProductionDeliveriesTab({ onShellBlur }) {
                   </span>
                 </div>
               </div>
-              <div className="md:col-span-2 text-xs font-bold text-gray-700">{d.quotationRef}</div>
-              <div className="md:col-span-2 text-sm font-bold text-gray-800">{d.customer}</div>
-              <div className="md:col-span-3">
+              <div className="col-span-12 sm:col-span-2 text-xs font-bold text-gray-700">{d.quotationRef}</div>
+              <div className="col-span-12 sm:col-span-2 text-sm font-bold text-gray-800">{d.customer}</div>
+              <div className="col-span-12 sm:col-span-3">
                 <p className="flex items-start gap-2 text-xs text-gray-600">
                   <MapPin size={14} className="text-gray-400 shrink-0 mt-0.5" />
                   {d.destination}
@@ -308,14 +310,14 @@ export default function ProductionDeliveriesTab({ onShellBlur }) {
                   {d.lineCount || 0} line(s) · {(d.totalQty || 0).toLocaleString()} m
                 </p>
               </div>
-              <div className="md:col-span-2 text-xs text-gray-500">
+              <div className="col-span-12 sm:col-span-2 text-xs text-gray-500">
                 <p className="flex items-center gap-1.5 font-medium">
                   <Calendar size={12} />
                   Ship {d.shipDate}
                 </p>
                 <p className="mt-1 font-bold text-[#134e4a]">ETA {d.eta}</p>
               </div>
-              <div className="md:col-span-1 flex md:justify-end gap-1">
+              <div className="col-span-12 sm:col-span-1 flex sm:justify-end gap-1">
                 <button
                   type="button"
                   onClick={() => openConfirm(d)}

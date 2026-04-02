@@ -2,10 +2,17 @@
  * Maps the 20 end-to-end transactional scenarios (customer → quote → payment → stock → finance)
  * to automated API checks. Each scenario is one test for clear failure attribution.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import request from 'supertest';
 import { createDatabase } from './db.js';
 import { createApp } from './app.js';
+
+const openDbs = [];
+
+afterAll(() => {
+  for (const db of openDbs) db.close();
+  openDbs.length = 0;
+});
 
 async function loginAs(agent, username = 'admin', password = 'Admin@123') {
   const res = await agent.post('/api/session/login').send({ username, password });
@@ -14,7 +21,9 @@ async function loginAs(agent, username = 'admin', password = 'Admin@123') {
 }
 
 async function adminSession() {
-  const app = createApp(createDatabase(':memory:'));
+  const db = createDatabase(':memory:');
+  openDbs.push(db);
+  const app = createApp(db);
   const agent = request.agent(app);
   await loginAs(agent);
   return { app, agent };

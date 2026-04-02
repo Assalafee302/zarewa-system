@@ -1,6 +1,9 @@
+import { amountDueOnQuotationFromEntries } from '../src/lib/customerLedgerCore.js';
+import { normalizeCustomerEmailKey, normalizeCustomerPhoneKey } from '../shared/customerPhoneKey.js';
 import { actorName } from './auth.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
 import { appendAuditLog, assertPeriodOpen, insertPaymentRequest } from './controlOps.js';
+import { listLedgerEntries } from './readModel.js';
 
 function nextLedgerId() {
   return `LE-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -292,16 +295,59 @@ export function recordCustomerAdvanceRefundCash(db, payload) {
   );
 }
 
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @returns {{ field: 'phone' | 'email', customerId: string } | null}
+ */
+export function findCustomerIdentityConflict(db, branchId, { phoneNumber, email }, excludeCustomerId) {
+  const bid = String(branchId || DEFAULT_BRANCH_ID).trim();
+  const phoneKey = normalizeCustomerPhoneKey(phoneNumber);
+  const emailKey = normalizeCustomerEmailKey(email);
+  if (!phoneKey && !emailKey) return null;
+  const ex = excludeCustomerId ? String(excludeCustomerId).trim() : '';
+  const rows = db.prepare(`SELECT customer_id, phone_number, email FROM customers WHERE branch_id = ?`).all(bid);
+  for (const r of rows) {
+    if (ex && r.customer_id === ex) continue;
+    if (phoneKey && normalizeCustomerPhoneKey(r.phone_number) === phoneKey) {
+      return { field: 'phone', customerId: r.customer_id };
+    }
+    if (emailKey && normalizeCustomerEmailKey(r.email) === emailKey) {
+      return { field: 'email', customerId: r.customer_id };
+    }
+  }
+  return null;
+}
+
+function assertNoDuplicateCustomerIdentity(db, branchId, payload, excludeCustomerId) {
+  const conflict = findCustomerIdentityConflict(db, branchId, payload, excludeCustomerId);
+  if (!conflict) return;
+  const msg =
+    conflict.field === 'email'
+      ? `A customer with this email is already registered (${conflict.customerId}).`
+      : `A customer with this phone number is already registered (${conflict.customerId}).`;
+  const e = new Error(msg);
+  e.code = 'DUPLICATE_CUSTOMER_REGISTRATION';
+  e.existingCustomerId = conflict.customerId;
+  e.conflictField = conflict.field;
+  throw e;
+}
+
 /** @param {import('better-sqlite3').Database} db */
-export function insertCustomer(db, row) {
+export function insertCustomer(db, row, branchId = DEFAULT_BRANCH_ID) {
   const id = row.customerID || `CUS-${Date.now()}`;
+  assertNoDuplicateCustomerIdentity(
+    db,
+    branchId,
+    { phoneNumber: row.phoneNumber ?? '', email: row.email ?? '' },
+    null
+  );
   const tagsJson = normalizeCrmTagsJson(row);
   db.prepare(
     `INSERT INTO customers (
       customer_id, name, phone_number, email, address_shipping, address_billing,
       status, tier, payment_terms, created_by, created_at_iso, last_activity_iso,
-      company_name, lead_source, preferred_contact, follow_up_iso, crm_tags_json, crm_profile_notes
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      company_name, lead_source, preferred_contact, follow_up_iso, crm_tags_json, crm_profile_notes, branch_id
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).run(
     id,
     row.name,
@@ -320,7 +366,8 @@ export function insertCustomer(db, row) {
     String(row.preferredContact ?? '').trim(),
     String(row.followUpISO ?? '').trim().slice(0, 10),
     tagsJson,
-    String(row.crmProfileNotes ?? '').trim()
+    String(row.crmProfileNotes ?? '').trim(),
+    String(branchId || DEFAULT_BRANCH_ID).trim()
   );
   return id;
 }
@@ -353,7 +400,12 @@ export function getCustomerDeleteBlockers(db, customerID) {
   return { ok: true, blockers };
 }
 
-export function deleteCustomerIfAllowed(db, customerID) {
+export function deleteCustomerIfAllowed(db, customerID, branchId = DEFAULT_BRANCH_ID) {
+  const bid = String(branchId || DEFAULT_BRANCH_ID).trim();
+  const own = db
+    .prepare(`SELECT customer_id FROM customers WHERE customer_id = ? AND branch_id = ?`)
+    .get(String(customerID ?? '').trim(), bid);
+  if (!own) return { ok: false, error: 'Customer not found in your branch.', blockers: [] };
   const check = getCustomerDeleteBlockers(db, customerID);
   if (!check.ok) return { ...check, blockers: check.blockers ?? [] };
   if (check.blockers.length > 0) {
@@ -364,7 +416,7 @@ export function deleteCustomerIfAllowed(db, customerID) {
     };
   }
   const id = String(customerID ?? '').trim();
-  db.prepare(`DELETE FROM customers WHERE customer_id = ?`).run(id);
+  db.prepare(`DELETE FROM customers WHERE customer_id = ? AND branch_id = ?`).run(id, bid);
   return { ok: true };
 }
 
@@ -475,12 +527,31 @@ export function provisionStaffLoanForFinanceQueue(db, actor, requestRow) {
 }
 
 /** @param {import('better-sqlite3').Database} db */
-export function updateCustomer(db, customerID, row) {
-  const cur = db.prepare(`SELECT * FROM customers WHERE customer_id = ?`).get(customerID);
+export function updateCustomer(db, customerID, row, branchId = DEFAULT_BRANCH_ID) {
+  const bid = String(branchId || DEFAULT_BRANCH_ID).trim();
+  const cur = db
+    .prepare(`SELECT * FROM customers WHERE customer_id = ? AND branch_id = ?`)
+    .get(customerID, bid);
   if (!cur) return { ok: false, error: 'Customer not found.' };
   const name =
     row.name !== undefined ? String(row.name ?? '').trim() : String(cur.name ?? '').trim();
   if (!name) return { ok: false, error: 'Customer name is required.' };
+  const phone =
+    row.phoneNumber !== undefined ? String(row.phoneNumber ?? '').trim() : String(cur.phone_number ?? '').trim();
+  const email = row.email !== undefined ? String(row.email ?? '').trim() : String(cur.email ?? '').trim();
+  const conflict = findCustomerIdentityConflict(db, bid, { phoneNumber: phone, email }, customerID);
+  if (conflict) {
+    return {
+      ok: false,
+      error:
+        conflict.field === 'email'
+          ? `A customer with this email is already registered (${conflict.customerId}).`
+          : `A customer with this phone number is already registered (${conflict.customerId}).`,
+      code: 'DUPLICATE_CUSTOMER_REGISTRATION',
+      existingCustomerId: conflict.customerId,
+      conflictField: conflict.field,
+    };
+  }
   const pick = (key, col, def = '') =>
     row[key] !== undefined ? String(row[key] ?? '').trim() : String(cur[col] ?? def).trim();
   const tagsJson =
@@ -498,12 +569,12 @@ export function updateCustomer(db, customerID, row) {
            status = ?, tier = ?, payment_terms = ?, last_activity_iso = ?,
            company_name = ?, lead_source = ?, preferred_contact = ?, follow_up_iso = ?,
            crm_tags_json = ?, crm_profile_notes = ?
-       WHERE customer_id = ?`
+       WHERE customer_id = ? AND branch_id = ?`
     )
     .run(
       name,
-      String(row.phoneNumber ?? cur.phone_number ?? '').trim(),
-      String(row.email ?? cur.email ?? '').trim(),
+      phone,
+      email,
       String(row.addressShipping ?? cur.address_shipping ?? '').trim(),
       String(row.addressBilling ?? cur.address_billing ?? '').trim(),
       row.status ?? cur.status ?? 'Active',
@@ -516,7 +587,8 @@ export function updateCustomer(db, customerID, row) {
       pick('followUpISO', 'follow_up_iso').slice(0, 10),
       tagsJson,
       profileNotes,
-      customerID
+      customerID,
+      bid
     );
   if (r.changes === 0) return { ok: false, error: 'Customer not found.' };
   db.prepare(`UPDATE quotations SET customer_name = ? WHERE customer_id = ?`).run(name, customerID);
@@ -1109,6 +1181,314 @@ export function receiveFinishedGoods(
   return { ok: true };
 }
 
+function assertCoilInWorkspaceBranch(row, workspaceBranchId) {
+  const expected = String(workspaceBranchId || DEFAULT_BRANCH_ID).trim();
+  const got = String(row.branch_id || '').trim() || DEFAULT_BRANCH_ID;
+  if (got !== expected) {
+    return { ok: false, error: 'Coil is not in your current workspace branch.' };
+  }
+  return { ok: true };
+}
+
+function finalizeCoilLotStateTx(db, coilNo) {
+  const row = db.prepare(`SELECT * FROM coil_lots WHERE coil_no = ?`).get(coilNo);
+  if (!row) return;
+  let qtyRemaining = Number(row.qty_remaining);
+  if (!Number.isFinite(qtyRemaining) || qtyRemaining < 0) {
+    qtyRemaining = Math.max(0, Number(row.current_weight_kg) || 0);
+  }
+  let qtyReserved = Number(row.qty_reserved);
+  if (!Number.isFinite(qtyReserved) || qtyReserved < 0) qtyReserved = 0;
+  qtyReserved = Math.min(qtyRemaining, qtyReserved);
+  const currentStatus =
+    qtyRemaining <= 0.0001
+      ? 'Consumed'
+      : qtyReserved >= qtyRemaining - 0.0001 && qtyReserved > 0
+        ? 'Reserved'
+        : 'Available';
+  db.prepare(
+    `UPDATE coil_lots SET qty_remaining = ?, qty_reserved = ?, current_weight_kg = ?, current_status = ? WHERE coil_no = ?`
+  ).run(qtyRemaining, qtyReserved, qtyRemaining, currentStatus, coilNo);
+}
+
+/**
+ * Split unreserved kg from a parent coil into a new child coil tag (off-cut / daughter roll).
+ * Does not change total raw kg in products.stock_level (mass moves between coil rows).
+ */
+export function splitCoilLot(db, payload = {}, opts = {}) {
+  const parentCoilNo = String(payload.parentCoilNo ?? payload.coilNo ?? '').trim();
+  const splitKg = Number(payload.splitKg);
+  const note = String(payload.note ?? '').trim();
+  const dateISO = String(payload.dateISO ?? new Date().toISOString().slice(0, 10)).trim();
+  const workspaceBranchId = opts.workspaceBranchId;
+  const actor = opts.actor;
+
+  if (!parentCoilNo) return { ok: false, error: 'Coil number is required.' };
+  if (!Number.isFinite(splitKg) || splitKg <= 0) return { ok: false, error: 'Split weight must be a positive number.' };
+
+  try {
+    assertPeriodOpen(db, dateISO, 'Coil split date');
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+
+  const parent = db.prepare(`SELECT * FROM coil_lots WHERE coil_no = ?`).get(parentCoilNo);
+  if (!parent) return { ok: false, error: 'Coil not found.' };
+  const br = assertCoilInWorkspaceBranch(parent, workspaceBranchId);
+  if (!br.ok) return br;
+
+  const qtyRem = Math.max(0, Number(parent.qty_remaining) || Number(parent.current_weight_kg) || 0);
+  const qtyRes = Math.max(0, Number(parent.qty_reserved) || 0);
+  const maxSplit = qtyRem - qtyRes;
+  if (splitKg > maxSplit + 1e-6) {
+    return {
+      ok: false,
+      error: `Cannot split more than ${maxSplit.toFixed(2)} kg (remaining minus reserved on this coil).`,
+    };
+  }
+
+  let newCoilNo = String(payload.newCoilNo ?? '').trim();
+  if (!newCoilNo) {
+    const n = Number(db.prepare(`SELECT COUNT(*) AS c FROM coil_lots`).get().c) || 0;
+    newCoilNo = `CL-SPLIT-${Date.now()}-${String(n + 1).padStart(4, '0')}`;
+  }
+  if (db.prepare(`SELECT 1 FROM coil_lots WHERE coil_no = ?`).get(newCoilNo)) {
+    return { ok: false, error: `Coil ${newCoilNo} already exists.` };
+  }
+
+  const parentNewRem = qtyRem - splitKg;
+  const originNote = [note, `split from ${parentCoilNo}`].filter(Boolean).join(' · ').slice(0, 2000);
+
+  try {
+    db.transaction(() => {
+      db.prepare(`UPDATE coil_lots SET qty_remaining = ?, current_weight_kg = ? WHERE coil_no = ?`).run(
+        parentNewRem,
+        parentNewRem,
+        parentCoilNo
+      );
+      finalizeCoilLotStateTx(db, parentCoilNo);
+
+      db.prepare(
+        `INSERT INTO coil_lots (
+          coil_no, product_id, line_key, qty_received, weight_kg, colour, gauge_label, material_type_name,
+          supplier_expected_meters, supplier_conversion_kg_per_m, qty_remaining, qty_reserved, current_weight_kg,
+          current_status, location, po_id, supplier_id, supplier_name, received_at_iso, branch_id,
+          parent_coil_no, material_origin_note
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).run(
+        newCoilNo,
+        parent.product_id,
+        parent.line_key ?? null,
+        splitKg,
+        splitKg,
+        parent.colour ?? null,
+        parent.gauge_label ?? null,
+        parent.material_type_name ?? null,
+        parent.supplier_expected_meters ?? null,
+        parent.supplier_conversion_kg_per_m ?? null,
+        splitKg,
+        0,
+        splitKg,
+        'Available',
+        parent.location ?? null,
+        parent.po_id ?? null,
+        parent.supplier_id ?? null,
+        parent.supplier_name ?? null,
+        dateISO,
+        parent.branch_id || DEFAULT_BRANCH_ID,
+        parentCoilNo,
+        originNote || null
+      );
+
+      appendMovementTx(db, {
+        type: 'COIL_SPLIT',
+        productID: parent.product_id,
+        qty: 0,
+        ref: parentCoilNo,
+        dateISO,
+        detail: `Child ${newCoilNo} · ${splitKg} kg${note ? ` — ${note}` : ''}`,
+      });
+
+      appendAuditLog(db, {
+        actor,
+        action: 'coil.split',
+        entityKind: 'coil_lot',
+        entityId: newCoilNo,
+        status: 'success',
+        note: `Split ${splitKg} kg from ${parentCoilNo}`,
+        details: { parentCoilNo, newCoilNo, splitKg },
+      });
+    })();
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+
+  return { ok: true, parentCoilNo, newCoilNo, splitKg };
+}
+
+/**
+ * Remove kg from a coil (physical scrap, damage, trim). Reduces raw product stock; optionally credits SCRAP-COIL (or other) SKU.
+ */
+export function postCoilScrap(db, payload = {}, opts = {}) {
+  const coilNo = String(payload.coilNo ?? '').trim();
+  const kg = Number(payload.kg);
+  const reason = String(payload.reason ?? 'Scrap').trim() || 'Scrap';
+  const note = String(payload.note ?? '').trim();
+  const dateISO = String(payload.dateISO ?? new Date().toISOString().slice(0, 10)).trim();
+  const creditScrapInventory = payload.creditScrapInventory !== false;
+  const scrapProductID = String(payload.scrapProductID ?? 'SCRAP-COIL').trim();
+  const workspaceBranchId = opts.workspaceBranchId;
+  const actor = opts.actor;
+
+  if (!coilNo) return { ok: false, error: 'Coil number is required.' };
+  if (!Number.isFinite(kg) || kg <= 0) return { ok: false, error: 'Scrap weight must be a positive number.' };
+
+  try {
+    assertPeriodOpen(db, dateISO, 'Scrap posting date');
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+
+  const row = db.prepare(`SELECT * FROM coil_lots WHERE coil_no = ?`).get(coilNo);
+  if (!row) return { ok: false, error: 'Coil not found.' };
+  const br = assertCoilInWorkspaceBranch(row, workspaceBranchId);
+  if (!br.ok) return br;
+
+  const qtyRem = Math.max(0, Number(row.qty_remaining) || Number(row.current_weight_kg) || 0);
+  const qtyRes = Math.max(0, Number(row.qty_reserved) || 0);
+  const maxScrap = qtyRem - qtyRes;
+  if (kg > maxScrap + 1e-6) {
+    return {
+      ok: false,
+      error: `Cannot scrap more than ${maxScrap.toFixed(2)} kg (unreserved balance on this coil).`,
+    };
+  }
+
+  const productID = row.product_id;
+  const newRem = qtyRem - kg;
+
+  try {
+    db.transaction(() => {
+      db.prepare(`UPDATE coil_lots SET qty_remaining = ?, current_weight_kg = ? WHERE coil_no = ?`).run(
+        newRem,
+        newRem,
+        coilNo
+      );
+      finalizeCoilLotStateTx(db, coilNo);
+
+      db.prepare(`UPDATE products SET stock_level = stock_level - ? WHERE product_id = ?`).run(kg, productID);
+      const p = db.prepare(`SELECT stock_level FROM products WHERE product_id = ?`).get(productID);
+      if (!p || Number(p.stock_level) < -1e-6) {
+        throw new Error('Raw material product stock would go negative — check coil vs book stock.');
+      }
+
+      appendMovementTx(db, {
+        type: 'COIL_SCRAP',
+        productID,
+        qty: -kg,
+        ref: coilNo,
+        dateISO,
+        detail: `${reason}${note ? ` — ${note}` : ''}`,
+      });
+
+      if (creditScrapInventory && scrapProductID) {
+        const sp = db.prepare(`SELECT 1 FROM products WHERE product_id = ?`).get(scrapProductID);
+        if (!sp) throw new Error(`Scrap product ${scrapProductID} not found.`);
+        db.prepare(`UPDATE products SET stock_level = stock_level + ? WHERE product_id = ?`).run(kg, scrapProductID);
+        appendMovementTx(db, {
+          type: 'SCRAP_INVENTORY',
+          productID: scrapProductID,
+          qty: kg,
+          ref: coilNo,
+          dateISO,
+          detail: `From ${coilNo} · ${reason}`,
+        });
+      }
+
+      appendAuditLog(db, {
+        actor,
+        action: 'coil.scrap',
+        entityKind: 'coil_lot',
+        entityId: coilNo,
+        status: 'success',
+        note: `${kg} kg · ${reason}`,
+        details: { coilNo, kg, reason, scrapProductID: creditScrapInventory ? scrapProductID : null },
+      });
+    })();
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+
+  return { ok: true, coilNo, kg, reason };
+}
+
+/**
+ * Return weighed material onto an existing coil (correction, physical return to roll, recount).
+ */
+export function returnCoilMaterialToStock(db, payload = {}, opts = {}) {
+  const coilNo = String(payload.coilNo ?? '').trim();
+  const kg = Number(payload.kg);
+  const reason = String(payload.reason ?? 'Return to stock').trim() || 'Return to stock';
+  const note = String(payload.note ?? '').trim();
+  const dateISO = String(payload.dateISO ?? new Date().toISOString().slice(0, 10)).trim();
+  const workspaceBranchId = opts.workspaceBranchId;
+  const actor = opts.actor;
+
+  if (!coilNo) return { ok: false, error: 'Coil number is required.' };
+  if (!Number.isFinite(kg) || kg <= 0) return { ok: false, error: 'Returned weight must be a positive number.' };
+
+  try {
+    assertPeriodOpen(db, dateISO, 'Return-to-stock date');
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+
+  const row = db.prepare(`SELECT * FROM coil_lots WHERE coil_no = ?`).get(coilNo);
+  if (!row) return { ok: false, error: 'Coil not found.' };
+  const br = assertCoilInWorkspaceBranch(row, workspaceBranchId);
+  if (!br.ok) return br;
+
+  const qtyRem = Math.max(0, Number(row.qty_remaining) || Number(row.current_weight_kg) || 0);
+  const newRem = qtyRem + kg;
+  const productID = row.product_id;
+
+  try {
+    db.transaction(() => {
+      db.prepare(`UPDATE coil_lots SET qty_remaining = ?, current_weight_kg = ? WHERE coil_no = ?`).run(
+        newRem,
+        newRem,
+        coilNo
+      );
+      finalizeCoilLotStateTx(db, coilNo);
+
+      db.prepare(`UPDATE products SET stock_level = stock_level + ? WHERE product_id = ?`).run(kg, productID);
+
+      appendMovementTx(db, {
+        type: 'COIL_RETURN',
+        productID,
+        qty: kg,
+        ref: coilNo,
+        dateISO,
+        detail: `${reason}${note ? ` — ${note}` : ''}`,
+      });
+
+      appendAuditLog(db, {
+        actor,
+        action: 'coil.return',
+        entityKind: 'coil_lot',
+        entityId: coilNo,
+        status: 'success',
+        note: `${kg} kg onto ${coilNo}`,
+        details: { coilNo, kg, reason },
+      });
+    })();
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+
+  return { ok: true, coilNo, kg, reason };
+}
+
 export function addCoilRequest(db, payload) {
   const id = `CR-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   db.prepare(
@@ -1156,13 +1536,10 @@ export function replaceTreasuryAccounts(db, accounts) {
   return { ok: true };
 }
 
-export function nextPoIdFromDb(db) {
-  const rows = db.prepare(`SELECT po_id FROM purchase_orders`).all();
-  const nums = rows
-    .map((r) => parseInt(String(r.po_id).replace(/\D/g, ''), 10))
-    .filter((n) => !Number.isNaN(n));
-  const n = nums.length ? Math.max(...nums) + 1 : 1;
-  return `PO-2026-${String(n).padStart(3, '0')}`;
+export function nextPoIdFromDb(_db) {
+  const year = new Date().getFullYear();
+  const salt = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `PO-${year}-${Date.now()}-${salt}`;
 }
 
 export function nextSupplierIdFromDb(db) {
@@ -1175,29 +1552,30 @@ export function nextSupplierIdFromDb(db) {
 }
 
 /** @param {import('better-sqlite3').Database} db */
-export function insertSupplier(db, row) {
+export function insertSupplier(db, row, branchId = DEFAULT_BRANCH_ID) {
   const name = String(row.name ?? '').trim();
   if (!name) throw new Error('Supplier name is required.');
   const id = String(row.supplierID ?? '').trim() || nextSupplierIdFromDb(db);
   db.prepare(
-    `INSERT INTO suppliers (supplier_id, name, city, payment_terms, quality_score, notes) VALUES (?,?,?,?,?,?)`
+    `INSERT INTO suppliers (supplier_id, name, city, payment_terms, quality_score, notes, branch_id) VALUES (?,?,?,?,?,?,?)`
   ).run(
     id,
     name,
     String(row.city ?? '').trim() || '',
     row.paymentTerms ?? 'Credit',
     Number(row.qualityScore) || 80,
-    String(row.notes ?? '').trim() || ''
+    String(row.notes ?? '').trim() || '',
+    String(branchId || DEFAULT_BRANCH_ID).trim()
   );
   return id;
 }
 
-export function updateSupplier(db, supplierID, row) {
+export function updateSupplier(db, supplierID, row, branchId = DEFAULT_BRANCH_ID) {
   const name = String(row.name ?? '').trim();
   if (!name) return { ok: false, error: 'Supplier name is required.' };
   const r = db
     .prepare(
-      `UPDATE suppliers SET name = ?, city = ?, payment_terms = ?, quality_score = ?, notes = ? WHERE supplier_id = ?`
+      `UPDATE suppliers SET name = ?, city = ?, payment_terms = ?, quality_score = ?, notes = ? WHERE supplier_id = ? AND branch_id = ?`
     )
     .run(
       name,
@@ -1205,14 +1583,18 @@ export function updateSupplier(db, supplierID, row) {
       row.paymentTerms ?? 'Credit',
       Number(row.qualityScore) || 80,
       String(row.notes ?? '').trim() || '',
-      supplierID
+      supplierID,
+      String(branchId || DEFAULT_BRANCH_ID).trim()
     );
   if (r.changes === 0) return { ok: false, error: 'Supplier not found.' };
   db.prepare(`UPDATE purchase_orders SET supplier_name = ? WHERE supplier_id = ?`).run(name, supplierID);
   return { ok: true };
 }
 
-export function deleteSupplier(db, supplierID) {
+export function deleteSupplier(db, supplierID, branchId = DEFAULT_BRANCH_ID) {
+  const bid = String(branchId || DEFAULT_BRANCH_ID).trim();
+  const own = db.prepare(`SELECT supplier_id FROM suppliers WHERE supplier_id = ? AND branch_id = ?`).get(supplierID, bid);
+  if (!own) return { ok: false, error: 'Supplier not found in your branch.' };
   const c = db.prepare(`SELECT COUNT(*) AS c FROM purchase_orders WHERE supplier_id = ?`).get(supplierID).c;
   if (c > 0) {
     return {
@@ -1220,7 +1602,7 @@ export function deleteSupplier(db, supplierID) {
       error: `Cannot delete supplier: ${c} purchase order(s) still reference this supplier.`,
     };
   }
-  const r = db.prepare(`DELETE FROM suppliers WHERE supplier_id = ?`).run(supplierID);
+  const r = db.prepare(`DELETE FROM suppliers WHERE supplier_id = ? AND branch_id = ?`).run(supplierID, bid);
   if (r.changes === 0) return { ok: false, error: 'Supplier not found.' };
   return { ok: true };
 }
@@ -1234,29 +1616,31 @@ export function nextTransportAgentIdFromDb(db) {
   return `AG-${String(n).padStart(3, '0')}`;
 }
 
-export function insertTransportAgent(db, row) {
+export function insertTransportAgent(db, row, branchId = DEFAULT_BRANCH_ID) {
   const name = String(row.name ?? '').trim();
   if (!name) throw new Error('Agent name is required.');
   const id = String(row.id ?? '').trim() || nextTransportAgentIdFromDb(db);
-  db.prepare(`INSERT INTO transport_agents (id, name, region, phone) VALUES (?,?,?,?)`).run(
+  db.prepare(`INSERT INTO transport_agents (id, name, region, phone, branch_id) VALUES (?,?,?,?,?)`).run(
     id,
     name,
     String(row.region ?? '').trim() || '',
-    String(row.phone ?? '').trim() || ''
+    String(row.phone ?? '').trim() || '',
+    String(branchId || DEFAULT_BRANCH_ID).trim()
   );
   return id;
 }
 
-export function updateTransportAgent(db, id, row) {
+export function updateTransportAgent(db, id, row, branchId = DEFAULT_BRANCH_ID) {
   const name = String(row.name ?? '').trim();
   if (!name) return { ok: false, error: 'Agent name is required.' };
   const r = db
-    .prepare(`UPDATE transport_agents SET name = ?, region = ?, phone = ? WHERE id = ?`)
+    .prepare(`UPDATE transport_agents SET name = ?, region = ?, phone = ? WHERE id = ? AND branch_id = ?`)
     .run(
       name,
       String(row.region ?? '').trim() || '',
       String(row.phone ?? '').trim() || '',
-      id
+      id,
+      String(branchId || DEFAULT_BRANCH_ID).trim()
     );
   if (r.changes === 0) return { ok: false, error: 'Transport agent not found.' };
   db.prepare(`UPDATE purchase_orders SET transport_agent_name = ? WHERE transport_agent_id = ?`).run(
@@ -1266,8 +1650,10 @@ export function updateTransportAgent(db, id, row) {
   return { ok: true };
 }
 
-export function deleteTransportAgent(db, id) {
-  const r = db.prepare(`DELETE FROM transport_agents WHERE id = ?`).run(id);
+export function deleteTransportAgent(db, id, branchId = DEFAULT_BRANCH_ID) {
+  const r = db
+    .prepare(`DELETE FROM transport_agents WHERE id = ? AND branch_id = ?`)
+    .run(id, String(branchId || DEFAULT_BRANCH_ID).trim());
   if (r.changes === 0) return { ok: false, error: 'Transport agent not found.' };
   return { ok: true };
 }
@@ -1370,10 +1756,13 @@ export function updateBankReconciliationLine(db, lineId, payload, actor) {
 }
 
 /** @param {import('better-sqlite3').Database} db */
-export function insertCustomerCrmInteraction(db, customerID, payload, actor) {
+export function insertCustomerCrmInteraction(db, customerID, payload, actor, branchId = DEFAULT_BRANCH_ID) {
   const cid = String(customerID ?? '').trim();
   if (!cid) return { ok: false, error: 'customerID is required.' };
-  const cust = db.prepare(`SELECT customer_id FROM customers WHERE customer_id = ?`).get(cid);
+  const bid = String(branchId || DEFAULT_BRANCH_ID).trim();
+  const cust = db
+    .prepare(`SELECT customer_id FROM customers WHERE customer_id = ? AND branch_id = ?`)
+    .get(cid, bid);
   if (!cust) return { ok: false, error: 'Customer not found.' };
   const detail = String(payload.detail ?? '').trim();
   if (!detail) return { ok: false, error: 'Interaction detail is required.' };
@@ -1383,9 +1772,9 @@ export function insertCustomerCrmInteraction(db, customerID, payload, actor) {
   const id = `CRM-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const createdByName = actor?.displayName || actor?.username || '';
   db.prepare(
-    `INSERT INTO customer_crm_interactions (id, customer_id, at_iso, kind, title, detail, created_by_name)
-     VALUES (?,?,?,?,?,?,?)`
-  ).run(id, cid, atIso, kind, title || null, detail, createdByName || null);
+    `INSERT INTO customer_crm_interactions (id, customer_id, at_iso, kind, title, detail, created_by_name, branch_id)
+     VALUES (?,?,?,?,?,?,?,?)`
+  ).run(id, cid, atIso, kind, title || null, detail, createdByName || null, bid);
   appendAuditLog(db, {
     actor,
     action: 'crm.interaction.create',
@@ -1656,15 +2045,35 @@ export function nextCuttingListId(db) {
   return max > 0 ? `CL-2026-${String(max + 1).padStart(3, '0')}` : nextCuttingListIdValue();
 }
 
+/** Coil rows for this product in the workspace branch only. */
+export function countCoilLotsForProductInWorkspace(db, productID, workspaceBranchId) {
+  const pid = String(productID ?? '').trim();
+  if (!pid) return 0;
+  const bid = String(workspaceBranchId ?? '').trim() || DEFAULT_BRANCH_ID;
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM coil_lots WHERE product_id = ? AND branch_id = ?`
+    )
+    .get(pid, bid);
+  return Number(row?.c) || 0;
+}
+
 function validateQuotationForCuttingList(db, quotationRef, excludeCuttingListId) {
   const qref = String(quotationRef ?? '').trim();
   if (!qref) return { ok: false, error: 'Link a quotation.' };
   const qrow = db.prepare(`SELECT total_ngn, paid_ngn FROM quotations WHERE id = ?`).get(qref);
   if (!qrow) return { ok: false, error: 'Quotation not found.' };
   const total = Number(qrow.total_ngn) || 0;
-  const paid = Number(qrow.paid_ngn) || 0;
   if (total <= 0) return { ok: false, error: 'Quotation total must be greater than zero.' };
-  if (paid < total * 0.5 - 1e-6) {
+  const entries = listLedgerEntries(db, 'ALL');
+  const qLite = {
+    id: qref,
+    totalNgn: total,
+    paidNgn: Number(qrow.paid_ngn) || 0,
+  };
+  const due = amountDueOnQuotationFromEntries(entries, qLite);
+  const paidToward = total - due;
+  if (paidToward < total * 0.5 - 1e-6) {
     return { ok: false, error: 'At least 50% of the quotation must be paid before creating a cutting list.' };
   }
   const existing = excludeCuttingListId
@@ -2254,6 +2663,20 @@ export function payPaymentRequest(db, requestID, payload) {
   const paidAtISO = String(payload.paidAtISO ?? '').trim() || new Date().toISOString().slice(0, 10);
   const paidBy = String(payload.paidBy ?? '').trim() || payload.createdBy || 'Finance';
   const paymentNote = String(payload.note ?? payload.reference ?? '').trim();
+  const linkedExpense = db
+    .prepare(`SELECT expense_id, branch_id, category, reference FROM expenses WHERE expense_id = ?`)
+    .get(row.expense_id);
+  const workspaceBranchId = String(payload.workspaceBranchId || '').trim();
+  const workspaceViewAll = Boolean(payload.workspaceViewAll);
+  if (!workspaceViewAll && linkedExpense?.branch_id && workspaceBranchId) {
+    const reqBranch = String(linkedExpense.branch_id || '').trim();
+    if (reqBranch && reqBranch !== workspaceBranchId) {
+      return {
+        ok: false,
+        error: `This request belongs to ${reqBranch}. Switch workspace branch before payout.`,
+      };
+    }
+  }
 
   try {
     assertPeriodOpen(db, paidAtISO, 'Payment request payout date');
@@ -2299,6 +2722,8 @@ export function payPaymentRequest(db, requestID, payload) {
           amountPaidNgn: totalPaid,
           paidAmountNgn: nextPaid,
           treasuryAccountIds: paymentLines.map((line) => line.treasuryAccountId),
+          requestBranchId: linkedExpense?.branch_id || '',
+          paidFromWorkspaceBranchId: workspaceBranchId || '',
         },
       });
 

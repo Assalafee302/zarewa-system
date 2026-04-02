@@ -41,11 +41,15 @@ export function advanceBalanceFromEntries(entries, customerID) {
 export function amountDueOnQuotationFromEntries(entries, q) {
   if (!q?.id) return 0;
   const total = Number(q.totalNgn) || 0;
-  const mockPaid = Number(q.paidNgn) || 0;
+  const rowPaid = Number(q.paidNgn) || 0;
   const applied = sumForQuotationInEntries(entries, q.id, 'ADVANCE_APPLIED');
   const receipts = sumForQuotationInEntries(entries, q.id, 'RECEIPT');
   const receiptReversals = sumForQuotationInEntries(entries, q.id, 'RECEIPT_REVERSAL');
-  return Math.max(0, total - mockPaid - applied - receipts + receiptReversals);
+  const ledgerPaid = applied + receipts - receiptReversals;
+  // `paidNgn` is off-ledger / manual unless it was rolled up to match ledger; subtract ledger only when row is still below it.
+  if (ledgerPaid <= 0) return Math.max(0, total - rowPaid);
+  if (rowPaid >= ledgerPaid) return Math.max(0, total - rowPaid);
+  return Math.max(0, total - rowPaid - ledgerPaid);
 }
 
 export function ledgerReceiptTotalFromEntries(entries, customerID) {

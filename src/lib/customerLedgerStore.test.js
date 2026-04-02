@@ -4,6 +4,7 @@ import {
   appendLedgerEntry,
   amountDueOnQuotation,
   advanceBalanceNgn,
+  replaceLedgerEntries,
   recordAdvancePayment,
   recordAdvanceAppliedToQuotation,
   recordReceiptWithQuotation,
@@ -16,6 +17,7 @@ const SAMPLE_QT = {
 };
 
 beforeEach(() => {
+  replaceLedgerEntries([]);
   localStorage.removeItem('zarewa.customerLedger.v1');
 });
 

@@ -1,30 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, Navigate } from 'react-router-dom';
-import {
-  ArrowRight,
-  Banknote,
-  Calculator,
-  HeartHandshake,
-  Percent,
-  RefreshCw,
-  Upload,
-  Users,
-  X,
-} from 'lucide-react';
+import { ArrowRight, Banknote, HeartHandshake, RefreshCw, Upload, Users, X } from 'lucide-react';
 import { ModalFrame } from '../../components/layout';
 import { useHrWorkspace } from '../../context/HrWorkspaceContext';
 import { useToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/apiBase';
 import { formatNgn } from '../../hr/hrFormat';
 import HrCapsLoading from './hrCapsLoading';
-
-function packageGross(s) {
-  return (
-    (Number(s?.baseSalaryNgn) || 0) +
-    (Number(s?.housingAllowanceNgn) || 0) +
-    (Number(s?.transportAllowanceNgn) || 0)
-  );
-}
 
 export default function HrSalaryWelfare() {
   const { caps } = useHrWorkspace();
@@ -34,16 +16,6 @@ export default function HrSalaryWelfare() {
   const [snapshot, setSnapshot] = useState(null);
   const [staff, setStaff] = useState([]);
   const [loadState, setLoadState] = useState('idle');
-  const [selectedUserId, setSelectedUserId] = useState('');
-
-  const [gross, setGross] = useState(250000);
-  const [bonus, setBonus] = useState(0);
-  const [taxPct, setTaxPct] = useState(7.5);
-  const [penPct, setPenPct] = useState(8);
-  const [loanDed, setLoanDed] = useState(0);
-
-  const [accrualDraft, setAccrualDraft] = useState('');
-  const [accrualBusy, setAccrualBusy] = useState(false);
   const [tableQ, setTableQ] = useState('');
   const [loanMaint, setLoanMaint] = useState(null);
   const [loanMaintBusy, setLoanMaintBusy] = useState(false);
@@ -89,12 +61,6 @@ export default function HrSalaryWelfare() {
     load();
   }, [caps, canDir, canPay, load]);
 
-  useEffect(() => {
-    if (snapshot == null) return;
-    setTaxPct(Number(snapshot.taxPercent) || 7.5);
-    setPenPct(Number(snapshot.pensionPercent) || 8);
-  }, [snapshot]);
-
   const loanByUserId = useMemo(() => {
     const m = {};
     for (const ln of snapshot?.approvedLoans || []) {
@@ -106,27 +72,7 @@ export default function HrSalaryWelfare() {
     return m;
   }, [snapshot]);
 
-  const selectedStaff = useMemo(
-    () => (selectedUserId ? staff.find((s) => s.userId === selectedUserId) : null),
-    [staff, selectedUserId]
-  );
-
-  useEffect(() => {
-    if (!selectedStaff) return;
-    setGross(packageGross(selectedStaff));
-    setBonus(0);
-    setLoanDed(loanByUserId[selectedStaff.userId] || 0);
-    setAccrualDraft(selectedStaff.bonusAccrualNote || '');
-  }, [selectedStaff, loanByUserId]);
   /* eslint-enable react-hooks/set-state-in-effect */
-
-  const netPreview = useMemo(() => {
-    const g = Math.max(0, Number(gross) || 0) + Math.max(0, Number(bonus) || 0);
-    const tax = Math.round((g * Math.max(0, Number(taxPct) || 0)) / 100);
-    const pen = Math.round((g * Math.max(0, Number(penPct) || 0)) / 100);
-    const loan = Math.max(0, Number(loanDed) || 0);
-    return { tax, pen, loan, net: g - tax - pen - loan };
-  }, [gross, bonus, taxPct, penPct, loanDed]);
 
   const filteredStaff = useMemo(() => {
     const q = tableQ.trim().toLowerCase();
@@ -145,27 +91,6 @@ export default function HrSalaryWelfare() {
     );
   }, [staff, tableQ]);
 
-  const saveAccrualNote = async (e) => {
-    e.preventDefault();
-    if (!selectedStaff || !c.canManageStaff) return;
-    setAccrualBusy(true);
-    const { ok, data } = await apiFetch(`/api/hr/staff/${encodeURIComponent(selectedStaff.userId)}/bonus-accrual-note`, {
-      method: 'PATCH',
-      body: JSON.stringify({ note: accrualDraft }),
-    });
-    setAccrualBusy(false);
-    if (!ok || !data?.ok) {
-      showToast(data?.error || 'Could not save note.', { variant: 'error' });
-      return;
-    }
-    showToast('Bonus / accrual note saved on file.');
-    setStaff((prev) =>
-      prev.map((s) =>
-        s.userId === selectedStaff.userId ? { ...s, bonusAccrualNote: accrualDraft.trim() || null } : s
-      )
-    );
-  };
-
   if (caps === null) return <HrCapsLoading />;
   if (!c.canViewDirectory && !c.canPayroll) {
     return <Navigate to="/hr" replace />;
@@ -176,18 +101,19 @@ export default function HrSalaryWelfare() {
       <section className="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-[var(--shadow-zarewa-card)]">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h2 className="text-lg font-black text-[#7028e6]">Salary &amp; welfare</h2>
+            <h2 className="text-lg font-black text-[#134e4a]">Salary &amp; benefits</h2>
             <p className="mt-2 text-sm text-slate-600 max-w-3xl leading-relaxed">
-              Live view of compensation on file, <strong>approved loan</strong> payroll deductions from casework, and
-              tax/pension rates taken from your latest <strong>payroll run</strong> (draft preferred). Use the calculator
-              to model net pay; payroll batches and attendance still drive official payslips.
+              Package breakdown (base, housing, transport), per-staff <strong>PAYE</strong> when set on the file, approved{' '}
+              <strong>loan</strong> deductions, and notes for bonuses / benefits. Official payslips come from{' '}
+              <strong>Payroll</strong> after recompute; absent days and daily <strong>late</strong> marks feed deductions
+              there too.
             </p>
           </div>
           <button
             type="button"
             onClick={() => load()}
             disabled={loadState === 'loading'}
-            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black uppercase text-[#7028e6] disabled:opacity-50"
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black uppercase text-[#134e4a] disabled:opacity-50"
           >
             <RefreshCw size={14} className={loadState === 'loading' ? 'animate-spin' : ''} />
             Refresh data
@@ -195,8 +121,8 @@ export default function HrSalaryWelfare() {
         </div>
 
         {snapshot?.referenceRun ? (
-          <div className="mt-4 rounded-xl border border-violet-100 bg-violet-50/60 px-4 py-3 text-sm text-slate-700">
-            <p className="font-black text-[#7028e6] text-[10px] uppercase tracking-wide">Payroll rate reference</p>
+          <div className="mt-4 rounded-xl border border-teal-100 bg-teal-50/60 px-4 py-3 text-sm text-slate-700">
+            <p className="font-black text-[#134e4a] text-[10px] uppercase tracking-wide">Payroll rate reference</p>
             <p className="mt-1">
               Period <strong>{snapshot.referenceRun.periodYyyymm}</strong> ·{' '}
               <span className="capitalize">{snapshot.referenceRun.status}</span>
@@ -207,7 +133,7 @@ export default function HrSalaryWelfare() {
             {canPay ? (
               <Link
                 to="/hr/payroll"
-                className="mt-2 inline-block text-[11px] font-black uppercase text-violet-900 no-underline hover:underline"
+                className="mt-2 inline-block text-[11px] font-black uppercase text-[#134e4a] no-underline hover:underline"
               >
                 Open payroll runs →
               </Link>
@@ -215,8 +141,7 @@ export default function HrSalaryWelfare() {
           </div>
         ) : (
           <p className="mt-4 text-xs text-slate-500">
-            No payroll run yet — calculator defaults to 7.5% tax and 8% pension. Create a draft run under Payroll to set
-            authoritative percentages.
+            No payroll run yet — draft run defaults are 7.5% PAYE and 8% pension for staff without individual rates.
           </p>
         )}
 
@@ -224,7 +149,7 @@ export default function HrSalaryWelfare() {
           {canPay ? (
             <Link
               to="/hr/payroll"
-              className="inline-flex items-center gap-2 rounded-xl bg-[#7028e6] px-4 py-2.5 text-[11px] font-black uppercase text-white no-underline"
+              className="inline-flex items-center gap-2 rounded-xl bg-[#134e4a] px-4 py-2.5 text-[11px] font-black uppercase text-white no-underline"
             >
               <Banknote size={16} />
               Payroll runs
@@ -234,7 +159,7 @@ export default function HrSalaryWelfare() {
           {c.canUploadAttendance || canPay ? (
             <Link
               to="/hr/time"
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-[11px] font-black uppercase text-[#7028e6] no-underline"
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-[11px] font-black uppercase text-[#134e4a] no-underline"
             >
               <Upload size={16} />
               Attendance
@@ -243,7 +168,7 @@ export default function HrSalaryWelfare() {
           {canDir ? (
             <Link
               to="/hr/staff"
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-[11px] font-black uppercase text-[#7028e6] no-underline"
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-[11px] font-black uppercase text-[#134e4a] no-underline"
             >
               <Users size={16} />
               Staff files
@@ -252,187 +177,18 @@ export default function HrSalaryWelfare() {
           {canDir ? (
             <Link
               to="/hr/talent"
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-[11px] font-black uppercase text-[#7028e6] no-underline"
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-[11px] font-black uppercase text-[#134e4a] no-underline"
             >
               <HeartHandshake size={16} />
-              Talent &amp; welfare
+              Requests
             </Link>
           ) : null}
         </div>
       </section>
 
-      <section className="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
-        <h3 className="flex items-center gap-2 text-sm font-black text-[#7028e6]">
-          <Calculator size={18} />
-          Net pay calculator
-        </h3>
-        <p className="mt-2 text-xs text-slate-500 max-w-2xl">
-          Select an employee to pull package and approved loan deduction from the directory and casework. Adjust bonus
-          for one-off modelling; accrual notes are saved on the HR file.
-        </p>
-
-        {canDir && staff.length > 0 ? (
-          <div className="mt-4 max-w-xl">
-            <label className="text-xs font-bold text-slate-700">
-              Employee (optional)
-              <select
-                className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                value={selectedUserId}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setSelectedUserId(v);
-                  if (!v) {
-                    setAccrualDraft('');
-                  }
-                }}
-              >
-                <option value="">— Manual figures —</option>
-                {staff.map((s) => (
-                  <option key={s.userId} value={s.userId}>
-                    {s.displayName}
-                    {s.employeeNo ? ` · ${s.employeeNo}` : ''} · {s.branchId || '—'}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-        ) : canDir ? (
-          <p className="mt-4 text-sm text-amber-800">No staff in your directory scope.</p>
-        ) : (
-          <p className="mt-4 text-sm text-slate-600">
-            You do not have directory access — enter figures manually, or ask HR for staff visibility.
-          </p>
-        )}
-
-        <div className="mt-4 flex flex-wrap gap-2">
-          <button
-            type="button"
-            className="rounded-lg border border-slate-200 px-3 py-1.5 text-[10px] font-black uppercase text-[#7028e6]"
-            onClick={() => {
-              if (!snapshot) return;
-              setTaxPct(Number(snapshot.taxPercent) || 7.5);
-              setPenPct(Number(snapshot.pensionPercent) || 8);
-              showToast('Tax & pension matched to payroll reference.');
-            }}
-          >
-            Sync tax &amp; pension from payroll
-          </button>
-          {selectedStaff ? (
-            <button
-              type="button"
-              className="rounded-lg border border-slate-200 px-3 py-1.5 text-[10px] font-black uppercase text-[#7028e6]"
-              onClick={() => {
-                setGross(packageGross(selectedStaff));
-                setLoanDed(loanByUserId[selectedStaff.userId] || 0);
-                showToast('Gross and loan reset from file + approved loans.');
-              }}
-            >
-              Reset gross &amp; loan from data
-            </button>
-          ) : null}
-        </div>
-
-        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <label className="text-xs font-bold text-slate-700">
-            Monthly package (base + housing + transport) (₦)
-            <input
-              type="number"
-              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-              value={gross}
-              onChange={(e) => setGross(e.target.value)}
-            />
-          </label>
-          <label className="text-xs font-bold text-slate-700">
-            Bonus / variable (₦)
-            <input
-              type="number"
-              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-              value={bonus}
-              onChange={(e) => setBonus(e.target.value)}
-            />
-          </label>
-          <label className="text-xs font-bold text-slate-700">
-            Tax %
-            <input
-              type="number"
-              step="0.1"
-              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-              value={taxPct}
-              onChange={(e) => setTaxPct(e.target.value)}
-            />
-          </label>
-          <label className="text-xs font-bold text-slate-700">
-            Pension %
-            <input
-              type="number"
-              step="0.1"
-              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-              value={penPct}
-              onChange={(e) => setPenPct(e.target.value)}
-            />
-          </label>
-          <label className="text-xs font-bold text-slate-700">
-            Loan / advance payroll deduction (₦ / month)
-            <input
-              type="number"
-              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-              value={loanDed}
-              onChange={(e) => setLoanDed(e.target.value)}
-            />
-          </label>
-        </div>
-
-        <div className="mt-6 rounded-xl border border-violet-100 bg-violet-50/50 p-4 text-sm">
-          <div className="flex flex-wrap items-center gap-2 text-[#7028e6] font-black text-xs uppercase">
-            <Percent size={14} />
-            Indicative net (before other statutory / HR adjustments)
-          </div>
-          <dl className="mt-3 grid gap-2 sm:grid-cols-2 text-sm">
-            <div className="flex justify-between gap-4">
-              <dt className="text-slate-600">Tax</dt>
-              <dd className="font-semibold tabular-nums">₦{formatNgn(netPreview.tax)}</dd>
-            </div>
-            <div className="flex justify-between gap-4">
-              <dt className="text-slate-600">Pension</dt>
-              <dd className="font-semibold tabular-nums">₦{formatNgn(netPreview.pen)}</dd>
-            </div>
-            <div className="flex justify-between gap-4">
-              <dt className="text-slate-600">Loan / advance</dt>
-              <dd className="font-semibold tabular-nums">₦{formatNgn(netPreview.loan)}</dd>
-            </div>
-            <div className="flex justify-between gap-4 border-t border-violet-200/80 pt-2 sm:col-span-2">
-              <dt className="font-black text-[#7028e6]">Net</dt>
-              <dd className="font-black tabular-nums text-[#7028e6]">₦{formatNgn(netPreview.net)}</dd>
-            </div>
-          </dl>
-        </div>
-
-        {selectedStaff && c.canManageStaff ? (
-          <form onSubmit={saveAccrualNote} className="mt-6 space-y-2 rounded-xl border border-slate-100 bg-slate-50/80 p-4">
-            <label className="block text-xs font-bold text-slate-700">
-              Bonus / variable pay accrual note (saved on employee file)
-              <textarea
-                rows={3}
-                className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                value={accrualDraft}
-                onChange={(e) => setAccrualDraft(e.target.value)}
-                placeholder="e.g. Q1 performance bonus accrued — subject to payroll approval"
-              />
-            </label>
-            <button
-              type="submit"
-              disabled={accrualBusy}
-              className="rounded-xl bg-[#7028e6] px-4 py-2 text-[11px] font-black uppercase text-white disabled:opacity-50"
-            >
-              Save note on file
-            </button>
-          </form>
-        ) : null}
-      </section>
-
       {(snapshot?.approvedLoans?.length ?? 0) > 0 ? (
         <section className="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm overflow-hidden">
-          <h3 className="text-sm font-black text-[#7028e6]">Approved staff loans</h3>
+          <h3 className="text-sm font-black text-[#134e4a]">Approved staff loans</h3>
           <p className="mt-1 text-xs text-slate-500">
             Executive-approved loans appear here. Finance must pay the linked <strong>payment request</strong> (Account)
             before the monthly repayment amount is applied in payroll runs.
@@ -442,12 +198,14 @@ export default function HrSalaryWelfare() {
               <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-500">
                 <tr>
                   <th className="px-3 py-2">Employee</th>
+                  <th className="px-3 py-2">Branch</th>
                   <th className="px-3 py-2">Amount</th>
                   <th className="px-3 py-2">Months</th>
                   <th className="px-3 py-2">Deduction / mo</th>
                   <th className="px-3 py-2">Principal left</th>
                   <th className="px-3 py-2">Months left</th>
                   <th className="px-3 py-2">Payroll</th>
+                  <th className="px-3 py-2">Finance queue</th>
                   <th className="px-3 py-2">Decided</th>
                   <th className="px-3 py-2" />
                 </tr>
@@ -459,6 +217,7 @@ export default function HrSalaryWelfare() {
                       <p className="font-semibold text-slate-800">{ln.staffDisplayName}</p>
                       <p className="text-xs text-slate-500">{ln.employeeNo || ln.staffUsername}</p>
                     </td>
+                    <td className="px-3 py-2 text-xs text-slate-600">{ln.branchId || '—'}</td>
                     <td className="px-3 py-2 tabular-nums">₦{formatNgn(ln.amountNgn)}</td>
                     <td className="px-3 py-2">{ln.repaymentMonths || '—'}</td>
                     <td className="px-3 py-2 font-semibold tabular-nums text-amber-900">
@@ -481,6 +240,15 @@ export default function HrSalaryWelfare() {
                         <span className="text-slate-600">Schedule complete</span>
                       ) : (
                         <span className="text-slate-600">Awaiting disbursement pay</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-slate-600">
+                      {ln.financePaymentRequestId ? (
+                        <span className="font-semibold text-[#134e4a]">
+                          {ln.disbursementQueueStatus || 'Pending'} · {ln.financePaymentRequestId}
+                        </span>
+                      ) : (
+                        'Not queued'
                       )}
                     </td>
                     <td className="px-3 py-2 text-xs text-slate-600 whitespace-nowrap">
@@ -528,7 +296,7 @@ export default function HrSalaryWelfare() {
                       {canDir ? (
                         <Link
                           to={`/hr/staff/${encodeURIComponent(ln.userId)}`}
-                          className="text-[11px] font-black uppercase text-[#7028e6] no-underline hover:underline"
+                          className="text-[11px] font-black uppercase text-[#134e4a] no-underline hover:underline"
                         >
                           Profile
                         </Link>
@@ -564,12 +332,12 @@ export default function HrSalaryWelfare() {
       >
         {loanMaint ? (
           <div className="w-full max-w-lg max-h-[min(90vh,640px)] flex flex-col rounded-[28px] border border-slate-200/90 bg-white shadow-xl overflow-hidden">
-            <div className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-100 bg-violet-600 px-5 py-4 text-white">
+            <div className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-100 bg-[#134e4a] px-5 py-4 text-white">
               <div className="min-w-0">
                 <h4 id="loan-maint-title" className="text-sm font-black">
                   {loanCloseOnly ? 'Close loan early' : 'Adjust loan terms'}
                 </h4>
-                <p className="mt-1 text-xs text-violet-100 truncate" title={`${loanMaint.staffDisplayName} · ${loanMaint.requestId}`}>
+                <p className="mt-1 text-xs text-teal-100 truncate" title={`${loanMaint.staffDisplayName} · ${loanMaint.requestId}`}>
                   {loanMaint.staffDisplayName} · {loanMaint.requestId}
                 </p>
               </div>
@@ -653,7 +421,7 @@ export default function HrSalaryWelfare() {
               <button
                 type="button"
                 disabled={loanMaintBusy}
-                className="rounded-xl bg-[#7028e6] px-4 py-2 text-[11px] font-black uppercase text-white disabled:opacity-50"
+                className="rounded-xl bg-[#134e4a] px-4 py-2 text-[11px] font-black uppercase text-white disabled:opacity-50"
                 onClick={async () => {
                   if (!loanMaint) return;
                   setLoanMaintBusy(true);
@@ -690,7 +458,13 @@ export default function HrSalaryWelfare() {
       {canDir && staff.length > 0 ? (
         <section className="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm overflow-hidden">
           <div className="flex flex-wrap items-end justify-between gap-4">
-            <h3 className="text-sm font-black text-[#7028e6]">Compensation on file (your scope)</h3>
+            <div>
+              <h3 className="text-sm font-black text-[#134e4a]">Compensation ledger</h3>
+              <p className="mt-1 text-xs text-slate-500 max-w-xl">
+                Benefit narratives and end-of-year bonus notes are edited on each staff file. Loan rows below are
+                payroll-active advances.
+              </p>
+            </div>
             <div className="relative max-w-xs flex-1 min-w-[200px]">
               <input
                 type="search"
@@ -707,45 +481,43 @@ export default function HrSalaryWelfare() {
                 <tr>
                   <th className="px-3 py-2">Name</th>
                   <th className="px-3 py-2">Branch</th>
-                  <th className="px-3 py-2 text-right">Package</th>
+                  <th className="px-3 py-2 text-right">Base</th>
+                  <th className="px-3 py-2 text-right">Housing</th>
+                  <th className="px-3 py-2 text-right">Transport</th>
+                  <th className="px-3 py-2 text-right">PAYE %</th>
                   <th className="px-3 py-2 text-right">Loan / mo</th>
-                  <th className="px-3 py-2">Accrual note</th>
-                  <th className="px-3 py-2" />
+                  <th className="px-3 py-2">Bonus / EOY note</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredStaff.map((s) => {
-                  const pkg = packageGross(s);
                   const loanM = loanByUserId[s.userId] || 0;
                   const note = (s.bonusAccrualNote || '').trim();
+                  const paye =
+                    s.payeTaxPercent != null && Number.isFinite(Number(s.payeTaxPercent))
+                      ? `${Number(s.payeTaxPercent)}%`
+                      : 'Run default';
                   return (
                     <tr key={s.userId} className="border-t border-slate-100 hover:bg-slate-50/80">
                       <td className="px-3 py-2">
-                        <p className="font-semibold text-slate-800">{s.displayName}</p>
+                        <Link
+                          to={`/hr/staff/${encodeURIComponent(s.userId)}`}
+                          className="font-semibold text-[#134e4a] hover:underline no-underline"
+                        >
+                          {s.displayName}
+                        </Link>
                         <p className="text-xs text-slate-500">{s.employeeNo || s.username}</p>
                       </td>
                       <td className="px-3 py-2 text-slate-700">{s.branchId || '—'}</td>
-                      <td className="px-3 py-2 text-right font-semibold tabular-nums">₦{formatNgn(pkg)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">₦{formatNgn(s.baseSalaryNgn)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">₦{formatNgn(s.housingAllowanceNgn)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">₦{formatNgn(s.transportAllowanceNgn)}</td>
+                      <td className="px-3 py-2 text-right text-xs font-medium tabular-nums">{paye}</td>
                       <td className="px-3 py-2 text-right tabular-nums text-amber-900">
                         {loanM ? `₦${formatNgn(loanM)}` : '—'}
                       </td>
-                      <td className="px-3 py-2 max-w-[200px] truncate text-xs text-slate-600" title={note}>
+                      <td className="px-3 py-2 max-w-[220px] truncate text-xs text-slate-600" title={note}>
                         {note || '—'}
-                      </td>
-                      <td className="px-3 py-2 text-right whitespace-nowrap">
-                        <button
-                          type="button"
-                          className="text-[11px] font-black uppercase text-[#7028e6]"
-                          onClick={() => setSelectedUserId(s.userId)}
-                        >
-                          Use in calculator
-                        </button>
-                        <Link
-                          to={`/hr/staff/${encodeURIComponent(s.userId)}`}
-                          className="ml-3 text-[11px] font-black uppercase text-slate-500 no-underline hover:underline"
-                        >
-                          Open
-                        </Link>
                       </td>
                     </tr>
                   );

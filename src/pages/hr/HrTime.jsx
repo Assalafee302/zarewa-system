@@ -7,6 +7,7 @@ import { useToast } from '../../context/ToastContext';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { apiFetch } from '../../lib/apiBase';
 import HrCapsLoading from './hrCapsLoading';
+import { HrOpsToolbar, HrSectionCard } from './hrUx';
 
 export default function HrTime() {
   const { caps } = useHrWorkspace();
@@ -23,10 +24,18 @@ export default function HrTime() {
     rows: [{ userId: '', userIdManual: '', absentDays: '0' }],
   });
 
+  const [rollDay, setRollDay] = useState(() => new Date().toISOString().slice(0, 10));
+  const [rollBranchId, setRollBranchId] = useState('');
+  const [rollStatusByUser, setRollStatusByUser] = useState({});
+  const [rollLoading, setRollLoading] = useState(false);
+  const [rollSaving, setRollSaving] = useState(false);
+
   const branches = useMemo(
     () => ws?.snapshot?.workspaceBranches ?? ws?.session?.branches ?? [],
     [ws?.snapshot?.workspaceBranches, ws?.session?.branches]
   );
+  const defaultRollBranchId = branches[0]?.id || '';
+  const rollBranchKey = rollBranchId || defaultRollBranchId;
 
   const canView = caps?.canUploadAttendance || caps?.canPayroll || caps?.canViewDirectory;
   const canUpload = caps?.canUploadAttendance || caps?.canPayroll;
@@ -62,6 +71,45 @@ export default function HrTime() {
     }, 0);
     return () => window.clearTimeout(id);
   }, [caps, modalOpen, canPickStaff, loadStaff]);
+
+  const loadRoll = useCallback(async () => {
+    if (!rollBranchKey || !/^\d{4}-\d{2}-\d{2}$/.test(rollDay)) return;
+    setRollLoading(true);
+    const { ok, data } = await apiFetch(
+      `/api/hr/daily-roll?branchId=${encodeURIComponent(rollBranchKey)}&dayIso=${encodeURIComponent(rollDay)}`
+    );
+    setRollLoading(false);
+    if (!ok || !data?.ok) {
+      showToast(data?.error || 'Could not load daily roll.', { variant: 'error' });
+      setRollStatusByUser({});
+      return;
+    }
+    const m = {};
+    if (data.roll?.rows?.length) {
+      for (const r of data.roll.rows) {
+        const uid = String(r.userId || '').trim();
+        if (!uid) continue;
+        m[uid] = String(r.status || '').toLowerCase() === 'late' ? 'late' : 'present';
+      }
+    }
+    setRollStatusByUser(m);
+  }, [rollBranchKey, rollDay, showToast]);
+
+  useEffect(() => {
+    if (caps === null || !canPickStaff || !rollBranchKey) return;
+    const id = window.setTimeout(() => {
+      void loadRoll();
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [caps, canPickStaff, rollBranchKey, rollDay, loadRoll]);
+
+  useEffect(() => {
+    if (caps === null || !canPickStaff) return;
+    const id = window.setTimeout(() => {
+      void loadStaff();
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [caps, canPickStaff, loadStaff]);
 
   const openModal = () => {
     const d = new Date();
@@ -124,14 +172,14 @@ export default function HrTime() {
     <>
       <PageHeader
         title="Time & attendance"
-        subtitle="Monthly absent days by employee feed into payroll (base ÷ 22 per absent day)."
+        subtitle="Daily present/late per branch (same daily rate as absent: base ÷ 22 per late day in the payroll month). Monthly absent uploads still apply for full-day absence."
         actions={
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
               onClick={() => load()}
               disabled={busy}
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black uppercase text-[#7028e6] disabled:opacity-50"
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black uppercase text-[#134e4a] disabled:opacity-50"
             >
               <RefreshCw size={14} className={busy ? 'animate-spin' : ''} />
               Refresh
@@ -140,7 +188,7 @@ export default function HrTime() {
               <button
                 type="button"
                 onClick={openModal}
-                className="inline-flex items-center gap-2 rounded-xl bg-[#7028e6] px-3 py-2 text-[11px] font-black uppercase text-white"
+                className="inline-flex items-center gap-2 rounded-xl bg-[#134e4a] px-3 py-2 text-[11px] font-black uppercase text-white"
               >
                 <Upload size={14} />
                 Upload period
@@ -150,10 +198,24 @@ export default function HrTime() {
         }
       />
       <MainPanel>
+        <HrOpsToolbar
+          left={<p className="text-xs font-semibold text-slate-600">Latest upload per branch/period is used in payroll recompute.</p>}
+          right={
+            <button
+              type="button"
+              onClick={() => load()}
+              disabled={busy}
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black uppercase text-[#134e4a] disabled:opacity-50"
+            >
+              <RefreshCw size={14} className={busy ? 'animate-spin' : ''} />
+              Refresh
+            </button>
+          }
+        />
         <div className="mb-6 flex flex-wrap gap-3 text-sm">
           <Link
             to="/hr/payroll"
-            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2 text-[11px] font-black uppercase text-[#7028e6] no-underline"
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2 text-[11px] font-black uppercase text-[#134e4a] no-underline"
           >
             Payroll runs →
           </Link>
@@ -161,10 +223,147 @@ export default function HrTime() {
             to="/hr/salary-welfare"
             className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2 text-[11px] font-black uppercase text-slate-600 no-underline"
           >
-            Salary &amp; welfare →
+            Salary &amp; benefits →
           </Link>
         </div>
 
+        <HrSectionCard
+          title="Daily roll (branch managers)"
+          subtitle="Mark each staff member present or late for the selected calendar day. Saved once per branch per day; payroll picks up late counts when you recompute the month."
+        >
+          {!canPickStaff ? (
+            <p className="text-sm text-slate-600">You need staff directory visibility to use the daily roll.</p>
+          ) : (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="text-xs font-bold text-slate-700">
+                  Branch
+                  <select
+                    className="mt-1 block w-48 rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                    value={rollBranchKey}
+                    onChange={(e) => setRollBranchId(e.target.value)}
+                  >
+                    {branches.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name || b.id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-xs font-bold text-slate-700">
+                  Date
+                  <input
+                    type="date"
+                    className="mt-1 block rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                    value={rollDay}
+                    onChange={(e) => setRollDay(e.target.value)}
+                  />
+                </label>
+                <button
+                  type="button"
+                  disabled={rollLoading}
+                  onClick={() => loadRoll()}
+                  className="rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black uppercase text-[#134e4a] disabled:opacity-50"
+                >
+                  {rollLoading ? 'Loading…' : 'Reload'}
+                </button>
+              </div>
+              {(() => {
+                const branchStaff = staff.filter((s) => String(s.branchId || '') === rollBranchKey);
+                if (branchStaff.length === 0) {
+                  return <p className="text-sm text-slate-600">No staff mapped to this branch.</p>;
+                }
+                return (
+                  <div className="overflow-x-auto rounded-2xl border border-slate-200/90 bg-white shadow-sm">
+                    <table className="min-w-full text-left text-sm">
+                      <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-500">
+                        <tr>
+                          <th className="px-4 py-3">Staff</th>
+                          <th className="px-4 py-3">Today</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {branchStaff.map((s) => {
+                          const st = rollStatusByUser[s.userId] ?? 'present';
+                          return (
+                            <tr key={s.userId} className="border-t border-slate-100">
+                              <td className="px-4 py-3">
+                                <p className="font-semibold text-slate-900">{s.displayName || s.username}</p>
+                                <p className="text-xs text-slate-500">{s.employeeNo || s.userId}</p>
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className="flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setRollStatusByUser((m) => ({ ...m, [s.userId]: 'present' }))
+                                    }
+                                    className={`rounded-lg px-3 py-1.5 text-[11px] font-black uppercase ${
+                                      st === 'present'
+                                        ? 'bg-emerald-600 text-white'
+                                        : 'border border-slate-200 text-slate-700 hover:bg-slate-50'
+                                    }`}
+                                  >
+                                    Present
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setRollStatusByUser((m) => ({ ...m, [s.userId]: 'late' }))
+                                    }
+                                    className={`rounded-lg px-3 py-1.5 text-[11px] font-black uppercase ${
+                                      st === 'late'
+                                        ? 'bg-amber-600 text-white'
+                                        : 'border border-slate-200 text-slate-700 hover:bg-slate-50'
+                                    }`}
+                                  >
+                                    Late
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
+              {canUpload ? (
+                <button
+                  type="button"
+                  disabled={rollSaving || rollLoading || !rollBranchKey}
+                  onClick={async () => {
+                    const branchStaff = staff.filter((s) => String(s.branchId || '') === rollBranchKey);
+                    const rows = branchStaff.map((s) => ({
+                      userId: s.userId,
+                      status: rollStatusByUser[s.userId] ?? 'present',
+                    }));
+                    setRollSaving(true);
+                    const { ok, data } = await apiFetch('/api/hr/daily-roll', {
+                      method: 'POST',
+                      body: JSON.stringify({ branchId: rollBranchKey, dayIso: rollDay, rows }),
+                    });
+                    setRollSaving(false);
+                    if (!ok || !data?.ok) {
+                      showToast(data?.error || 'Could not save roll.', { variant: 'error' });
+                      return;
+                    }
+                    showToast('Daily roll saved.');
+                    void loadRoll();
+                  }}
+                  className="rounded-xl bg-[#134e4a] px-4 py-2.5 text-[11px] font-black uppercase text-white disabled:opacity-50"
+                >
+                  {rollSaving ? 'Saving…' : 'Save roll for this day'}
+                </button>
+              ) : (
+                <p className="text-xs text-slate-500">You can view the roll but cannot save without attendance/payroll permission.</p>
+              )}
+            </div>
+          )}
+        </HrSectionCard>
+
+        <HrSectionCard title="Attendance uploads" subtitle="Validate period and branch before payroll recompute">
         {uploads.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/60 p-8 text-center">
             <CalendarClock className="mx-auto text-slate-300" size={40} />
@@ -177,7 +376,7 @@ export default function HrTime() {
               <button
                 type="button"
                 onClick={openModal}
-                className="mt-4 inline-flex items-center gap-2 rounded-xl bg-[#7028e6] px-4 py-2 text-[11px] font-black uppercase text-white"
+                className="mt-4 inline-flex items-center gap-2 rounded-xl bg-[#134e4a] px-4 py-2 text-[11px] font-black uppercase text-white"
               >
                 <Plus size={14} />
                 New upload
@@ -214,13 +413,14 @@ export default function HrTime() {
             </table>
           </div>
         )}
+        </HrSectionCard>
       </MainPanel>
 
       <ModalFrame isOpen={modalOpen} onClose={() => setModalOpen(false)}>
         <div className="w-full max-w-lg rounded-[28px] border border-slate-200/90 bg-white shadow-xl overflow-hidden">
-          <div className="flex items-center justify-between border-b border-slate-100 bg-violet-600 px-5 py-4 text-white">
+          <div className="flex items-center justify-between border-b border-slate-100 bg-[#134e4a] px-5 py-4 text-white">
             <div>
-              <p className="text-[10px] font-black uppercase text-violet-200">Attendance</p>
+              <p className="text-[10px] font-black uppercase text-teal-100">Attendance</p>
               <h2 className="text-base font-black">Upload monthly absent days</h2>
             </div>
             <button
@@ -269,10 +469,10 @@ export default function HrTime() {
 
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-black uppercase text-[#7028e6]">Employees</span>
+                <span className="text-xs font-black uppercase text-[#134e4a]">Employees</span>
                 <button
                   type="button"
-                  className="text-[11px] font-black uppercase text-violet-700"
+                  className="text-[11px] font-black uppercase text-[#134e4a]"
                   onClick={() =>
                   setForm((f) => ({
                     ...f,
@@ -377,7 +577,7 @@ export default function HrTime() {
               <button
                 type="submit"
                 disabled={busy}
-                className="rounded-xl bg-[#7028e6] px-4 py-2 text-[11px] font-black uppercase text-white disabled:opacity-50"
+                className="rounded-xl bg-[#134e4a] px-4 py-2 text-[11px] font-black uppercase text-white disabled:opacity-50"
               >
                 Save upload
               </button>

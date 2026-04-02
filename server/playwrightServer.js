@@ -5,10 +5,12 @@ import { createApp } from './app.js';
 const dbPath = process.env.ZAREWA_DB || defaultDbPath();
 
 if (dbPath !== ':memory:') {
-  try {
-    fs.rmSync(dbPath, { force: true });
-  } catch {
-    // Ignore stale or missing test DB cleanup failures.
+  for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    try {
+      fs.rmSync(p, { force: true });
+    } catch {
+      /* Windows file locks / missing sibling files */
+    }
   }
 }
 

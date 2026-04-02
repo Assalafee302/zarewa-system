@@ -14,7 +14,9 @@ export function BranchWorkspaceBar() {
 
   const currentId = String(ws.session?.currentBranchId ?? '').trim();
   const viewAll = Boolean(ws.session?.viewAllBranches);
-  const canHqRollup = ws.hasPermission('hq.view_all_branches');
+  const roleKey = String(ws.session?.user?.roleKey ?? '').trim().toLowerCase();
+  const isHqRole = roleKey === 'admin' || roleKey === 'md' || roleKey === 'ceo';
+  const canHqRollup = isHqRole && ws.hasPermission('hq.view_all_branches');
 
   const onBranchChange = useCallback(
     async (e) => {

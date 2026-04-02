@@ -13,10 +13,20 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
+    "test:e2e:hr": "playwright test e2e/hr-end-to-end.spec.js e2e/hr-edge.spec.js",
+    "test:e2e:hr:full": "playwright test e2e/hr-end-to-end.spec.js e2e/hr-edge.spec.js e2e/hr-attendance.spec.js e2e/hr-roles-matrix.spec.js",
+    "test:e2e:hr:stress": "playwright test e2e/hr-stress.spec.js",
     "test:all": "npm run test && npm run test:e2e",
     "test:transactions": "vitest run server/scenarioMatrix.test.js server/transactionalScenarios.test.js",
+    "verify:ci": "npm run lint && npm run test:transactions",
     "verify:complete": "node scripts/verify-complete.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "hr:import-staff": "node server/importZarewaStaffFromXlsx.js",
+    "stress:api": "node scripts/stress-api.mjs",
+    "stress:lifecycle": "node scripts/fifty-lifecycle-stress.mjs",
+    "stress:finance100": "node scripts/finance-stress-100.mjs",
+    "bench:dashboard": "node scripts/bench-dashboard-summary.mjs",
+    "retention:prune": "node scripts/retention-prune.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",

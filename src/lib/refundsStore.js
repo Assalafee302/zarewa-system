@@ -1,9 +1,7 @@
 /**
  * Refund requests — shared between Sales (create / approve) and Finance (pay out).
- * Demo persistence in localStorage.
+ * Live data comes from workspace snapshot; localStorage is legacy-only if present.
  */
-
-import { SALES_MOCK } from '../Data/mockData';
 
 const STORAGE_KEY = 'zarewa.sales.refunds';
 
@@ -78,10 +76,6 @@ export function normalizeRefund(r) {
   };
 }
 
-export function defaultRefundsFromMock() {
-  return (SALES_MOCK.refunds ?? []).map(normalizeRefund);
-}
-
 export function loadRefunds() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -94,7 +88,7 @@ export function loadRefunds() {
   } catch {
     /* ignore */
   }
-  return defaultRefundsFromMock();
+  return [];
 }
 
 export function saveRefunds(list) {

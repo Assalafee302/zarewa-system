@@ -158,22 +158,16 @@ export function unlockAccountingPeriod(db, periodKey, actor, reason = '') {
   return { ok: true };
 }
 
-function nextPaymentRequestId(db) {
-  const rows = db.prepare(`SELECT request_id FROM payment_requests`).all();
-  const nums = rows
-    .map((r) => parseInt(String(r.request_id).replace(/\D/g, ''), 10))
-    .filter((n) => !Number.isNaN(n));
-  const next = nums.length ? Math.max(...nums) + 1 : 1;
-  return `PREQ-2026-${String(next).padStart(3, '0')}`;
+function nextPaymentRequestId(_db) {
+  const year = new Date().getFullYear();
+  const salt = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `PREQ-${year}-${Date.now()}-${salt}`;
 }
 
-function nextRefundId(db) {
-  const rows = db.prepare(`SELECT refund_id FROM customer_refunds`).all();
-  const nums = rows
-    .map((r) => parseInt(String(r.refund_id).replace(/\D/g, ''), 10))
-    .filter((n) => !Number.isNaN(n));
-  const next = nums.length ? Math.max(...nums) + 1 : 1;
-  return `RF-2026-${String(next).padStart(3, '0')}`;
+function nextRefundId(_db) {
+  const year = new Date().getFullYear();
+  const salt = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `RF-${year}-${Date.now()}-${salt}`;
 }
 
 export function insertPaymentRequest(db, payload, actor) {
@@ -183,40 +177,46 @@ export function insertPaymentRequest(db, payload, actor) {
   if (amountRequestedNgn <= 0) return { ok: false, error: 'Amount requested must be positive.' };
   const expense = db.prepare(`SELECT expense_id FROM expenses WHERE expense_id = ?`).get(expenseID);
   if (!expense) return { ok: false, error: 'Linked expense was not found.' };
-  const requestID = String(payload.requestID ?? '').trim() || nextPaymentRequestId(db);
+  const providedRequestId = String(payload.requestID ?? '').trim();
   const requestDate = String(payload.requestDate ?? '').trim() || nowIso().slice(0, 10);
-  try {
-    assertPeriodOpen(db, requestDate, 'Payment request date');
-    db.transaction(() => {
-      db.prepare(
-        `INSERT INTO payment_requests (
-          request_id, expense_id, amount_requested_ngn, request_date, approval_status, description,
-          approved_by, approved_at_iso, approval_note
-        ) VALUES (?,?,?,?,?,?,?,?,?)`
-      ).run(
-        requestID,
-        expenseID,
-        amountRequestedNgn,
-        requestDate,
-        'Pending',
-        String(payload.description ?? '').trim() || '—',
-        '',
-        '',
-        ''
-      );
-      appendAuditLog(db, {
-        actor,
-        action: 'payment_request.create',
-        entityKind: 'payment_request',
-        entityId: requestID,
-        note: `Payment request ${requestID} submitted`,
-        details: { expenseID, amountRequestedNgn },
-      });
-    })();
-    return { ok: true, requestID };
-  } catch (e) {
-    return { ok: false, error: String(e.message || e) };
+  const description = String(payload.description ?? '').trim() || '—';
+
+  const maxAttempts = providedRequestId ? 1 : 3;
+  let lastErr = null;
+  for (let i = 0; i < maxAttempts; i += 1) {
+    const requestID =
+      providedRequestId ||
+      (i === 0
+        ? nextPaymentRequestId(db)
+        : `${nextPaymentRequestId(db)}-${Math.random().toString(36).slice(2, 7)}`);
+    try {
+      assertPeriodOpen(db, requestDate, 'Payment request date');
+      db.transaction(() => {
+        db.prepare(
+          `INSERT INTO payment_requests (
+            request_id, expense_id, amount_requested_ngn, request_date, approval_status, description,
+            approved_by, approved_at_iso, approval_note
+          ) VALUES (?,?,?,?,?,?,?,?,?)`
+        ).run(requestID, expenseID, amountRequestedNgn, requestDate, 'Pending', description, '', '', '');
+        appendAuditLog(db, {
+          actor,
+          action: 'payment_request.create',
+          entityKind: 'payment_request',
+          entityId: requestID,
+          note: `Payment request ${requestID} submitted`,
+          details: { expenseID, amountRequestedNgn },
+        });
+      })();
+      return { ok: true, requestID };
+    } catch (e) {
+      lastErr = e;
+      const msg = String(e?.message || e);
+      if (providedRequestId || !msg.includes('UNIQUE constraint failed: payment_requests.request_id')) {
+        return { ok: false, error: msg };
+      }
+    }
   }
+  return { ok: false, error: String(lastErr?.message || lastErr || 'Could not create payment request.') };
 }
 
 export function decidePaymentRequest(db, requestID, payload, actor) {

@@ -1,5 +1,5 @@
 /**
- * Merge mock receipts with ledger RECEIPT rows for Sales UI and print history.
+ * Merge imported/historical receipts with ledger RECEIPT rows for Sales UI and print history.
  */
 import { loadLedgerEntries, amountDueOnQuotation } from './customerLedgerStore';
 import { formatNgn } from '../Data/mockData';
@@ -32,11 +32,11 @@ function quotePaymentHint(quotation) {
 
 /**
  * Rows for sidebar + main list: newest first. Ledger posts appear immediately after save.
- * @param {object[]} mockReceipts
+ * @param {object[]} importedReceipts
  * @param {object[]} quotations
  * @param {number} [_ledgerEpoch] bump from parent to recompute
  */
-export function mergeReceiptRowsForSales(mockReceipts, quotations, _ledgerEpoch = 0) {
+export function mergeReceiptRowsForSales(importedReceipts, quotations, _ledgerEpoch = 0) {
   void _ledgerEpoch;
   const qMap = new Map((quotations || []).map((q) => [q.id, q]));
   const ledgerEntries = loadLedgerEntries();
@@ -74,7 +74,7 @@ export function mergeReceiptRowsForSales(mockReceipts, quotations, _ledgerEpoch 
 
   const ledgerIds = new Set(ledgerRows.map((r) => r.id));
 
-  const sampleRows = (mockReceipts || [])
+  const importedRows = (importedReceipts || [])
     .filter((r) => {
       if (String(r.status || '').toLowerCase() === 'reversed') return false;
       if (r.ledgerEntryId && reversedReceiptIds.has(String(r.ledgerEntryId))) return false;
@@ -87,25 +87,25 @@ export function mergeReceiptRowsForSales(mockReceipts, quotations, _ledgerEpoch 
       const hint = quotePaymentHint(q);
       return {
         ...r,
-        source: 'sample',
+        source: 'imported',
         dateISO: r.dateISO || r.date || '',
         _payBadge: hint.badge,
-        _subLabel: 'Sample / imported row',
+        _subLabel: 'Imported history row',
         _detailNote: r.method ? `Method: ${r.method}` : '',
       };
     });
 
-  const merged = [...ledgerRows, ...sampleRows];
+  const merged = [...ledgerRows, ...importedRows];
   merged.sort((a, b) => String(b.dateISO || '').localeCompare(String(a.dateISO || '')));
   return merged;
 }
 
 /**
- * Chronological history of payments on one quotation (ledger + mock), for receipt printout.
+ * Chronological history of payments on one quotation (ledger + imported), for receipt printout.
  * @param {string} quotationId
- * @param {object[]} mockReceipts
+ * @param {object[]} importedReceipts
  */
-export function quotationReceiptPrintHistory(quotationId, mockReceipts = []) {
+export function quotationReceiptPrintHistory(quotationId, importedReceipts = []) {
   if (!quotationId) return [];
   const ledgerEntries = loadLedgerEntries();
   const reversedReceiptIds = new Set(
@@ -126,7 +126,7 @@ export function quotationReceiptPrintHistory(quotationId, mockReceipts = []) {
       detail: e.bankReference || e.note || '—',
     }));
 
-  const mock = (mockReceipts || [])
+  const imported = (importedReceipts || [])
     .filter(
       (r) =>
         r.quotationRef === quotationId &&
@@ -138,12 +138,12 @@ export function quotationReceiptPrintHistory(quotationId, mockReceipts = []) {
       dateStr: formatPrintDate(r.dateISO) || r.date || '—',
       iso: r.dateISO || '',
       amountNgn: Number(r.amountNgn) || 0,
-      source: 'Sample',
-      detail: r.method ? `Method: ${r.method}` : 'Sample receipt',
+      source: 'Imported',
+      detail: r.method ? `Method: ${r.method}` : 'Imported receipt',
     }));
 
   const byId = new Map();
-  mock.forEach((row) => byId.set(row.id, row));
+  imported.forEach((row) => byId.set(row.id, row));
   ledger.forEach((row) => byId.set(row.id, row));
   return [...byId.values()].sort((a, b) => String(a.iso || a.dateStr).localeCompare(String(b.iso || b.dateStr)));
 }

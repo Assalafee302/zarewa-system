@@ -12,6 +12,7 @@ import {
 import { ModalFrame } from './layout/ModalFrame';
 import { useCustomers } from '../context/CustomersContext';
 import { useToast } from '../context/ToastContext';
+import { useWorkspace } from '../context/WorkspaceContext';
 import {
   amountDueOnQuotation,
   recordReceiptWithQuotation,
@@ -19,7 +20,7 @@ import {
 import { quotationReceiptPrintHistory } from '../lib/salesReceiptsList';
 import { formatNgn } from '../Data/mockData';
 import { apiFetch } from '../lib/apiBase';
-import { loadTreasuryAccounts } from '../lib/treasuryAccountsStore';
+import { treasuryAccountsFromSnapshot } from '../lib/treasuryAccountsStore';
 import { ReceiptPrintQuick, ReceiptPrintFull } from './receipt/ReceiptPrintViews';
 
 function newLineId() {
@@ -53,7 +54,7 @@ const ReceiptModal = ({
   editData = null,
   accessMode = 'edit',
   quotations = [],
-  mockReceiptsForHistory = [],
+  importedReceiptsForHistory = [],
   onLedgerChange,
   ledgerNonce = 0,
   useLedgerApi = false,
@@ -61,6 +62,7 @@ const ReceiptModal = ({
 }) => {
   const { customers } = useCustomers();
   const { show: showToast } = useToast();
+  const ws = useWorkspace();
   const isEdit = Boolean(editData?.id);
   const readOnly = accessMode === 'view';
 
@@ -71,7 +73,7 @@ const ReceiptModal = ({
   const [showPrint, setShowPrint] = useState(false);
   const [printKind, setPrintKind] = useState('quick');
 
-  const treasuryList = useMemo(() => loadTreasuryAccounts(), []);
+  const treasuryList = useMemo(() => treasuryAccountsFromSnapshot(ws?.snapshot), [ws?.snapshot]);
 
   const defaultAccountId = treasuryList[0]?.id ?? '';
 
@@ -182,9 +184,9 @@ const ReceiptModal = ({
   const quotationPaymentHistory = useMemo(
     () =>
       quotationRef
-        ? quotationReceiptPrintHistory(quotationRef, mockReceiptsForHistory)
+        ? quotationReceiptPrintHistory(quotationRef, importedReceiptsForHistory)
         : [],
-    [quotationRef, mockReceiptsForHistory]
+    [quotationRef, importedReceiptsForHistory]
   );
 
   const printLinesPayload = useMemo(() => {
@@ -366,7 +368,7 @@ const ReceiptModal = ({
           <div className="px-5 py-2 bg-slate-50 border-b border-slate-200 text-[10px] font-medium text-slate-600">
             {editData?.source === 'ledger'
               ? 'This row is a live ledger payment — view and print only. Corrections go through Finance.'
-              : 'View only for sales. Sample rows are not the ledger; new posts are recorded on the customer ledger.'}
+              : 'View only for sales. Imported rows are not the live ledger; new posts are recorded on the customer ledger.'}
           </div>
         ) : null}
 

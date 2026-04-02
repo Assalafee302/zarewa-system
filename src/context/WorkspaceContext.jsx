@@ -2,6 +2,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { apiFetch, apiUrl } from '../lib/apiBase';
 import { replaceLedgerEntries } from '../lib/customerLedgerStore';
+import { canAccessModuleWithPermissions, hasPermissionInList } from '../lib/moduleAccess';
 
 const WorkspaceContext = createContext(null);
 
@@ -41,6 +42,8 @@ function clearBootstrapCache() {
 export function WorkspaceProvider({ children }) {
   const [status, setStatus] = useState('checking');
   const [snapshot, setSnapshot] = useState(null);
+  const [dashboardSummary, setDashboardSummary] = useState(null);
+  const [dashboardSummaryEtag, setDashboardSummaryEtag] = useState('');
   const [lastError, setLastError] = useState(null);
   const [refreshEpoch, setRefreshEpoch] = useState(0);
 
@@ -58,9 +61,36 @@ export function WorkspaceProvider({ children }) {
     return data;
   }, []);
 
-  const refresh = useCallback(async () => {
+  const refreshDashboardSummary = useCallback(async () => {
     try {
-      const { ok, status: httpStatus, data } = await apiFetch('/api/bootstrap');
+      const headers = dashboardSummaryEtag ? { 'If-None-Match': dashboardSummaryEtag } : {};
+      const r = await fetch(apiUrl('/api/dashboard/summary'), {
+        method: 'GET',
+        credentials: 'include',
+        headers,
+      });
+      if (r.status === 304) return dashboardSummary;
+      const data = await r.json().catch(() => null);
+      if (r.status === 401 || data?.code === 'AUTH_REQUIRED') {
+        setDashboardSummary(null);
+        setDashboardSummaryEtag('');
+        return null;
+      }
+      if (!r.ok || !data?.ok) return dashboardSummary;
+      const etag = r.headers.get('ETag') || '';
+      setDashboardSummary(data);
+      setDashboardSummaryEtag(etag);
+      return data;
+    } catch {
+      return dashboardSummary;
+    }
+  }, [dashboardSummary, dashboardSummaryEtag]);
+
+  const refresh = useCallback(async (opts = {}) => {
+    try {
+      const mode = String(opts?.mode ?? '').trim();
+      const qs = mode ? `?mode=${encodeURIComponent(mode)}` : '';
+      const { ok, status: httpStatus, data } = await apiFetch(`/api/bootstrap${qs}`);
       if (httpStatus === 401 || data?.code === 'AUTH_REQUIRED') {
         clearBootstrapCache();
         setStatus('auth_required');
@@ -94,7 +124,13 @@ export function WorkspaceProvider({ children }) {
         if (!ok || !data?.ok) {
           return { ok: false, error: data?.error || 'Sign-in failed.' };
         }
-        await refresh();
+        // Fast initial render: dashboard summary + dashboard bootstrap first, then full snapshot.
+        await refreshDashboardSummary();
+        await refresh({ mode: 'dashboard' });
+        setTimeout(() => {
+          refreshDashboardSummary();
+          refresh();
+        }, 0);
         return { ok: true, data };
       } catch (e) {
         setStatus('offline');
@@ -107,7 +143,57 @@ export function WorkspaceProvider({ children }) {
         };
       }
     },
-    [refresh]
+    [refresh, refreshDashboardSummary]
+  );
+
+  const forgotPassword = useCallback(
+    async (identifier) => {
+      try {
+        const { ok, data } = await apiFetch('/api/session/forgot-password', {
+          method: 'POST',
+          body: JSON.stringify({ identifier }),
+        });
+        if (!ok || !data?.ok) {
+          return { ok: false, error: data?.error || 'Could not request password reset.' };
+        }
+        return { ok: true, data };
+      } catch (e) {
+        setStatus('offline');
+        setSnapshot(null);
+        setLastError(String(e.message || e));
+        replaceLedgerEntries([]);
+        return {
+          ok: false,
+          error: 'API server is offline. Start the backend server, then try again.',
+        };
+      }
+    },
+    []
+  );
+
+  const resetPassword = useCallback(
+    async (identifier, token, newPassword) => {
+      try {
+        const { ok, data } = await apiFetch('/api/session/reset-password', {
+          method: 'POST',
+          body: JSON.stringify({ identifier, token, newPassword }),
+        });
+        if (!ok || !data?.ok) {
+          return { ok: false, error: data?.error || 'Could not reset password.' };
+        }
+        return { ok: true, data };
+      } catch (e) {
+        setStatus('offline');
+        setSnapshot(null);
+        setLastError(String(e.message || e));
+        replaceLedgerEntries([]);
+        return {
+          ok: false,
+          error: 'API server is offline. Start the backend server, then try again.',
+        };
+      }
+    },
+    []
   );
 
   const logout = useCallback(async () => {
@@ -119,6 +205,8 @@ export function WorkspaceProvider({ children }) {
     replaceLedgerEntries([]);
     clearBootstrapCache();
     setSnapshot(null);
+    setDashboardSummary(null);
+    setDashboardSummaryEtag('');
     setLastError(null);
     setStatus('auth_required');
   }, []);
@@ -162,44 +250,13 @@ export function WorkspaceProvider({ children }) {
   );
 
   const hasPermission = useCallback(
-    (permission) => permissions.includes('*') || permissions.includes(permission),
+    (permission) => hasPermissionInList(permissions, permission),
     [permissions]
   );
 
   const canAccessModule = useCallback(
-    (moduleKey) => {
-      switch (moduleKey) {
-        case 'sales':
-          return (
-            hasPermission('sales.view') ||
-            hasPermission('sales.manage') ||
-            hasPermission('quotations.manage') ||
-            hasPermission('receipts.post')
-          );
-        case 'procurement':
-          return hasPermission('procurement.view') || hasPermission('purchase_orders.manage');
-        case 'operations':
-          return hasPermission('operations.view') || hasPermission('production.manage');
-        case 'finance':
-          return hasPermission('finance.view') || hasPermission('finance.post') || hasPermission('finance.pay');
-        case 'reports':
-          return hasPermission('reports.view');
-        case 'settings':
-          return hasPermission('settings.view') || hasPermission('audit.view') || hasPermission('period.manage');
-        case 'hr':
-          return (
-            hasPermission('*') ||
-            hasPermission('settings.view') ||
-            hasPermission('finance.pay') ||
-            hasPermission('finance.view') ||
-            hasPermission('operations.manage') ||
-            hasPermission('audit.view')
-          );
-        default:
-          return true;
-      }
-    },
-    [hasPermission]
+    (moduleKey) => canAccessModuleWithPermissions(permissions, moduleKey),
+    [permissions]
   );
 
   const canMutate = status === 'ok';
@@ -210,8 +267,10 @@ export function WorkspaceProvider({ children }) {
     () => ({
       status,
       snapshot,
+      dashboardSummary,
       lastError,
       refresh,
+      refreshDashboardSummary,
       refreshEpoch,
       /** Live server reachable — reads and writes go to API. */
       apiOnline: status === 'ok',
@@ -228,6 +287,8 @@ export function WorkspaceProvider({ children }) {
       hasPermission,
       canAccessModule,
       login,
+      forgotPassword,
+      resetPassword,
       logout,
       changePassword,
       updateWorkspace,
@@ -235,8 +296,10 @@ export function WorkspaceProvider({ children }) {
     [
       status,
       snapshot,
+      dashboardSummary,
       lastError,
       refresh,
+      refreshDashboardSummary,
       refreshEpoch,
       hasWorkspaceData,
       usingCachedData,
@@ -246,6 +309,8 @@ export function WorkspaceProvider({ children }) {
       hasPermission,
       canAccessModule,
       login,
+      forgotPassword,
+      resetPassword,
       logout,
       changePassword,
       updateWorkspace,

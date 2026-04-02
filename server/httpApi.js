@@ -8,7 +8,7 @@ import {
   planRefundAdvance,
   receiptResultFromSavedRows,
 } from '../src/lib/customerLedgerCore.js';
-import { buildBootstrap } from './bootstrap.js';
+import { buildBootstrap, buildDashboardBootstrap } from './bootstrap.js';
 import {
   CUSTOMER_AND_AR_READ_PERMS,
   LEDGER_RELATED_PERMS,
@@ -17,14 +17,18 @@ import {
   SALES_DOMAIN_PERMS,
 } from './workspaceAccess.js';
 import {
+  canUseAllBranchesRollup,
   changePassword,
+  clearCsrfCookie,
   clearSessionCookie,
   completePasswordReset,
   loginWithPassword,
   logoutSession,
+  patchAppUserWorkspaceDepartment,
   requestPasswordReset,
   requireAuth,
   requirePermission,
+  setCsrfCookie,
   setSessionCookie,
   updateUserProfile,
   userHasPermission,
@@ -48,6 +52,7 @@ import {
   listProductionJobCoilsForJob,
   previewProductionConversion,
   saveProductionJobAllocations,
+  signOffProductionManagerReview,
   startProductionJob,
 } from './productionTraceability.js';
 import {
@@ -69,7 +74,11 @@ import {
   listSalesReceipts,
   listPurchaseOrders,
   listCuttingLists,
+  listCoilLots,
+  getJsonBlob,
+  setJsonBlob,
   workspaceReportAggregateCounts,
+  dashboardSummary,
 } from './readModel.js';
 import { insertLedgerRows } from './writeOps.js';
 import * as write from './writeOps.js';
@@ -78,15 +87,22 @@ import {
   createHrRequest,
   createPayrollRun,
   deleteHrRequestDraft,
+  exportPayrollPayslipsCsv,
+  exportPayrollStatutoryPackCsv,
   exportPayrollTreasuryPackCsv,
   generateEmploymentLetter,
   getHrMeProfile,
+  getHrDailyRollCall,
   getPayrollRunById,
   hrListScope,
   hrReviewRequest,
   hrTablesReady,
   listEmploymentLetters,
   listHrAttendance,
+  listHrCompensationInsights,
+  listHrDataCleanupQueue,
+  applyHrDataCleanupAction,
+  hrNextUatReadiness,
   listHrRequests,
   listHrStaff,
   listPayrollLines,
@@ -95,14 +111,49 @@ import {
   patchHrLoanMaintenance,
   patchHrStaffBonusAccrualNote,
   patchPayrollRun,
+  recomputeHrLeaveBalances,
   registerNewStaffWithProfile,
   salaryWelfareSnapshot,
   submitHrRequest,
+  acceptHrPolicy,
+  listMissingHrPolicyAcceptances,
+  listHrObservability,
+  listHrPolicyAcknowledgements,
+  listHrLeaveBalances,
+  adjustHrLeaveBalance,
+  upsertHrDailyRollCall,
   upsertHrStaffProfile,
   uploadHrAttendance,
 } from './hrOps.js';
+import { requiredHrPoliciesFor } from './hrPolicy.js';
 
 const loginAttemptBuckets = new Map();
+
+const STRICT_BRANCH_AUDIT_TABLES = [
+  { table: 'customers', idColumn: 'customer_id' },
+  { table: 'customer_crm_interactions', idColumn: 'id' },
+  { table: 'suppliers', idColumn: 'supplier_id' },
+  { table: 'transport_agents', idColumn: 'id' },
+  { table: 'products', idColumn: 'product_id' },
+  { table: 'quotations', idColumn: 'id' },
+  { table: 'ledger_entries', idColumn: 'id' },
+  { table: 'sales_receipts', idColumn: 'id' },
+  { table: 'cutting_lists', idColumn: 'id' },
+  { table: 'purchase_orders', idColumn: 'po_id' },
+  { table: 'coil_lots', idColumn: 'coil_no' },
+  { table: 'deliveries', idColumn: 'id' },
+  { table: 'production_jobs', idColumn: 'id' },
+  { table: 'customer_refunds', idColumn: 'refund_id' },
+  { table: 'expenses', idColumn: 'expense_id' },
+];
+
+function tableHasColumn(db, table, column) {
+  try {
+    return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+  } catch {
+    return false;
+  }
+}
 const forgotPasswordBuckets = new Map();
 
 function clientIp(req) {
@@ -159,25 +210,22 @@ function hrCapsForUser(user) {
   const star = has('*');
   return {
     ok: true,
-    canViewDirectory:
-      star ||
-      has('hr.directory.view') ||
-      has('hr.view_directory') ||
-      has('settings.view') ||
-      has('audit.view'),
-    canPayroll: star || has('hr.payroll.manage') || has('hr.payroll') || has('finance.pay'),
-    canManageStaff: star || has('hr.staff.manage') || has('hr.manage') || has('settings.view'),
+    canViewDirectory: star || has('hr.directory.view') || has('hr.staff.manage'),
+    canPayroll: star || has('hr.payroll.manage'),
+    canManageStaff: star || has('hr.staff.manage'),
     canUploadAttendance:
-      star || has('hr.attendance.upload') || has('hr.attendance') || has('operations.manage'),
+      star || has('hr.attendance.upload'),
     canLoanMaint:
       star ||
-      has('hr.staff.manage') ||
       has('hr.requests.final_approve') ||
       has('hr.loan_maintain') ||
-      has('finance.approve'),
-    canHrReview: star || has('hr.requests.hr_review') || has('hr.manage'),
-    canFinalApprove: star || has('hr.requests.final_approve') || has('finance.approve'),
-    canIssueLetters: star || has('hr.letters.generate') || has('hr.manage'),
+      has('hr.staff.manage'),
+    canHrReview: star || has('hr.requests.hr_review'),
+    canFinalApprove: star || has('hr.requests.final_approve'),
+    canIssueLetters: star || has('hr.letters.generate'),
+    canViewSensitiveHr:
+      star || has('hr.staff.manage') || has('hr.payroll.manage'),
+    canCompliance: star || has('hr.compliance') || has('hr.staff.manage'),
   };
 }
 
@@ -211,6 +259,22 @@ export function registerHttpApi(app, db) {
     });
   });
 
+  app.get('/api/dashboard/summary', requirePermission('dashboard.view'), (req, res) => {
+    try {
+      const branchScope = resolveBootstrapBranchScope(req);
+      const payload = dashboardSummary(db, branchScope, { recentLimit: 12 });
+      const etag = `W/"${Buffer.from(JSON.stringify(payload)).toString('base64').slice(0, 64)}"`;
+      if (String(req.headers['if-none-match'] || '') === etag) {
+        return res.status(304).end();
+      }
+      res.setHeader('ETag', etag);
+      return res.json(payload);
+    } catch (e) {
+      console.error(e);
+      return res.status(500).json({ ok: false, error: 'Failed' });
+    }
+  });
+
   app.get('/api/session', (req, res) => {
     if (!req.user) {
       return res.status(401).json({ ok: false, authenticated: false, user: null, permissions: [] });
@@ -236,6 +300,8 @@ export function registerHttpApi(app, db) {
         return res.status(401).json({ ok: false, error: result.error });
       }
       setSessionCookie(res, result.sessionToken);
+      // CSRF cookie used by the SPA to protect cookie-authenticated write requests.
+      setCsrfCookie(res);
       appendAuditLog(db, {
         actor: result.session.user,
         action: 'session.login',
@@ -312,6 +378,7 @@ export function registerHttpApi(app, db) {
       });
       logoutSession(db, req.sessionToken);
       clearSessionCookie(res);
+      clearCsrfCookie(res);
       res.json({ ok: true });
     } catch (e) {
       console.error(e);
@@ -344,8 +411,8 @@ export function registerHttpApi(app, db) {
 
       let viewAll = Number(row.view_all_branches) === 1 ? 1 : 0;
       if (req.body?.viewAllBranches === true) {
-        if (!userHasPermission(req.user, 'hq.view_all_branches')) {
-          return res.status(403).json({ ok: false, error: 'HQ roll-up is not enabled for this role.' });
+        if (!canUseAllBranchesRollup(req.user)) {
+          return res.status(403).json({ ok: false, error: 'Only Admin, MD, or CEO can view all branches.' });
         }
         viewAll = 1;
       } else if (req.body?.viewAllBranches === false) {
@@ -425,6 +492,22 @@ export function registerHttpApi(app, db) {
     }
   });
 
+  app.patch('/api/session/dashboard-prefs', requireAuth, (req, res) => {
+    try {
+      const body = req.body && typeof req.body === 'object' ? req.body : {};
+      const next = {
+        showCharts: body.showCharts !== false,
+        showReportsStrip: body.showReportsStrip !== false,
+        showAlertBanner: body.showAlertBanner !== false,
+      };
+      setJsonBlob(db, `user_dashboard_prefs:${req.user.id}`, next);
+      return res.json({ ok: true, dashboardPrefs: next });
+    } catch (e) {
+      console.error(e);
+      return res.status(500).json({ ok: false, error: 'Could not save dashboard preferences.' });
+    }
+  });
+
   app.use('/api', requireAuth);
 
   app.get('/api/bootstrap', (req, res) => {
@@ -435,18 +518,47 @@ export function registerHttpApi(app, db) {
         userHasPermission(req.user, 'finance.approve');
       const includeUsers = userHasPermission(req.user, 'settings.view');
       const branchScope = resolveBootstrapBranchScope(req);
+      const mode = String(req.query?.mode ?? '').trim().toLowerCase();
+      const limit = parseInt(String(req.query?.limit ?? '600'), 10) || 600;
       res.json(
-        buildBootstrap(db, {
-          user: req.user,
-          session: req.session,
-          includeControls,
-          includeUsers,
-          branchScope,
-        })
+        (mode === 'dashboard'
+          ? buildDashboardBootstrap(db, {
+              user: req.user,
+              session: req.session,
+              includeControls,
+              includeUsers,
+              branchScope,
+              limit,
+            })
+          : buildBootstrap(db, {
+              user: req.user,
+              session: req.session,
+              includeControls,
+              includeUsers,
+              branchScope,
+            }))
       );
     } catch (e) {
       console.error(e);
       res.status(500).json({ ok: false, error: 'Bootstrap failed' });
+    }
+  });
+
+  app.patch('/api/workspace/app-users/:userId/department', requirePermission('settings.view'), (req, res) => {
+    try {
+      const r = patchAppUserWorkspaceDepartment(db, req.user, req.params.userId, req.body?.department);
+      if (!r.ok) return res.status(400).json({ ok: false, error: r.error });
+      appendAuditLog(db, {
+        actor: req.user,
+        action: 'user.workspace_department',
+        entityKind: 'user',
+        entityId: r.user.id,
+        note: String(r.user.department || ''),
+      });
+      return res.json({ ok: true, user: r.user });
+    } catch (e) {
+      console.error(e);
+      return res.status(500).json({ ok: false, error: 'Could not update workspace department.' });
     }
   });
 
@@ -462,7 +574,7 @@ export function registerHttpApi(app, db) {
   });
 
   /**
-   * Permission-aware quick search (customers, quotes, receipts, POs, suppliers, cutting lists).
+   * Permission-aware quick search (customers, quotes, receipts, POs, suppliers, cutting lists, coils).
    */
   app.get('/api/workspace/search', (req, res) => {
     try {
@@ -481,7 +593,7 @@ export function registerHttpApi(app, db) {
       const perm = (p) => userHasPermission(req.user, '*') || userHasPermission(req.user, p);
 
       if (perm('sales.view') || perm('customers.manage')) {
-        for (const c of listCustomers(db)) {
+        for (const c of listCustomers(db, branchScope)) {
           if (results.length >= limit) break;
           const blob = `${c.customerID} ${c.name} ${c.phoneNumber || ''} ${c.email || ''} ${c.companyName || ''}`.toLowerCase();
           if (blob.includes(q)) {
@@ -545,7 +657,7 @@ export function registerHttpApi(app, db) {
             });
           }
         }
-        for (const s of listSuppliers(db)) {
+        for (const s of listSuppliers(db, branchScope)) {
           if (results.length >= limit) break;
           const blob = `${s.supplierID} ${s.name || ''} ${s.city || ''}`.toLowerCase();
           if (blob.includes(q)) {
@@ -575,6 +687,21 @@ export function registerHttpApi(app, db) {
             });
           }
         }
+        for (const row of listCoilLots(db, branchScope)) {
+          if (results.length >= limit) break;
+          const blob = `${row.coilNo || ''} ${row.productID || ''} ${row.poID || ''} ${row.supplierName || ''} ${
+            row.colour || ''
+          } ${row.gaugeLabel || ''}`.toLowerCase();
+          if (blob.includes(q)) {
+            push({
+              kind: 'coil',
+              id: row.coilNo,
+              label: row.coilNo,
+              sublabel: `${row.colour || '—'} · ${row.gaugeLabel || '—'} · ${row.productID || ''}`,
+              path: `/operations/coils/${encodeURIComponent(row.coilNo)}`,
+            });
+          }
+        }
       }
 
       return res.json({ ok: true, results });
@@ -584,18 +711,20 @@ export function registerHttpApi(app, db) {
     }
   });
 
-  app.get('/api/suppliers', requirePermission(PROCUREMENT_DOMAIN_PERMS), (_req, res) => {
+  app.get('/api/suppliers', requirePermission(PROCUREMENT_DOMAIN_PERMS), (req, res) => {
     try {
-      res.json({ ok: true, suppliers: listSuppliers(db) });
+      const branchScope = resolveBootstrapBranchScope(req);
+      res.json({ ok: true, suppliers: listSuppliers(db, branchScope) });
     } catch (e) {
       console.error(e);
       res.status(500).json({ ok: false, error: 'Failed to load suppliers' });
     }
   });
 
-  app.get('/api/transport-agents', (_req, res) => {
+  app.get('/api/transport-agents', requirePermission(PROCUREMENT_DOMAIN_PERMS), (req, res) => {
     try {
-      res.json({ ok: true, transportAgents: listTransportAgents(db) });
+      const branchScope = resolveBootstrapBranchScope(req);
+      res.json({ ok: true, transportAgents: listTransportAgents(db, branchScope) });
     } catch (e) {
       console.error(e);
       res.status(500).json({ ok: false, error: 'Failed to load agents' });
@@ -604,7 +733,7 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/suppliers', requirePermission('suppliers.manage'), (req, res) => {
     try {
-      const id = write.insertSupplier(db, req.body || {});
+      const id = write.insertSupplier(db, req.body || {}, req.workspaceBranchId || DEFAULT_BRANCH_ID);
       res.status(201).json({ ok: true, supplierID: id });
     } catch (e) {
       console.error(e);
@@ -613,18 +742,23 @@ export function registerHttpApi(app, db) {
   });
 
   app.patch('/api/suppliers/:supplierId', requirePermission('suppliers.manage'), (req, res) => {
-    const r = write.updateSupplier(db, req.params.supplierId, req.body || {});
+    const r = write.updateSupplier(
+      db,
+      req.params.supplierId,
+      req.body || {},
+      req.workspaceBranchId || DEFAULT_BRANCH_ID
+    );
     res.status(r.ok ? 200 : 400).json(r);
   });
 
   app.delete('/api/suppliers/:supplierId', requirePermission('suppliers.manage'), (req, res) => {
-    const r = write.deleteSupplier(db, req.params.supplierId);
+    const r = write.deleteSupplier(db, req.params.supplierId, req.workspaceBranchId || DEFAULT_BRANCH_ID);
     res.status(r.ok ? 200 : 400).json(r);
   });
 
   app.post('/api/transport-agents', requirePermission('suppliers.manage'), (req, res) => {
     try {
-      const id = write.insertTransportAgent(db, req.body || {});
+      const id = write.insertTransportAgent(db, req.body || {}, req.workspaceBranchId || DEFAULT_BRANCH_ID);
       res.status(201).json({ ok: true, id });
     } catch (e) {
       console.error(e);
@@ -633,12 +767,17 @@ export function registerHttpApi(app, db) {
   });
 
   app.patch('/api/transport-agents/:id', requirePermission('suppliers.manage'), (req, res) => {
-    const r = write.updateTransportAgent(db, req.params.id, req.body || {});
+    const r = write.updateTransportAgent(
+      db,
+      req.params.id,
+      req.body || {},
+      req.workspaceBranchId || DEFAULT_BRANCH_ID
+    );
     res.status(r.ok ? 200 : 400).json(r);
   });
 
   app.delete('/api/transport-agents/:id', requirePermission('suppliers.manage'), (req, res) => {
-    const r = write.deleteTransportAgent(db, req.params.id);
+    const r = write.deleteTransportAgent(db, req.params.id, req.workspaceBranchId || DEFAULT_BRANCH_ID);
     res.status(r.ok ? 200 : 400).json(r);
   });
 
@@ -664,9 +803,18 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/customers', requirePermission('customers.manage'), (req, res) => {
     try {
-      const id = write.insertCustomer(db, req.body || {});
+      const id = write.insertCustomer(db, req.body || {}, req.workspaceBranchId || DEFAULT_BRANCH_ID);
       res.status(201).json({ ok: true, customerID: id });
     } catch (e) {
+      if (e?.code === 'DUPLICATE_CUSTOMER_REGISTRATION') {
+        return res.status(409).json({
+          ok: false,
+          error: String(e.message || e),
+          code: e.code,
+          existingCustomerId: e.existingCustomerId,
+          conflictField: e.conflictField,
+        });
+      }
       console.error(e);
       res.status(400).json({ ok: false, error: String(e.message || e) });
     }
@@ -861,11 +1009,15 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/cutting-lists/:id/production/allocations', requirePermission('production.manage'), (req, res) => {
     try {
-      const jobId = resolveCuttingListProductionJob(db, req.params.id);
+      let jobId = resolveCuttingListProductionJob(db, req.params.id);
+      if (!jobId) jobId = productionJobIdForCuttingList(db, req.params.id);
       if (!jobId) {
         return res.status(404).json({ ok: false, error: 'No production run for this cutting list.' });
       }
-      const r = saveProductionJobAllocations(db, jobId, req.body?.allocations || [], { actor: req.user });
+      const r = saveProductionJobAllocations(db, jobId, req.body?.allocations || [], {
+        actor: req.user,
+        append: Boolean(req.body?.append),
+      });
       res.status(r.ok ? 200 : 400).json(r);
     } catch (e) {
       console.error(e);
@@ -951,6 +1103,7 @@ export function registerHttpApi(app, db) {
     try {
       const r = saveProductionJobAllocations(db, req.params.jobId, req.body?.allocations || [], {
         actor: req.user,
+        append: Boolean(req.body?.append),
       });
       res.status(r.ok ? 200 : 400).json(r);
     } catch (e) {
@@ -982,6 +1135,33 @@ export function registerHttpApi(app, db) {
   app.post('/api/production-jobs/:jobId/conversion-preview', requirePermission('production.manage'), (req, res) => {
     try {
       const r = previewProductionConversion(db, req.params.jobId, req.body || {});
+      res.status(r.ok ? 200 : 400).json(r);
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  const managerReviewSignoffPerms = ['production.release', 'operations.manage', 'production.manage'];
+
+  app.patch('/api/production-jobs/:jobId/manager-review-signoff', requirePermission(managerReviewSignoffPerms), (req, res) => {
+    try {
+      const r = signOffProductionManagerReview(db, req.params.jobId, req.body || {}, { actor: req.user });
+      res.status(r.ok ? 200 : 400).json(r);
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  app.patch('/api/cutting-lists/:id/production/manager-review-signoff', requirePermission(managerReviewSignoffPerms), (req, res) => {
+    try {
+      let jobId = resolveCuttingListProductionJob(db, req.params.id);
+      if (!jobId) jobId = productionJobIdForCuttingList(db, req.params.id);
+      if (!jobId) {
+        return res.status(404).json({ ok: false, error: 'No production run for this cutting list.' });
+      }
+      const r = signOffProductionManagerReview(db, jobId, req.body || {}, { actor: req.user });
       res.status(r.ok ? 200 : 400).json(r);
     } catch (e) {
       console.error(e);
@@ -1030,7 +1210,19 @@ export function registerHttpApi(app, db) {
   });
 
   app.post('/api/inventory/adjust', requirePermission('inventory.adjust'), (req, res) => {
-    const { productID, type, qty, reasonCode, note, dateISO } = req.body || {};
+    const { productID, type, qty, reasonCode, note, dateISO, acknowledgeCoilSkuDrift } = req.body || {};
+    if (String(type) === 'Decrease' && productID && !acknowledgeCoilSkuDrift) {
+      const n = write.countCoilLotsForProductInWorkspace(db, productID, req.workspaceBranchId);
+      if (n > 0) {
+        return res.status(409).json({
+          ok: false,
+          code: 'COIL_SKU_DRIFT',
+          coilLotCount: n,
+          error:
+            'This SKU has coil lots in your branch. Use Operations → coil split / scrap / return to change physical stock. To force a book-only decrease, resend with acknowledgeCoilSkuDrift: true.',
+        });
+      }
+    }
     const r = write.adjustStock(db, productID, type, qty, reasonCode, note, dateISO);
     res.status(r.ok ? 200 : 400).json(r);
   });
@@ -1054,6 +1246,47 @@ export function registerHttpApi(app, db) {
       extras || {}
     );
     res.status(r.ok ? 200 : 400).json(r);
+  });
+
+  const coilMaterialPerms = ['inventory.adjust', 'operations.manage'];
+  app.post('/api/coil-lots/:coilNo/split', requirePermission(coilMaterialPerms), (req, res) => {
+    try {
+      const r = write.splitCoilLot(
+        db,
+        { ...req.body, parentCoilNo: req.params.coilNo },
+        { workspaceBranchId: req.workspaceBranchId, actor: req.user }
+      );
+      res.status(r.ok ? 200 : 400).json(r);
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+  app.post('/api/coil-lots/:coilNo/scrap', requirePermission(coilMaterialPerms), (req, res) => {
+    try {
+      const r = write.postCoilScrap(
+        db,
+        { ...req.body, coilNo: req.params.coilNo },
+        { workspaceBranchId: req.workspaceBranchId, actor: req.user }
+      );
+      res.status(r.ok ? 200 : 400).json(r);
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+  app.post('/api/coil-lots/:coilNo/return-material', requirePermission(coilMaterialPerms), (req, res) => {
+    try {
+      const r = write.returnCoilMaterialToStock(
+        db,
+        { ...req.body, coilNo: req.params.coilNo },
+        { workspaceBranchId: req.workspaceBranchId, actor: req.user }
+      );
+      res.status(r.ok ? 200 : 400).json(r);
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
   });
 
   app.post('/api/coil-requests', requirePermission(['operations.manage', 'production.manage']), (req, res) => {
@@ -1213,6 +1446,66 @@ export function registerHttpApi(app, db) {
     }
   });
 
+  app.get('/api/branches/strict-audit', requirePermission('settings.view'), (_req, res) => {
+    try {
+      const branchIds = new Set(listBranches(db).map((b) => String(b.id || '').trim()).filter(Boolean));
+      const rows = [];
+      for (const t of STRICT_BRANCH_AUDIT_TABLES) {
+        if (!tableHasColumn(db, t.table, 'branch_id') || !tableHasColumn(db, t.table, t.idColumn)) continue;
+        const missing = Number(
+          db
+            .prepare(
+              `SELECT COUNT(*) AS c FROM ${t.table}
+               WHERE branch_id IS NULL OR TRIM(COALESCE(branch_id,'')) = ''`
+            )
+            .get()?.c ?? 0
+        );
+        const invalid = Number(
+          db
+            .prepare(
+              `SELECT COUNT(*) AS c FROM ${t.table}
+               WHERE NOT (branch_id IS NULL OR TRIM(COALESCE(branch_id,'')) = '')
+                 AND branch_id NOT IN (SELECT id FROM branches)`
+            )
+            .get()?.c ?? 0
+        );
+        const sampleIds = db
+          .prepare(
+            `SELECT ${t.idColumn} AS id FROM ${t.table}
+             WHERE branch_id IS NULL OR TRIM(COALESCE(branch_id,'')) = ''
+                OR branch_id NOT IN (SELECT id FROM branches)
+             LIMIT 10`
+          )
+          .all()
+          .map((r) => String(r.id || ''));
+        rows.push({
+          table: t.table,
+          missingBranchIdRows: missing,
+          invalidBranchIdRows: invalid,
+          sampleIds,
+        });
+      }
+      const totals = rows.reduce(
+        (acc, r) => {
+          acc.missingBranchIdRows += r.missingBranchIdRows;
+          acc.invalidBranchIdRows += r.invalidBranchIdRows;
+          return acc;
+        },
+        { missingBranchIdRows: 0, invalidBranchIdRows: 0 }
+      );
+      res.json({
+        ok: true,
+        strictBranchIsolationOk: totals.missingBranchIdRows === 0 && totals.invalidBranchIdRows === 0,
+        knownBranches: Array.from(branchIds),
+        totals,
+        tables: rows,
+      });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ ok: false, error: 'Could not run strict branch audit.' });
+    }
+  });
+
   app.post('/api/setup/:kind', requirePermission('settings.view'), (req, res) => {
     try {
       const r = upsertMasterDataRecord(db, req.params.kind, req.body || {}, req.user);
@@ -1285,6 +1578,8 @@ export function registerHttpApi(app, db) {
         paymentLines: treasuryLines,
         createdBy: req.user.displayName,
         paidBy: req.user.displayName,
+        workspaceBranchId: req.workspaceBranchId,
+        workspaceViewAll: Boolean(req.workspaceViewAll),
         actor: req.user,
       });
       res.status(r.ok ? 201 : 400).json(r);
@@ -1376,9 +1671,10 @@ export function registerHttpApi(app, db) {
     }
   });
 
-  app.get('/api/customers', requirePermission(SALES_DOMAIN_PERMS), (_req, res) => {
+  app.get('/api/customers', requirePermission(SALES_DOMAIN_PERMS), (req, res) => {
     try {
-      res.json({ ok: true, customers: listCustomers(db) });
+      const branchScope = resolveBootstrapBranchScope(req);
+      res.json({ ok: true, customers: listCustomers(db, branchScope) });
     } catch (e) {
       console.error(e);
       res.status(500).json({ ok: false, error: 'Failed to load customers' });
@@ -1387,7 +1683,8 @@ export function registerHttpApi(app, db) {
 
   app.get('/api/customers/:customerId', requirePermission(SALES_DOMAIN_PERMS), (req, res) => {
     try {
-      const row = getCustomer(db, req.params.customerId);
+      const branchScope = resolveBootstrapBranchScope(req);
+      const row = getCustomer(db, req.params.customerId, branchScope);
       if (!row) return res.status(404).json({ ok: false, error: 'Customer not found' });
       res.json({ ok: true, customer: row });
     } catch (e) {
@@ -1396,13 +1693,14 @@ export function registerHttpApi(app, db) {
     }
   });
 
-  app.get('/api/customers/:customerId/interactions', (req, res) => {
+  app.get('/api/customers/:customerId/interactions', requirePermission(SALES_DOMAIN_PERMS), (req, res) => {
     try {
-      const row = getCustomer(db, req.params.customerId);
+      const branchScope = resolveBootstrapBranchScope(req);
+      const row = getCustomer(db, req.params.customerId, branchScope);
       if (!row) return res.status(404).json({ ok: false, error: 'Customer not found' });
       res.json({
         ok: true,
-        interactions: listCustomerCrmInteractions(db, req.params.customerId),
+        interactions: listCustomerCrmInteractions(db, req.params.customerId, branchScope),
       });
     } catch (e) {
       console.error(e);
@@ -1412,7 +1710,13 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/customers/:customerId/interactions', requirePermission('customers.manage'), (req, res) => {
     try {
-      const r = write.insertCustomerCrmInteraction(db, req.params.customerId, req.body || {}, req.user);
+      const r = write.insertCustomerCrmInteraction(
+        db,
+        req.params.customerId,
+        req.body || {},
+        req.user,
+        req.workspaceBranchId || DEFAULT_BRANCH_ID
+      );
       res.status(r.ok ? 201 : 400).json(r);
     } catch (e) {
       console.error(e);
@@ -1432,7 +1736,15 @@ export function registerHttpApi(app, db) {
 
   app.patch('/api/customers/:customerId', requirePermission('customers.manage'), (req, res) => {
     try {
-      const r = write.updateCustomer(db, req.params.customerId, req.body || {});
+      const r = write.updateCustomer(
+        db,
+        req.params.customerId,
+        req.body || {},
+        req.workspaceBranchId || DEFAULT_BRANCH_ID
+      );
+      if (!r.ok && r.code === 'DUPLICATE_CUSTOMER_REGISTRATION') {
+        return res.status(409).json(r);
+      }
       res.status(r.ok ? 200 : 400).json(r);
     } catch (e) {
       console.error(e);
@@ -1440,9 +1752,9 @@ export function registerHttpApi(app, db) {
     }
   });
 
-  app.delete('/api/customers/:customerId', requirePermission('customers.manage'), (req, res) => {
+  app.delete('/api/customers/:customerId', requirePermission('sales.manage'), (req, res) => {
     try {
-      const r = write.deleteCustomerIfAllowed(db, req.params.customerId);
+      const r = write.deleteCustomerIfAllowed(db, req.params.customerId, req.workspaceBranchId || DEFAULT_BRANCH_ID);
       res.status(r.ok ? 200 : 400).json(r);
     } catch (e) {
       console.error(e);
@@ -1453,10 +1765,9 @@ export function registerHttpApi(app, db) {
   app.get('/api/customers/:customerId/summary', requirePermission(CUSTOMER_AND_AR_READ_PERMS), (req, res) => {
     try {
       const id = req.params.customerId;
-      const customer = getCustomer(db, id);
-      if (!customer) return res.status(404).json({ ok: false, error: 'Customer not found' });
-
       const branchScope = resolveBootstrapBranchScope(req);
+      const customer = getCustomer(db, id, branchScope);
+      if (!customer) return res.status(404).json({ ok: false, error: 'Customer not found' });
       const entries = listLedgerEntriesForCustomer(db, id, branchScope);
       const advanceNgn = advanceBalanceFromEntries(entries, id);
       const receiptTotalNgn = ledgerReceiptTotalFromEntries(entries, id);
@@ -1572,7 +1883,8 @@ export function registerHttpApi(app, db) {
       const { customerID, customerName, amountNgn, paymentMethod, bankReference, purpose, dateISO } =
         req.body || {};
       if (!customerID) return res.status(400).json({ ok: false, error: 'customerID is required' });
-      const cust = getCustomer(db, customerID);
+      const branchScope = resolveBootstrapBranchScope(req);
+      const cust = getCustomer(db, customerID, branchScope);
       if (!cust) return res.status(404).json({ ok: false, error: 'Customer not found' });
 
       const plan = planAdvanceIn({
@@ -1641,7 +1953,8 @@ export function registerHttpApi(app, db) {
       if (!customerID || !quotationRef) {
         return res.status(400).json({ ok: false, error: 'customerID and quotationRef are required' });
       }
-      const cust = getCustomer(db, customerID);
+      const branchScope = resolveBootstrapBranchScope(req);
+      const cust = getCustomer(db, customerID, branchScope);
       if (!cust) return res.status(404).json({ ok: false, error: 'Customer not found' });
       const qt = getQuotation(db, quotationRef);
       if (!qt) return res.status(404).json({ ok: false, error: 'Quotation not found' });
@@ -1649,7 +1962,6 @@ export function registerHttpApi(app, db) {
         return res.status(400).json({ ok: false, error: 'Quotation does not belong to this customer' });
       }
 
-      const branchScope = resolveBootstrapBranchScope(req);
       const entries = listLedgerEntries(db, branchScope);
       const plan = planAdvanceApplied(entries, {
         customerID,
@@ -1697,7 +2009,8 @@ export function registerHttpApi(app, db) {
       if (!customerID || !quotationId) {
         return res.status(400).json({ ok: false, error: 'customerID and quotationId are required' });
       }
-      const cust = getCustomer(db, customerID);
+      const branchScope = resolveBootstrapBranchScope(req);
+      const cust = getCustomer(db, customerID, branchScope);
       if (!cust) return res.status(404).json({ ok: false, error: 'Customer not found' });
       const qt = getQuotation(db, quotationId);
       if (!qt) return res.status(404).json({ ok: false, error: 'Quotation not found' });
@@ -1705,7 +2018,6 @@ export function registerHttpApi(app, db) {
         return res.status(400).json({ ok: false, error: 'Quotation does not belong to this customer' });
       }
 
-      const branchScope = resolveBootstrapBranchScope(req);
       const entries = listLedgerEntries(db, branchScope);
       const plan = planReceiptWithQuotation(entries, {
         customerID,
@@ -1777,10 +2089,9 @@ export function registerHttpApi(app, db) {
     try {
       const { customerID, customerName, amountNgn, note, dateISO } = req.body || {};
       if (!customerID) return res.status(400).json({ ok: false, error: 'customerID is required' });
-      const cust = getCustomer(db, customerID);
-      if (!cust) return res.status(404).json({ ok: false, error: 'Customer not found' });
-
       const branchScope = resolveBootstrapBranchScope(req);
+      const cust = getCustomer(db, customerID, branchScope);
+      if (!cust) return res.status(404).json({ ok: false, error: 'Customer not found' });
       const entries = listLedgerEntries(db, branchScope);
       const plan = planRefundAdvance(entries, {
         customerID,
@@ -1862,10 +2173,33 @@ export function registerHttpApi(app, db) {
 
   /* ——— HR ——— */
   app.get('/api/hr/caps', requireAuth, (req, res) => {
+    const required = [
+      ...requiredHrPoliciesFor('hr_staff_edit'),
+      ...requiredHrPoliciesFor('hr_payroll'),
+      ...requiredHrPoliciesFor('hr_attendance_upload'),
+      ...requiredHrPoliciesFor('hr_approvals'),
+    ].filter((p, idx, all) => all.findIndex((x) => x.key === p.key && x.version === p.version) === idx);
+    const missing = listMissingHrPolicyAcceptances(db, req.user.id, required);
     res.json({
       ...hrCapsForUser(req.user),
       enabled: hrTablesReady(db),
+      policy: { required, missing },
     });
+  });
+
+  app.get('/api/hr/policy-requirements', requireAuth, (req, res) => {
+    const actionKey = String(req.query.actionKey || '').trim();
+    const required = actionKey
+      ? requiredHrPoliciesFor(actionKey)
+      : [
+          ...requiredHrPoliciesFor('hr_staff_edit'),
+          ...requiredHrPoliciesFor('hr_payroll'),
+          ...requiredHrPoliciesFor('hr_sensitive_view'),
+          ...requiredHrPoliciesFor('hr_attendance_upload'),
+          ...requiredHrPoliciesFor('hr_approvals'),
+        ].filter((p, idx, all) => all.findIndex((x) => x.key === p.key && x.version === p.version) === idx);
+    const missing = listMissingHrPolicyAcceptances(db, req.user.id, required);
+    res.json({ ok: true, required, missing });
   });
 
   app.get('/api/hr/me', requireAuth, (req, res) => {
@@ -1878,8 +2212,25 @@ export function registerHttpApi(app, db) {
     if (!caps.canViewDirectory) {
       return res.status(403).json({ ok: false, error: 'No access to staff directory.' });
     }
+    const missingSensitive = listMissingHrPolicyAcceptances(
+      db,
+      req.user.id,
+      requiredHrPoliciesFor('hr_sensitive_view')
+    );
     const scope = hrScopeFromReq(req);
-    const staff = listHrStaff(db, scope);
+    const staff = listHrStaff(db, scope).map((row) => {
+      if (caps.canViewSensitiveHr && missingSensitive.length === 0) return row;
+      return {
+        ...row,
+        taxId: row.taxId ? '***' : row.taxId,
+        pensionRsaPin: row.pensionRsaPin ? '***' : row.pensionRsaPin,
+        bankAccountNoMasked: row.bankAccountNoMasked ? '***' : row.bankAccountNoMasked,
+        bankAccountName: row.bankAccountName ? 'Restricted' : row.bankAccountName,
+        baseSalaryNgn: 0,
+        housingAllowanceNgn: 0,
+        transportAllowanceNgn: 0,
+      };
+    });
     res.json({ ok: true, staff });
   });
 
@@ -1904,10 +2255,24 @@ export function registerHttpApi(app, db) {
     if (!caps.canViewDirectory) {
       return res.status(403).json({ ok: false, error: 'No access to this profile.' });
     }
+    const missingSensitive = listMissingHrPolicyAcceptances(
+      db,
+      req.user.id,
+      requiredHrPoliciesFor('hr_sensitive_view')
+    );
     const scope = hrScopeFromReq(req);
     const staff = listHrStaff(db, scope);
-    const profile = staff.find((s) => s.userId === uid);
+    let profile = staff.find((s) => s.userId === uid);
     if (!profile) return res.status(404).json({ ok: false, error: 'Staff member not found in your scope.' });
+    if (!caps.canViewSensitiveHr || missingSensitive.length) {
+      profile = {
+        ...profile,
+        taxId: profile.taxId ? '***' : profile.taxId,
+        pensionRsaPin: profile.pensionRsaPin ? '***' : profile.pensionRsaPin,
+        bankAccountNoMasked: profile.bankAccountNoMasked ? '***' : profile.bankAccountNoMasked,
+        bankAccountName: profile.bankAccountName ? 'Restricted' : profile.bankAccountName,
+      };
+    }
     return res.json({ ok: true, mode: 'hr', profile });
   });
 
@@ -1915,6 +2280,15 @@ export function registerHttpApi(app, db) {
     const caps = hrCapsForUser(req.user);
     if (!caps.canManageStaff) {
       return res.status(403).json({ ok: false, error: 'Cannot edit staff files.' });
+    }
+    const missing = listMissingHrPolicyAcceptances(db, req.user.id, requiredHrPoliciesFor('hr_staff_edit'));
+    if (missing.length) {
+      return res.status(403).json({
+        ok: false,
+        code: 'POLICY_ACK_REQUIRED',
+        error: 'Policy acknowledgement required before editing staff files.',
+        missing,
+      });
     }
     const uid = resolveHrStaffUserIdParam(req);
     if (!uid) return res.status(400).json({ ok: false, error: 'userId required.' });
@@ -2077,6 +2451,15 @@ export function registerHttpApi(app, db) {
   app.post('/api/hr/payroll-runs', requireAuth, (req, res) => {
     const caps = hrCapsForUser(req.user);
     if (!caps.canPayroll) return res.status(403).json({ ok: false, error: 'No access to payroll.' });
+    const missing = listMissingHrPolicyAcceptances(db, req.user.id, requiredHrPoliciesFor('hr_payroll'));
+    if (missing.length) {
+      return res.status(403).json({
+        ok: false,
+        code: 'POLICY_ACK_REQUIRED',
+        error: 'Policy acknowledgement required before running payroll.',
+        missing,
+      });
+    }
     const r = createPayrollRun(db, req.user, req.body || {});
     res.status(r.ok ? 201 : 400).json(r);
   });
@@ -2085,6 +2468,26 @@ export function registerHttpApi(app, db) {
     const caps = hrCapsForUser(req.user);
     if (!caps.canPayroll) return res.status(403).json({ ok: false, error: 'No access to payroll.' });
     const r = exportPayrollTreasuryPackCsv(db, String(req.params.runId || ''));
+    if (!r.ok) return res.status(400).json(r);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${r.filename}"`);
+    res.send(r.csv);
+  });
+
+  app.get('/api/hr/payroll-runs/:runId/payslips-pack', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canPayroll) return res.status(403).json({ ok: false, error: 'No access to payroll.' });
+    const r = exportPayrollPayslipsCsv(db, String(req.params.runId || ''));
+    if (!r.ok) return res.status(400).json(r);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${r.filename}"`);
+    res.send(r.csv);
+  });
+
+  app.get('/api/hr/payroll-runs/:runId/statutory-pack', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canPayroll) return res.status(403).json({ ok: false, error: 'No access to payroll.' });
+    const r = exportPayrollStatutoryPackCsv(db, String(req.params.runId || ''));
     if (!r.ok) return res.status(400).json(r);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${r.filename}"`);
@@ -2112,13 +2515,31 @@ export function registerHttpApi(app, db) {
   app.patch('/api/hr/payroll-runs/:runId', requireAuth, (req, res) => {
     const caps = hrCapsForUser(req.user);
     if (!caps.canPayroll) return res.status(403).json({ ok: false, error: 'No access to payroll.' });
-    const r = patchPayrollRun(db, String(req.params.runId || ''), req.body || {});
+    const missing = listMissingHrPolicyAcceptances(db, req.user.id, requiredHrPoliciesFor('hr_payroll'));
+    if (missing.length) {
+      return res.status(403).json({
+        ok: false,
+        code: 'POLICY_ACK_REQUIRED',
+        error: 'Policy acknowledgement required before updating payroll runs.',
+        missing,
+      });
+    }
+    const r = patchPayrollRun(db, String(req.params.runId || ''), req.body || {}, req.user);
     res.status(r.ok ? 200 : 400).json(r);
   });
 
   app.post('/api/hr/payroll-runs/:runId/recompute', requireAuth, (req, res) => {
     const caps = hrCapsForUser(req.user);
     if (!caps.canPayroll) return res.status(403).json({ ok: false, error: 'No access to payroll.' });
+    const missing = listMissingHrPolicyAcceptances(db, req.user.id, requiredHrPoliciesFor('hr_payroll'));
+    if (missing.length) {
+      return res.status(403).json({
+        ok: false,
+        code: 'POLICY_ACK_REQUIRED',
+        error: 'Policy acknowledgement required before recomputing payroll.',
+        missing,
+      });
+    }
     const runId = String(req.params.runId || '');
     const r = computePayrollRun(db, runId);
     if (!r.ok) return res.status(400).json(r);
@@ -2139,8 +2560,173 @@ export function registerHttpApi(app, db) {
     if (!caps.canUploadAttendance && !caps.canPayroll) {
       return res.status(403).json({ ok: false, error: 'Cannot upload attendance.' });
     }
+    const missing = listMissingHrPolicyAcceptances(db, req.user.id, requiredHrPoliciesFor('hr_attendance_upload'));
+    if (missing.length) {
+      return res.status(403).json({
+        ok: false,
+        code: 'POLICY_ACK_REQUIRED',
+        error: 'Policy acknowledgement required before uploading attendance.',
+        missing,
+      });
+    }
+    const scope = hrScopeFromReq(req);
+    const branchId = String(req.body?.branchId || '').trim();
+    if (branchId && !scope.viewAll && String(scope.branchId || '') !== branchId) {
+      return res.status(403).json({ ok: false, error: 'Branch not in your workspace scope.' });
+    }
     const r = uploadHrAttendance(db, req.user, req.body || {});
     res.status(r.ok ? 201 : 400).json(r);
+  });
+
+  app.get('/api/hr/daily-roll', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canUploadAttendance && !caps.canPayroll && !caps.canViewDirectory) {
+      return res.status(403).json({ ok: false, error: 'No access.' });
+    }
+    const scope = hrScopeFromReq(req);
+    const branchId = String(req.query.branchId || '').trim();
+    const dayIso = String(req.query.dayIso || '').trim();
+    if (branchId && !scope.viewAll && String(scope.branchId || '') !== branchId) {
+      return res.status(403).json({ ok: false, error: 'Branch not in your workspace scope.' });
+    }
+    const r = getHrDailyRollCall(db, scope, branchId, dayIso);
+    res.status(r.ok ? 200 : 400).json(r);
+  });
+
+  app.post('/api/hr/daily-roll', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canUploadAttendance && !caps.canPayroll) {
+      return res.status(403).json({ ok: false, error: 'Cannot record daily roll.' });
+    }
+    const scope = hrScopeFromReq(req);
+    const branchId = String(req.body?.branchId || '').trim();
+    if (branchId && !scope.viewAll && String(scope.branchId || '') !== branchId) {
+      return res.status(403).json({ ok: false, error: 'Branch not in your workspace scope.' });
+    }
+    const r = upsertHrDailyRollCall(db, req.user, scope, req.body || {});
+    res.status(r.ok ? 200 : 400).json(r);
+  });
+
+  app.post('/api/hr/leave/recompute', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canManageStaff && !caps.canPayroll) {
+      return res.status(403).json({ ok: false, error: 'No access to leave engine.' });
+    }
+    const r = recomputeHrLeaveBalances(db, req.user, req.body || {});
+    res.status(r.ok ? 200 : 400).json(r);
+  });
+
+  app.post('/api/hr/leave/adjust', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canManageStaff) {
+      return res.status(403).json({ ok: false, error: 'No access to adjust leave balances.' });
+    }
+    const r = adjustHrLeaveBalance(db, req.user, req.body || {});
+    res.status(r.ok ? 201 : 400).json(r);
+  });
+
+  app.get('/api/hr/leave/balances', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canManageStaff && !caps.canPayroll) {
+      return res.status(403).json({ ok: false, error: 'No access to leave balances.' });
+    }
+    const userId = String(req.query.userId || '').trim();
+    const leaveType = String(req.query.leaveType || '').trim() || undefined;
+    const periodYyyymm = String(req.query.periodYyyymm || '').trim() || undefined;
+    const balances = listHrLeaveBalances(db, { userId: userId || undefined, leaveType, periodYyyymm });
+    res.json({ ok: true, balances });
+  });
+
+  app.post('/api/hr/policy-acknowledgements', requireAuth, (req, res) => {
+    const body = { ...(req.body || {}), userId: String(req.body?.userId || req.user.id) };
+    const r = acceptHrPolicy(db, req.user, body);
+    res.status(r.ok ? 201 : 400).json(r);
+  });
+
+  app.get('/api/hr/policy-acknowledgements', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canCompliance) {
+      return res.status(403).json({ ok: false, error: 'No compliance access.' });
+    }
+    const userId = String(req.query.userId || '').trim();
+    const policyKey = String(req.query.policyKey || '').trim();
+    const rows = listHrPolicyAcknowledgements(db, {
+      userId: userId || undefined,
+      policyKey: policyKey || undefined,
+    });
+    res.json({ ok: true, acknowledgements: rows });
+  });
+
+  app.get('/api/hr/observability', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canCompliance) return res.status(403).json({ ok: false, error: 'No observability access.' });
+    const scope = hrScopeFromReq(req);
+    res.json({ ok: true, ...listHrObservability(db, scope) });
+  });
+
+  app.get('/api/hr/compensation-insights', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canViewDirectory && !caps.canPayroll) {
+      return res.status(403).json({ ok: false, error: 'No compensation insights access.' });
+    }
+    const scope = hrScopeFromReq(req);
+    res.json({ ok: true, ...listHrCompensationInsights(db, scope, { canViewSensitiveHr: caps.canViewSensitiveHr }) });
+  });
+
+  app.get('/api/hr/data-cleanup-queue', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canManageStaff && !caps.canCompliance) {
+      return res.status(403).json({ ok: false, error: 'No cleanup access.' });
+    }
+    const scope = hrScopeFromReq(req);
+    res.json({ ok: true, queue: listHrDataCleanupQueue(db, scope) });
+  });
+
+  app.post('/api/hr/data-cleanup-queue/resolve', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canManageStaff && !caps.canCompliance) {
+      return res.status(403).json({ ok: false, error: 'No cleanup access.' });
+    }
+    const r = applyHrDataCleanupAction(db, req.user, req.body || {});
+    res.status(r.ok ? 200 : 400).json(r);
+  });
+
+  app.get('/api/hr/next-uat-readiness', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canCompliance && !caps.canManageStaff) {
+      return res.status(403).json({ ok: false, error: 'No UAT readiness access.' });
+    }
+    const scope = hrScopeFromReq(req);
+    const readiness = hrNextUatReadiness(db, scope);
+    const signoff = getJsonBlob(db, 'hr_next_uat_signoff') || null;
+    res.json({ ok: true, ...readiness, signoff, canCutover: Boolean(readiness.canCutover && signoff?.approvedAtIso) });
+  });
+
+  app.post('/api/hr/next-uat-signoff', requireAuth, (req, res) => {
+    const caps = hrCapsForUser(req.user);
+    if (!caps.canCompliance) {
+      return res.status(403).json({ ok: false, error: 'No UAT sign-off access.' });
+    }
+    const approve = Boolean(req.body?.approve);
+    if (!approve) {
+      setJsonBlob(db, 'hr_next_uat_signoff', null);
+      return res.json({ ok: true, signoff: null });
+    }
+    const signoff = {
+      approvedAtIso: new Date().toISOString(),
+      approvedByUserId: req.user.id,
+      approvedByName: req.user.displayName || req.user.username || req.user.id,
+      note: String(req.body?.note || '').trim() || null,
+    };
+    setJsonBlob(db, 'hr_next_uat_signoff', signoff);
+    appendAuditLog(db, {
+      actor: req.user,
+      action: 'hr.next_uat_signoff',
+      entityKind: 'hr',
+      entityId: 'hr-next',
+      note: signoff.note || 'HR Next UAT sign-off',
+    });
+    return res.json({ ok: true, signoff });
   });
 
   app.get(

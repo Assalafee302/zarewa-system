@@ -42,6 +42,7 @@ import {
   Legend,
 } from 'recharts';
 import { PageHeader, PageShell, ModalFrame } from '../components/layout';
+import WorkspaceShortcuts from '../components/WorkspaceShortcuts';
 import {
   formatNgn,
 } from '../Data/mockData';
@@ -49,8 +50,12 @@ import { useInventory } from '../context/InventoryContext';
 import { useToast } from '../context/ToastContext';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { apiFetch } from '../lib/apiBase';
-import { loadDashboardPrefs } from '../lib/dashboardPrefs';
-import { loadSpotPrices, saveSpotPrices } from '../lib/dashboardSpotPrices';
+import { mergeDashboardPrefs } from '../lib/dashboardPrefs';
+import { productionJobNeedsManagerReviewAttention } from '../lib/productionReview';
+import {
+  buildPriceListSaveBody,
+  spotPricesRowsFromMasterData,
+} from '../lib/spotPricesFromMasterData';
 import {
   liveCashflowMonthly,
   liveLiquidityBreakdown,
@@ -59,6 +64,7 @@ import {
   liveSalesSeriesByMonth,
   liveSalesSeriesByWeek,
   liveStockMix,
+  liveTopSalesPerformersByMaterial,
   totalLiquidityNgn,
 } from '../lib/liveAnalytics';
 import { refundOutstandingAmount } from '../lib/refundsStore';
@@ -74,6 +80,12 @@ function attrsForProduct(p) {
       materialType: p.name,
     }
   );
+}
+
+function formatPerformerGauge(row) {
+  if (Number(row.gaugeMm) > 0) return `${row.gaugeMm} mm`;
+  if (row.gaugeRaw && row.gaugeRaw !== '—') return row.gaugeRaw;
+  return '—';
 }
 
 const MONTH_SHORT = [
@@ -137,36 +149,72 @@ function KpiCard({ title, value, sub, onClick, titleAttr, highlight, children })
 const Dashboard = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { products: invProducts, movements, wipByProduct, coilLots, purchaseOrders } = useInventory();
+  const { products: invProducts, movements, wipByProduct, purchaseOrders } = useInventory();
   const ws = useWorkspace();
   const { show: showToast } = useToast();
   const currentUserName = ws?.session?.user?.displayName?.split?.(' ')?.[0] || '';
   const [millHelpOpen, setMillHelpOpen] = useState(false);
-  const [prefs, setPrefs] = useState(loadDashboardPrefs);
-  const [spotPrices, setSpotPrices] = useState(() => loadSpotPrices());
+  const [prefs, setPrefs] = useState(() => mergeDashboardPrefs());
   const [priceEditorOpen, setPriceEditorOpen] = useState(false);
-  const [priceDraft, setPriceDraft] = useState(() => loadSpotPrices());
+  const [priceDraft, setPriceDraft] = useState([]);
   const [salesTrendGranularity, setSalesTrendGranularity] = useState('month');
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    if (location.pathname === '/') setPrefs(loadDashboardPrefs());
-  }, [location.pathname, location.key]);
+    setPrefs(mergeDashboardPrefs(ws?.snapshot?.dashboardPrefs));
+  }, [ws?.snapshot?.dashboardPrefs, ws?.refreshEpoch]);
+
+  useEffect(() => {
+    if (location.pathname === '/') {
+      setPrefs(mergeDashboardPrefs(ws?.snapshot?.dashboardPrefs));
+    }
+  }, [location.pathname, location.key, ws?.snapshot?.dashboardPrefs]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  const spotPriceRows = useMemo(
+    () => spotPricesRowsFromMasterData(ws?.snapshot?.masterData),
+    [ws?.snapshot?.masterData]
+  );
+  const canEditSpotPrices = Boolean(ws?.hasPermission?.('settings.view'));
+
   const openPriceEditor = useCallback(() => {
-    setPriceDraft(loadSpotPrices());
+    setPriceDraft(spotPriceRows.map((r) => ({ ...r })));
     setPriceEditorOpen(true);
-  }, []);
+  }, [spotPriceRows]);
 
   const savePrices = useCallback(
-    (e) => {
+    async (e) => {
       e?.preventDefault?.();
-      saveSpotPrices(priceDraft);
-      setSpotPrices(loadSpotPrices());
-      setPriceEditorOpen(false);
+      if (!ws?.canMutate) {
+        showToast('Reconnect to save — workspace is read-only.', { variant: 'info' });
+        return;
+      }
+      try {
+        for (const row of priceDraft) {
+          const body = buildPriceListSaveBody(row.setupRow, {
+            unitPriceNgn: row.priceNgn,
+            notes: row.note ?? '',
+          });
+          const { ok, data } = await apiFetch(
+            `/api/setup/price-list/${encodeURIComponent(row.id)}`,
+            {
+              method: 'PATCH',
+              body: JSON.stringify(body),
+            }
+          );
+          if (!ok || !data?.ok) {
+            showToast(data?.error || `Could not update ${row.id}.`, { variant: 'error' });
+            return;
+          }
+        }
+        await ws.refresh();
+        setPriceEditorOpen(false);
+        showToast('Prices saved to setup (master data).');
+      } catch (err) {
+        showToast(String(err.message || err), { variant: 'error' });
+      }
     },
-    [priceDraft]
+    [priceDraft, showToast, ws]
   );
 
   const goSalesAction = useCallback(
@@ -284,7 +332,7 @@ const Dashboard = () => {
     [ws]
   );
   const managerReviewCount = useMemo(
-    () => productionJobs.filter((j) => j.managerReviewRequired).length,
+    () => productionJobs.filter((j) => productionJobNeedsManagerReviewAttention(j)).length,
     [productionJobs]
   );
 
@@ -439,27 +487,10 @@ const Dashboard = () => {
 
   const productionMetrics = ws?.snapshot?.productionMetrics;
 
-  const topCoilsRows = useMemo(() => {
-    return [...invProducts]
-      .filter((p) => Number(p.stockLevel) > 0)
-      .sort((a, b) => (Number(b.stockLevel) || 0) - (Number(a.stockLevel) || 0))
-      .slice(0, 5)
-      .map((p, i) => {
-        const a = attrsForProduct(p);
-        const gaugeMm = Number(String(a.gauge || '').match(/(\d+(?:\.\d+)?)/)?.[1] || 0);
-        const relatedLots = coilLots.filter((lot) => lot.productID === p.productID);
-        const weightKg = relatedLots.reduce((s, lot) => s + (Number(lot.weightKg) || Number(lot.qtyReceived) || 0), 0);
-        return {
-          rank: i + 1,
-          colour: a.colour || '—',
-          gaugeMm,
-          materialType: a.materialType || p.name,
-          metersSold: 0,
-          weightKg: weightKg || Number(p.stockLevel) || 0,
-          revenueNgn: 0,
-        };
-      });
-  }, [coilLots, invProducts]);
+  const topCoilsRows = useMemo(
+    () => liveTopSalesPerformersByMaterial(cuttingLists, quotations, { limit: 5 }),
+    [cuttingLists, quotations]
+  );
 
   return (
     <PageShell blurred={priceEditorOpen}>
@@ -483,6 +514,8 @@ const Dashboard = () => {
           </div>
         }
       />
+
+      <WorkspaceShortcuts />
 
       <section className="mb-8">
         <h2 className="sr-only">Key performance indicators</h2>
@@ -665,36 +698,52 @@ const Dashboard = () => {
                 ₦ per metre — yard gate pricing
               </h2>
               <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">
-                0.30–0.40 Aluzinc rows are guides until you confirm. Values saved in this browser.
+                Pulled from Setup → master data (price list, per-metre lines). Edits require Settings access and update
+                the database for everyone.
               </p>
             </div>
             <button
               type="button"
               onClick={openPriceEditor}
-              className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wider text-[#134e4a] shadow-sm hover:bg-slate-50 transition-colors shrink-0"
+              disabled={!canEditSpotPrices || spotPriceRows.length === 0}
+              title={
+                !canEditSpotPrices
+                  ? 'You need Settings permission to edit master prices.'
+                  : spotPriceRows.length === 0
+                    ? 'Add active per-metre rows in Setup → master data → price list.'
+                    : 'Edit prices'
+              }
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wider text-[#134e4a] shadow-sm hover:bg-slate-50 transition-colors shrink-0 disabled:opacity-40 disabled:pointer-events-none"
             >
               <Pencil size={15} />
               Update prices
             </button>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-10 gap-y-0 max-h-[220px] overflow-y-auto custom-scrollbar pr-1">
-            {spotPrices.map((row) => (
-              <div
-                key={row.id}
-                className="grid grid-cols-[1fr_auto] gap-x-4 items-center border-b border-slate-100 py-2.5 min-h-[3rem]"
-              >
-                <div className="min-w-0">
-                  <span className="text-sm font-semibold text-slate-800">{row.gaugeLabel}</span>
-                  <span className="text-[10px] text-slate-500 ml-2">{row.productType}</span>
-                  {row.note ? (
-                    <span className="block text-[9px] text-slate-400 mt-0.5">{row.note}</span>
-                  ) : null}
+            {spotPriceRows.length === 0 ? (
+              <p className="text-sm text-slate-500 col-span-full py-4">
+                No per-metre price list in workspace — open Settings → master data, or your role may not include master
+                data.
+              </p>
+            ) : (
+              spotPriceRows.map((row) => (
+                <div
+                  key={row.id}
+                  className="grid grid-cols-[1fr_auto] gap-x-4 items-center border-b border-slate-100 py-2.5 min-h-[3rem]"
+                >
+                  <div className="min-w-0">
+                    <span className="text-sm font-semibold text-slate-800">{row.gaugeLabel}</span>
+                    <span className="text-[10px] text-slate-500 ml-2">{row.productType}</span>
+                    {row.note ? (
+                      <span className="block text-[9px] text-slate-400 mt-0.5">{row.note}</span>
+                    ) : null}
+                  </div>
+                  <span className="text-sm font-bold text-[#134e4a] tabular-nums text-right whitespace-nowrap">
+                    ₦{row.priceNgn.toLocaleString()}/m
+                  </span>
                 </div>
-                <span className="text-sm font-bold text-[#134e4a] tabular-nums text-right whitespace-nowrap">
-                  ₦{row.priceNgn.toLocaleString()}/m
-                </span>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
       </section>
@@ -930,10 +979,12 @@ const Dashboard = () => {
                       Top 5 performers (sales)
                     </h3>
                     <p className="text-[11px] text-slate-500 mt-1 max-w-xl leading-relaxed">
-                      By <span className="font-medium text-slate-600">colour</span> and{' '}
-                      <span className="font-medium text-slate-600">gauge (thickness)</span>
+                      By <span className="font-medium text-slate-600">colour</span>,{' '}
+                      <span className="font-medium text-slate-600">gauge</span>, and{' '}
+                      <span className="font-medium text-slate-600">profile</span>
                       {' '}
-                      — live current stock leaders by colour and gauge.
+                      — from cutting lists this month, with revenue from linked quotations (each quote counted once
+                      per material mix).
                     </p>
                   </div>
                 </div>
@@ -947,7 +998,7 @@ const Dashboard = () => {
               </div>
               <div className="inline-flex rounded-lg border border-slate-200 p-0.5 bg-slate-50 w-full sm:w-auto">
                 <span className="px-2.5 sm:px-3 py-1.5 rounded-md text-[9px] font-semibold uppercase tracking-wide bg-white text-[#134e4a] shadow-sm border border-slate-200/80">
-                  Current stock
+                  This month (MTD)
                 </span>
               </div>
             </div>
@@ -967,47 +1018,59 @@ const Dashboard = () => {
               <span className="text-right tabular-nums">Revenue</span>
             </div>
 
-            <ul className="divide-y divide-slate-100">
-              {topCoilsRows.map((row) => (
-                <li key={`${row.rank}-${row.colour}-${row.gaugeMm}`}>
-                  <button
-                    type="button"
-                    onClick={() => navigate('/sales')}
-                    className="w-full text-left py-3 px-2 sm:px-3 rounded-lg hover:bg-slate-50/80 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/15"
-                  >
-                    <div className="sm:hidden space-y-1">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="flex h-7 w-7 items-center justify-center rounded-md bg-[#134e4a] text-[10px] font-bold text-white tabular-nums shrink-0">
+            {topCoilsRows.length === 0 ? (
+              <p className="text-sm text-slate-500 py-8 text-center border-t border-slate-100">
+                No cutting lists in the current month yet — rankings will appear as sales are recorded.
+              </p>
+            ) : (
+              <ul className="divide-y divide-slate-100">
+                {topCoilsRows.map((row) => (
+                  <li key={`${row.rank}-${row.colour}-${row.gaugeRaw}-${row.materialType}`}>
+                    <button
+                      type="button"
+                      onClick={() => navigate('/sales')}
+                      className="w-full text-left py-3 px-2 sm:px-3 rounded-lg hover:bg-slate-50/80 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/15"
+                    >
+                      <div className="sm:hidden space-y-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="flex h-7 w-7 items-center justify-center rounded-md bg-[#134e4a] text-[10px] font-bold text-white tabular-nums shrink-0">
+                            {row.rank}
+                          </span>
+                          <span className="text-sm font-semibold text-slate-900 tabular-nums">
+                            {formatPerformerGauge(row)} · {row.colour}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-600 pl-9">{row.materialType}</p>
+                        <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1 pl-9 text-[11px] tabular-nums">
+                          <span className="text-slate-500">
+                            {row.metersSold.toLocaleString()} m · ~{row.weightKg.toLocaleString()} kg
+                          </span>
+                          <span className="font-semibold text-[#134e4a]">{formatNgn(row.revenueNgn)}</span>
+                        </div>
+                      </div>
+                      <div className="hidden sm:grid sm:grid-cols-[2.5rem_minmax(0,4.5rem)_minmax(0,5rem)_minmax(0,1fr)_minmax(0,10.5rem)_minmax(0,7rem)] gap-x-3 items-center">
+                        <span className="flex h-8 w-8 mx-auto items-center justify-center rounded-md bg-slate-100 text-xs font-bold text-[#134e4a] tabular-nums">
                           {row.rank}
                         </span>
-                      <span className="text-sm font-semibold text-slate-900 tabular-nums">
-                          {row.gaugeMm} mm · {row.colour}
+                        <span className="text-sm font-semibold text-slate-900">{row.colour}</span>
+                        <span className="text-sm font-semibold text-slate-800 tabular-nums">
+                          {formatPerformerGauge(row)}
+                        </span>
+                        <span className="text-[12px] text-slate-600 truncate pr-1">{row.materialType}</span>
+                        <span className="flex flex-wrap items-baseline justify-end gap-x-2 gap-y-0 text-sm font-semibold text-slate-800 tabular-nums text-right">
+                          <span>{row.metersSold.toLocaleString()} m</span>
+                          <span className="text-slate-300 font-normal">·</span>
+                          <span className="text-slate-500 font-medium">~{row.weightKg.toLocaleString()} kg</span>
+                        </span>
+                        <span className="text-sm font-semibold text-[#134e4a] tabular-nums text-right">
+                          {formatNgn(row.revenueNgn)}
                         </span>
                       </div>
-                      <p className="text-[11px] text-slate-600 pl-9">{row.materialType}</p>
-                      <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1 pl-9 text-[11px] tabular-nums">
-                        <span className="text-slate-500">
-                          {row.weightKg.toLocaleString()} kg
-                        </span>
-                        <span className="font-semibold text-[#134e4a]">Live store</span>
-                      </div>
-                    </div>
-                    <div className="hidden sm:grid sm:grid-cols-[2.5rem_minmax(0,4.5rem)_minmax(0,5rem)_minmax(0,1fr)_minmax(0,10.5rem)_minmax(0,7rem)] gap-x-3 items-center">
-                      <span className="flex h-8 w-8 mx-auto items-center justify-center rounded-md bg-slate-100 text-xs font-bold text-[#134e4a] tabular-nums">
-                        {row.rank}
-                      </span>
-                      <span className="text-sm font-semibold text-slate-900">{row.colour}</span>
-                      <span className="text-sm font-semibold text-slate-800 tabular-nums">{row.gaugeMm} mm</span>
-                      <span className="text-[12px] text-slate-600 truncate pr-1">{row.materialType}</span>
-                      <span className="flex flex-wrap items-baseline justify-end gap-x-2 gap-y-0 text-sm font-semibold text-slate-800 tabular-nums text-right">
-                        <span>{row.weightKg.toLocaleString()} kg</span>
-                      </span>
-                      <span className="text-sm font-semibold text-[#134e4a] tabular-nums text-right">Live</span>
-                    </div>
-                  </button>
-                </li>
-              ))}
-            </ul>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </section>
 
           {prefs.showCharts ? (
@@ -1232,44 +1295,6 @@ const Dashboard = () => {
             </div>
           </div>
 
-          <section
-            className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 p-5 text-[11px] text-slate-600 leading-relaxed"
-            aria-label="Suggested dashboard metrics"
-          >
-            <p className="text-[10px] font-semibold text-slate-700 uppercase tracking-widest mb-2">
-              Strong fits for the next dashboard row
-            </p>
-            <p className="mb-2">
-              Based on the rest of the app (Operations, Finance, Procurement, Deliveries), these would round
-              out control-room visibility:
-            </p>
-            <ul className="list-disc pl-5 space-y-1 text-slate-600">
-              <li>
-                <span className="font-semibold text-slate-800">WIP vs store coil (kg)</span> — ties Live Production
-                Monitor to transfer &amp; FG.
-              </li>
-              <li>
-                <span className="font-semibold text-slate-800">PO in transit &amp; GRN backlog</span> — from
-                Procurement / Inventory context.
-              </li>
-              <li>
-                <span className="font-semibold text-slate-800">Margin vs spot list</span> — landed cost (when you add
-                it) vs the ₦/m table above.
-              </li>
-              <li>
-                <span className="font-semibold text-slate-800">AR aging &amp; overdue</span> — from Sales /
-                Accounts receivables.
-              </li>
-              <li>
-                <span className="font-semibold text-slate-800">Deliveries due / POD pending</span> — from
-                Deliveries board.
-              </li>
-              <li>
-                <span className="font-semibold text-slate-800">Scrap % &amp; yield</span> — roll up from production
-                monitor into a weekly KPI.
-              </li>
-            </ul>
-          </section>
         </div>
       </div>
 
@@ -1312,7 +1337,7 @@ const Dashboard = () => {
       <ModalFrame isOpen={priceEditorOpen} onClose={() => setPriceEditorOpen(false)}>
         <div className="z-modal-panel max-w-2xl max-h-[90vh] overflow-hidden flex flex-col p-0">
           <div className="flex items-center justify-between gap-4 border-b border-gray-100 px-6 py-4 shrink-0">
-            <h3 className="text-lg font-black text-[#134e4a]">Update spot prices (₦/m)</h3>
+            <h3 className="text-lg font-black text-[#134e4a]">Update spot prices — master data (₦/m)</h3>
             <button
               type="button"
               onClick={() => setPriceEditorOpen(false)}
@@ -1325,7 +1350,7 @@ const Dashboard = () => {
           <form onSubmit={savePrices} className="flex flex-col flex-1 min-h-0">
             <div className="overflow-y-auto px-6 py-4 custom-scrollbar flex-1">
               <p className="text-[11px] text-gray-500 mb-4">
-                Adjust ₦ per metre. Values are stored in this browser only until an API backs pricing.
+                Adjust ₦ per metre. Saving updates the server price list (visible to all users after refresh).
               </p>
               <div className="space-y-3">
                 {priceDraft.map((row, idx) => (

@@ -14,7 +14,7 @@ process.chdir(root);
 const env = {
   ...process.env,
   ZAREWA_DB: process.env.ZAREWA_DB || 'data/playwright.sqlite',
-  PORT: process.env.PORT || '8787',
+  PORT: process.env.E2E_API_PORT || process.env.PORT || '8788',
 };
 
 function waitHealth(url, maxMs) {
@@ -37,16 +37,18 @@ function waitHealth(url, maxMs) {
   });
 }
 
+const apiPort = String(env.PORT || '8788');
 const api = spawn(process.execPath, ['server/playwrightServer.js'], {
   cwd: root,
   env,
   stdio: 'inherit',
 });
 
-await waitHealth('http://127.0.0.1:8787/api/health', 120_000);
+await waitHealth(`http://127.0.0.1:${apiPort}/api/health`, 120_000);
 
 const viteCli = path.join(root, 'node_modules', 'vite', 'bin', 'vite.js');
-const vite = spawn(process.execPath, [viteCli, '--host', '127.0.0.1', '--port', '5173'], {
+const uiPort = String(process.env.E2E_UI_PORT || '5180');
+const vite = spawn(process.execPath, [viteCli, '--host', '127.0.0.1', '--port', uiPort], {
   cwd: root,
   env: { ...env, NODE_ENV: 'development' },
   stdio: 'inherit',

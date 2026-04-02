@@ -23,21 +23,12 @@ import {
 } from 'lucide-react';
 
 import { MainPanel, PageHeader, PageShell, PageTabs, ModalFrame } from '../components/layout';
-import {
-  EXPENSES_MOCK,
-  PAYMENT_REQUESTS_MOCK,
-  ACCOUNTS_PAYABLE_MOCK,
-  BANK_RECONCILIATION_MOCK,
-  formatNgn,
-} from '../Data/mockData';
+import { formatNgn } from '../Data/mockData';
 import { useToast } from '../context/ToastContext';
 import { useInventory } from '../context/InventoryContext';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { apiFetch } from '../lib/apiBase';
-import { loadTreasuryAccounts, saveTreasuryAccounts } from '../lib/treasuryAccountsStore';
 import {
-  loadRefunds,
-  saveRefunds,
   normalizeRefund,
   approvedRefundsAwaitingPayment,
   refundApprovedAmount,
@@ -49,12 +40,9 @@ const TAB_LABELS = {
   treasury: 'Treasury',
   payables: 'Payables',
   movements: 'Fund movements',
-  expenses: 'Expenses',
-  requests: 'Payment requests',
+  disbursements: 'Expenses & requests',
   audit: 'Audit & reconciliation',
 };
-
-const TODAY_ISO = '2026-03-28';
 
 const nextExpenseId = (list) => {
   const nums = list
@@ -64,20 +52,18 @@ const nextExpenseId = (list) => {
   return `EXP-2026-${String(n).padStart(3, '0')}`;
 };
 
-const nextRequestId = (list) => {
-  const nums = list
-    .map((r) => parseInt(r.requestID.replace(/\D/g, ''), 10))
-    .filter((n) => !Number.isNaN(n));
-  const n = nums.length ? Math.max(...nums) + 1 : 1;
-  return `PREQ-2026-${String(n).padStart(3, '0')}`;
-};
-
 const normalizePaymentRequest = (row) => ({
   ...row,
   paidAmountNgn: Number(row?.paidAmountNgn) || 0,
   paidAtISO: row?.paidAtISO || '',
   paidBy: row?.paidBy || '',
   paymentNote: row?.paymentNote || '',
+  branchId: row?.branchId || '',
+  expenseCategory: row?.expenseCategory || '',
+  isStaffLoan: Boolean(row?.isStaffLoan),
+  hrRequestId: row?.hrRequestId || '',
+  staffUserId: row?.staffUserId || '',
+  staffDisplayName: row?.staffDisplayName || '',
 });
 
 const createRequestPayLine = (defaultAccountId = '', amount = '') => ({
@@ -85,6 +71,12 @@ const createRequestPayLine = (defaultAccountId = '', amount = '') => ({
   treasuryAccountId: String(defaultAccountId),
   amount: amount === '' ? '' : String(amount),
   reference: '',
+});
+
+const createPaymentRequestLine = () => ({
+  id: `rq-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+  expenseID: '',
+  amountRequestedNgn: '',
 });
 
 const TREASURY_STATEMENT_TYPE_LABEL = {
@@ -136,9 +128,9 @@ const Account = () => {
   const [refundPaymentNote, setRefundPaymentNote] = useState('');
   const [requestPayLines, setRequestPayLines] = useState([]);
   const [requestPayNote, setRequestPayNote] = useState('');
-  const [customerRefunds, setCustomerRefunds] = useState(() => loadRefunds());
+  const [customerRefunds, setCustomerRefunds] = useState([]);
 
-  const [bankAccounts, setBankAccounts] = useState(() => loadTreasuryAccounts());
+  const [bankAccounts, setBankAccounts] = useState([]);
 
   const [newBank, setNewBank] = useState({
     name: '',
@@ -148,19 +140,7 @@ const Account = () => {
     balance: '',
   });
 
-  useEffect(() => {
-    saveTreasuryAccounts(bankAccounts);
-  }, [bankAccounts]);
-
-  /* eslint-disable react-hooks/set-state-in-effect */
-  useEffect(() => {
-    setCustomerRefunds(loadRefunds());
-  }, [location.key, activeTab]);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  const [payables, setPayables] = useState(() =>
-    ACCOUNTS_PAYABLE_MOCK.map((r) => ({ ...r }))
-  );
+  const [payables, setPayables] = useState([]);
   const [fundMovements, setFundMovements] = useState([]);
   const [transferForm, setTransferForm] = useState({
     fromId: '',
@@ -174,30 +154,47 @@ const Account = () => {
     debitAccountId: '',
   });
 
-  const [expenses, setExpenses] = useState(() => [...EXPENSES_MOCK]);
-  const [payRequests, setPayRequests] = useState(() => PAYMENT_REQUESTS_MOCK.map(normalizePaymentRequest));
-  const [bankReconciliation, setBankReconciliation] = useState(() =>
-    BANK_RECONCILIATION_MOCK.map((r) => ({ ...r }))
-  );
+  const [expenses, setExpenses] = useState([]);
+  const [payRequests, setPayRequests] = useState([]);
+  const [bankReconciliation, setBankReconciliation] = useState([]);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    const s = ws?.snapshot;
-    if (!ws?.hasWorkspaceData || !s) return;
-    if (Array.isArray(s.treasuryAccounts) && s.treasuryAccounts.length > 0) {
+    if (!ws?.hasWorkspaceData || !ws?.snapshot) {
+      setBankAccounts([]);
+      setCustomerRefunds([]);
+      setExpenses([]);
+      setPayRequests([]);
+      setPayables([]);
+      setFundMovements([]);
+      setBankReconciliation([]);
+      return;
+    }
+    const s = ws.snapshot;
+    if (Array.isArray(s.treasuryAccounts)) {
       setBankAccounts(s.treasuryAccounts.map((a) => ({ ...a })));
+    } else {
+      setBankAccounts([]);
     }
     if (Array.isArray(s.refunds)) {
       setCustomerRefunds(s.refunds.map((r) => normalizeRefund(r)));
+    } else {
+      setCustomerRefunds([]);
     }
     if (Array.isArray(s.expenses)) {
       setExpenses(s.expenses.map((x) => ({ ...x })));
+    } else {
+      setExpenses([]);
     }
     if (Array.isArray(s.paymentRequests)) {
       setPayRequests(s.paymentRequests.map((x) => normalizePaymentRequest(x)));
+    } else {
+      setPayRequests([]);
     }
     if (Array.isArray(s.accountsPayable)) {
       setPayables(s.accountsPayable.map((x) => ({ ...x })));
+    } else {
+      setPayables([]);
     }
     if (Array.isArray(s.treasuryMovements)) {
       setFundMovements(
@@ -220,9 +217,13 @@ const Account = () => {
             };
           })
       );
+    } else {
+      setFundMovements([]);
     }
     if (Array.isArray(s.bankReconciliation)) {
       setBankReconciliation(s.bankReconciliation.map((x) => ({ ...x })));
+    } else {
+      setBankReconciliation([]);
     }
   }, [ws?.snapshot, ws?.hasWorkspaceData]);
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -238,8 +239,7 @@ const Account = () => {
   });
 
   const [requestForm, setRequestForm] = useState({
-    expenseID: '',
-    amountRequestedNgn: '',
+    rows: [createPaymentRequestLine()],
     requestDate: '',
     description: '',
   });
@@ -249,6 +249,24 @@ const Account = () => {
   const canReconcileBank = ws?.hasPermission?.('finance.post');
 
   const [reconDrafts, setReconDrafts] = useState({});
+  const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const branchOptions = useMemo(
+    () => ws?.snapshot?.workspaceBranches ?? ws?.session?.branches ?? [],
+    [ws?.snapshot?.workspaceBranches, ws?.session?.branches]
+  );
+  const branchNameById = useMemo(
+    () =>
+      Object.fromEntries(
+        branchOptions.map((b) => [String(b.id || '').trim(), b.name || b.code || b.id || 'Unknown branch'])
+      ),
+    [branchOptions]
+  );
+  const branchScopeLabel = useMemo(() => {
+    if (ws?.viewAllBranches) return 'All branches (HQ roll-up)';
+    const id = String(ws?.branchScope || ws?.session?.currentBranchId || '').trim();
+    if (!id) return 'Current branch';
+    return branchNameById[id] ? `Branch: ${branchNameById[id]}` : `Branch: ${id}`;
+  }, [branchNameById, ws?.branchScope, ws?.session?.currentBranchId, ws?.viewAllBranches]);
 
   const totals = useMemo(() => {
     const cash = bankAccounts.reduce((acc, curr) => acc + curr.balance, 0);
@@ -303,7 +321,16 @@ const Account = () => {
     () =>
       liveTreasuryMovements
         .filter((m) =>
-          ['EXPENSE', 'AP_PAYMENT', 'SUPPLIER_PAYMENT', 'REFUND_PAYOUT', 'ADVANCE_REFUND_OUT'].includes(m.type)
+          [
+            'EXPENSE',
+            'AP_PAYMENT',
+            'SUPPLIER_PAYMENT',
+            'PO_SUPPLIER_PAYMENT',
+            'REFUND_PAYOUT',
+            'ADVANCE_REFUND_OUT',
+            'PAYMENT_REQUEST_OUT',
+            'TRANSPORT_PAYMENT',
+          ].includes(m.type)
         )
         .reduce((sum, m) => sum + Math.abs(Math.min(0, m.amountNgn || 0)), 0),
     [liveTreasuryMovements]
@@ -447,43 +474,13 @@ const Account = () => {
       }
       await ws.refresh();
     } else {
-      const paidAtISO = new Date().toISOString();
-      const next = customerRefunds.map((r) =>
-        r.refundID === rid
-          ? normalizeRefund({
-              ...r,
-              status:
-                (Number(r.paidAmountNgn) || 0) + refundPayTotalNgn >= refundApprovedAmount(r)
-                  ? 'Paid'
-                  : 'Approved',
-              paidAtISO,
-              paidBy,
-              paidAmountNgn: (Number(r.paidAmountNgn) || 0) + refundPayTotalNgn,
-              paymentNote: refundPaymentNote.trim(),
-              payoutHistory: [
-                ...(Array.isArray(r.payoutHistory) ? r.payoutHistory : []),
-                ...validLines.map((line, idx) => ({
-                  id: `${rid}-${Date.now()}-${idx}`,
-                  postedAtISO: paidAtISO,
-                  treasuryAccountId: line.treasuryAccountId,
-                  accountName: bankAccounts.find((account) => account.id === line.treasuryAccountId)?.name || '',
-                  amountNgn: line.amountNgn,
-                  reference: line.reference,
-                  note: refundPaymentNote.trim(),
-                })),
-              ],
-            })
-          : r
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to record refund payouts — workspace is read-only.'
+          : 'Connect to the API to record refund payouts.',
+        { variant: 'info' }
       );
-      const nextBanks = bankAccounts.map((a) => {
-        const applied = validLines
-          .filter((line) => line.treasuryAccountId === a.id)
-          .reduce((sum, line) => sum + line.amountNgn, 0);
-        return applied > 0 ? { ...a, balance: a.balance - applied } : a;
-      });
-      saveRefunds(next);
-      setCustomerRefunds(next);
-      setBankAccounts(nextBanks);
+      return;
     }
     setShowRefundPayModal(false);
     setRefundPayTarget(null);
@@ -527,6 +524,10 @@ const Account = () => {
     }
     if (outstanding <= 0) {
       showToast('This payment request is already fully paid.', { variant: 'info' });
+      return;
+    }
+    if (!ws?.viewAllBranches && req?.branchId && ws?.branchScope && req.branchId !== ws.branchScope) {
+      showToast(`This request belongs to ${req.branchId}. Switch branch before payout.`, { variant: 'error' });
       return;
     }
     setSelectedPayment({
@@ -592,28 +593,13 @@ const Account = () => {
       }
       await ws.refresh();
     } else {
-      const paidAtISO = new Date().toISOString().slice(0, 10);
-      setPayRequests((prev) =>
-        prev.map((row) =>
-          row.requestID === selectedPayment.id
-            ? normalizePaymentRequest({
-                ...row,
-                paidAmountNgn: (Number(row.paidAmountNgn) || 0) + requestPayTotalNgn,
-                paidAtISO,
-                paidBy: activeActorLabel,
-                paymentNote: requestPayNote.trim(),
-              })
-            : row
-        )
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to record payouts — workspace is read-only.'
+          : 'Connect to the API to record payment request payouts.',
+        { variant: 'info' }
       );
-      setBankAccounts((prev) =>
-        prev.map((account) => {
-          const applied = validLines
-            .filter((line) => line.treasuryAccountId === account.id)
-            .reduce((sum, line) => sum + line.amountNgn, 0);
-          return applied > 0 ? { ...account, balance: account.balance - applied } : account;
-        })
-      );
+      return;
     }
 
     const fullyPaid = requestPayTotalNgn >= outstanding;
@@ -633,8 +619,7 @@ const Account = () => {
       { id: 'treasury', icon: <Landmark size={16} />, label: 'Treasury' },
       { id: 'payables', icon: <Truck size={16} />, label: 'Payables' },
       { id: 'movements', icon: <ArrowRightLeft size={16} />, label: 'Movements' },
-      { id: 'expenses', icon: <Receipt size={16} />, label: 'Expenses' },
-      { id: 'requests', icon: <ClipboardList size={16} />, label: 'Requests' },
+      { id: 'disbursements', icon: <ClipboardList size={16} />, label: 'Expenses & requests' },
       { id: 'audit', icon: <ShieldCheck size={16} />, label: 'Audit' },
     ],
     []
@@ -666,14 +651,7 @@ const Account = () => {
       });
       setShowTransferModal(true);
     }
-    if (activeTab === 'expenses') {
-      setExpenseForm((f) => ({
-        ...f,
-        debitAccountId: String(bankAccounts[0]?.id ?? ''),
-      }));
-      setShowExpenseModal(true);
-    }
-    if (activeTab === 'requests') setShowPayRequestModal(true);
+    if (activeTab === 'disbursements') setShowPayRequestModal(true);
   };
 
   const newRecordLabel =
@@ -683,20 +661,60 @@ const Account = () => {
         ? 'Pay supplier'
         : activeTab === 'movements'
           ? 'New transfer'
-          : activeTab === 'expenses'
-            ? 'New expense'
-            : activeTab === 'requests'
-              ? 'New payment request'
+          : activeTab === 'disbursements'
+            ? 'New payment request'
               : null;
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     const tab = location.state?.accountsTab;
     if (tab !== 'requests' && tab !== 'payments') return;
-    setActiveTab('requests');
+    setActiveTab('disbursements');
     navigate(location.pathname, { replace: true, state: {} });
   }, [location.state, location.pathname, navigate]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  const reconSuggestionsById = useMemo(() => {
+    const rows = ws?.hasWorkspaceData ? liveTreasuryMovements : [];
+    const toIso = (value) => String(value || '').slice(0, 10);
+    const toEpoch = (iso) => {
+      if (!iso) return Number.NaN;
+      const t = Date.parse(iso);
+      return Number.isNaN(t) ? Number.NaN : t;
+    };
+    const out = {};
+    for (const line of bankReconciliation) {
+      const lineAmt = Math.abs(Number(line.amountNgn) || 0);
+      const lineDate = toIso(line.bankDateISO);
+      const lineTs = toEpoch(lineDate);
+      let best = null;
+      for (const m of rows) {
+        const mAmt = Math.abs(Number(m.amountNgn) || 0);
+        if (Math.abs(mAmt - lineAmt) > 1) continue;
+        const mDate = toIso(m.postedAtISO);
+        const mTs = toEpoch(mDate);
+        const dayDiff =
+          Number.isFinite(lineTs) && Number.isFinite(mTs)
+            ? Math.round(Math.abs(mTs - lineTs) / (1000 * 60 * 60 * 24))
+            : 999;
+        if (dayDiff > 3) continue;
+        const score = dayDiff;
+        if (!best || score < best.score) {
+          best = {
+            score,
+            text: [m.reference, m.counterpartyName, m.note, m.sourceId].filter(Boolean).join(' · ') || m.type || '',
+          };
+        }
+      }
+      if (best?.text) {
+        out[line.id] = {
+          text: best.text,
+          confidence: best.score === 0 ? 'High' : best.score === 1 ? 'Medium' : 'Low',
+        };
+      }
+    }
+    return out;
+  }, [bankReconciliation, liveTreasuryMovements, ws?.hasWorkspaceData]);
 
   const saveExpense = async (e) => {
     e.preventDefault();
@@ -737,12 +755,13 @@ const Account = () => {
       }
       await ws.refresh();
     } else {
-      const next = [row, ...expenses];
-      const nextBanks = bankAccounts.map((a) =>
-        a.id === debitId ? { ...a, balance: a.balance - amount } : a
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to save expenses — workspace is read-only.'
+          : 'Connect to the API to record expenses.',
+        { variant: 'info' }
       );
-      setExpenses(next);
-      setBankAccounts(nextBanks);
+      return;
     }
     setExpenseForm({
       expenseType: 'COGS — materials & stock',
@@ -754,47 +773,62 @@ const Account = () => {
       reference: '',
     });
     setShowExpenseModal(false);
-    showToast(ws?.canMutate ? 'Expense recorded and synced.' : 'Expense recorded (this browser only).');
+    showToast('Expense recorded and synced.');
   };
 
   const savePayRequest = async (e) => {
     e.preventDefault();
-    const amount = Number(requestForm.amountRequestedNgn);
-    if (!requestForm.expenseID || Number.isNaN(amount) || amount <= 0) return;
-    const row = {
-      requestID: nextRequestId(payRequests),
-      expenseID: requestForm.expenseID,
-      amountRequestedNgn: amount,
-      requestDate: requestForm.requestDate || new Date().toISOString().slice(0, 10),
-      approvalStatus: 'Pending',
-      description: requestForm.description.trim() || '—',
-    };
-    if (ws?.canMutate) {
-      const { ok, data } = await apiFetch('/api/payment-requests', {
-        method: 'POST',
-        body: JSON.stringify({
-          expenseID: row.expenseID,
-          amountRequestedNgn: row.amountRequestedNgn,
-          requestDate: row.requestDate,
-          description: row.description,
-        }),
-      });
-      if (!ok || !data?.ok) {
-        showToast(data?.error || 'Could not save request on server.', { variant: 'error' });
+    const rows = requestForm.rows
+      .map((r) => ({
+        expenseID: String(r.expenseID || '').trim(),
+        amountRequestedNgn: Number(r.amountRequestedNgn),
+      }))
+      .filter((r) => r.expenseID || Number.isFinite(r.amountRequestedNgn));
+    if (!rows.length) {
+      showToast('Add at least one payment request line.', { variant: 'error' });
+      return;
+    }
+    for (const line of rows) {
+      if (!line.expenseID || Number.isNaN(line.amountRequestedNgn) || line.amountRequestedNgn <= 0) {
+        showToast('Each request line needs an expense and a positive amount.', { variant: 'error' });
         return;
+      }
+    }
+    const requestDate = requestForm.requestDate || new Date().toISOString().slice(0, 10);
+    const description = requestForm.description.trim() || '—';
+    if (ws?.canMutate) {
+      for (const row of rows) {
+        const { ok, data } = await apiFetch('/api/payment-requests', {
+          method: 'POST',
+          body: JSON.stringify({
+            expenseID: row.expenseID,
+            amountRequestedNgn: row.amountRequestedNgn,
+            requestDate,
+            description,
+          }),
+        });
+        if (!ok || !data?.ok) {
+          showToast(data?.error || 'Could not save request on server.', { variant: 'error' });
+          return;
+        }
       }
       await ws.refresh();
     } else {
-      setPayRequests((prev) => [normalizePaymentRequest(row), ...prev]);
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to submit payment requests — workspace is read-only.'
+          : 'Connect to the API to submit payment requests.',
+        { variant: 'info' }
+      );
+      return;
     }
     setRequestForm({
-      expenseID: '',
-      amountRequestedNgn: '',
+      rows: [createPaymentRequestLine()],
       requestDate: '',
       description: '',
     });
     setShowPayRequestModal(false);
-    showToast('Payment request submitted for approval.');
+    showToast(`${rows.length} payment request line(s) submitted for approval.`);
   };
 
   const addBank = async (e) => {
@@ -802,18 +836,6 @@ const Account = () => {
     const bal = Number(newBank.balance || 0);
     const accName = newBank.name.trim();
     if (!accName) return;
-    const nextId = bankAccounts.length ? Math.max(...bankAccounts.map((b) => b.id)) + 1 : 1;
-    const next = [
-      ...bankAccounts,
-      {
-        id: nextId,
-        name: accName,
-        bankName: newBank.bankName.trim(),
-        type: newBank.type,
-        accNo: newBank.accNo.trim() || 'N/A',
-        balance: Number.isNaN(bal) ? 0 : bal,
-      },
-    ];
     if (ws?.canMutate) {
       const { ok, data } = await apiFetch('/api/treasury/accounts', {
         method: 'POST',
@@ -831,7 +853,13 @@ const Account = () => {
       }
       await ws.refresh();
     } else {
-      setBankAccounts(next);
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to add treasury accounts — workspace is read-only.'
+          : 'Connect to the API to add treasury accounts.',
+        { variant: 'info' }
+      );
+      return;
     }
     setNewBank({ name: '', bankName: '', type: 'Bank', accNo: '', balance: '' });
     setShowAddBank(false);
@@ -873,25 +901,13 @@ const Account = () => {
       }
       await ws.refresh();
     } else {
-      const nextBanks = bankAccounts.map((a) => {
-        if (a.id === fromId) return { ...a, balance: a.balance - amount };
-        if (a.id === toId) return { ...a, balance: a.balance + amount };
-        return a;
-      });
-      setBankAccounts(nextBanks);
-      const fromName = bankAccounts.find((a) => a.id === fromId)?.name ?? '';
-      const toName = bankAccounts.find((a) => a.id === toId)?.name ?? '';
-      setFundMovements((prev) => [
-        {
-          id: `FM-${String(prev.length + 1).padStart(3, '0')}`,
-          at: new Date().toISOString().slice(0, 10),
-          fromName,
-          toName,
-          amountNgn: amount,
-          reference: transferForm.reference.trim() || '—',
-        },
-        ...prev,
-      ]);
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to post transfers — workspace is read-only.'
+          : 'Connect to the API to post treasury transfers.',
+        { variant: 'info' }
+      );
+      return;
     }
     setTransferForm({ fromId: '', toId: '', amountNgn: '', reference: '' });
     setShowTransferModal(false);
@@ -948,18 +964,13 @@ const Account = () => {
       }
       await ws.refresh();
     } else {
-      const nextPayables = payables.map((p) =>
-        p.apID === selectedAp.apID ? { ...p, paidNgn: p.paidNgn + apply } : p
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to record supplier payments — workspace is read-only.'
+          : 'Connect to the API to record accounts payable payments.',
+        { variant: 'info' }
       );
-      const nextBanks = bankAccounts.map((a) =>
-        a.id === debitId ? { ...a, balance: a.balance - apply } : a
-      );
-      setPayables(nextPayables);
-      setBankAccounts(nextBanks);
-      if (shouldAdvancePo) {
-        const st = await setPurchaseOrderStatus(poRef, 'In Transit');
-        if (st.ok) procurementNote = ` ${poRef} → In Transit (await GRN in Operations).`;
-      }
+      return;
     }
     setShowApPaymentModal(false);
     setSelectedAp(null);
@@ -987,20 +998,13 @@ const Account = () => {
       }
       await ws.refresh();
     } else {
-      setPayRequests((prev) =>
-        prev.map((req) =>
-          req.requestID === requestID
-            ? {
-                ...req,
-                approvalStatus: status,
-                approvedBy: activeActorLabel,
-                approvedAtISO: new Date().toISOString().slice(0, 10),
-                approvalNote:
-                  status === 'Approved' ? 'Approved for treasury action.' : 'Rejected during finance review.',
-              }
-            : req
-        )
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to review payment requests — workspace is read-only.'
+          : 'Connect to the API to approve or reject payment requests.',
+        { variant: 'info' }
       );
+      return;
     }
     showToast(`Payment request ${requestID} marked ${status}.`);
   };
@@ -1015,6 +1019,25 @@ const Account = () => {
       return blob.includes(qq);
     });
   }, [expenses, searchQuery]);
+
+  const filteredPayRequests = useMemo(() => {
+    const qq = searchQuery.trim().toLowerCase();
+    if (!qq) return payRequests;
+    return payRequests.filter((req) => {
+      const blob = [
+        req.requestID,
+        req.expenseID,
+        req.description,
+        req.approvalStatus,
+        req.approvedBy,
+        req.paidBy,
+        req.requestDate,
+      ]
+        .join(' ')
+        .toLowerCase();
+      return blob.includes(qq);
+    });
+  }, [payRequests, searchQuery]);
 
   const filteredPayables = useMemo(() => {
     const qq = searchQuery.trim().toLowerCase();
@@ -1074,6 +1097,9 @@ const Account = () => {
           <PageTabs tabs={accountTabs} value={activeTab} onChange={setActiveTab} />
         }
       />
+      <div className="mb-4 inline-flex items-center rounded-full border border-teal-100 bg-teal-50 px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-teal-800">
+        {branchScopeLabel}
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
         <div className="lg:col-span-1 space-y-6">
@@ -1314,7 +1340,7 @@ const Account = () => {
                   </div>
                 ) : (
                   filteredPayables.map((p) => {
-                    const due = p.dueDateISO < TODAY_ISO;
+                    const due = p.dueDateISO < todayIso;
                     const open = p.paidNgn < p.amountNgn;
                     return (
                       <div
@@ -1328,6 +1354,11 @@ const Account = () => {
                             PO {p.poRef} · Invoice {p.invoiceRef}
                           </p>
                           <div className="flex flex-wrap gap-2 mt-2">
+                            {p.branchId ? (
+                              <span className="text-[9px] font-bold uppercase px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">
+                                {branchNameById[p.branchId] || p.branchId}
+                              </span>
+                            ) : null}
                             {open ? (
                               <span className="text-[9px] font-bold uppercase px-2 py-0.5 rounded-full bg-amber-100 text-amber-900">
                                 Outstanding {formatNgn(p.amountNgn - p.paidNgn)}
@@ -1427,41 +1458,23 @@ const Account = () => {
               </div>
             )}
 
-            {activeTab === 'expenses' && (
-              <div className="space-y-4 animate-in slide-in-from-right-5">
-                {filteredExpenses.map((ex) => (
-                  <div
-                    key={ex.expenseID}
-                    className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-6 bg-gray-50/50 border border-transparent rounded-2xl hover:border-teal-100 hover:bg-white transition-all"
-                  >
-                    <div className="flex items-center gap-4 min-w-0">
-                      <div className="bg-white p-3 rounded-xl text-gray-400 text-[#134e4a] shadow-sm shrink-0">
-                        <Receipt size={18} />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-xs font-bold text-gray-700 uppercase">{ex.expenseID}</p>
-                        <p className="text-[10px] text-gray-500 mt-1">
-                          {ex.expenseType} · {ex.category}
-                        </p>
-                        <p className="text-[10px] text-gray-400 mt-1">
-                          {ex.paymentMethod} · Ref {ex.reference}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="text-left sm:text-right shrink-0">
-                      <p className="text-sm font-black text-[#134e4a]">
-                        {formatNgn(ex.amountNgn)}
+            {activeTab === 'disbursements' && (
+              <div className="space-y-8 animate-in slide-in-from-right-5">
+                <section className="space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-xs font-bold uppercase tracking-widest text-[#134e4a]">
+                        1) Payment requests (approval queue)
+                      </h3>
+                      <p className="text-[11px] text-gray-500 mt-1">
+                        Raise and approve disbursement requests before treasury payout.
                       </p>
-                      <p className="text-[10px] font-bold text-gray-400 uppercase">{ex.date}</p>
                     </div>
+                    <button type="button" onClick={() => setShowPayRequestModal(true)} className="z-btn-secondary">
+                      <Plus size={16} /> New payment request
+                    </button>
                   </div>
-                ))}
-              </div>
-            )}
-
-            {activeTab === 'requests' && (
-              <div className="space-y-4 animate-in slide-in-from-right-5">
-                {payRequests.map((req) => {
+                {filteredPayRequests.map((req) => {
                   const paidAmountNgn = Number(req.paidAmountNgn) || 0;
                   const outstandingNgn = Math.max(0, (Number(req.amountRequestedNgn) || 0) - paidAmountNgn);
                   const payoutState =
@@ -1487,6 +1500,18 @@ const Account = () => {
                           <p className="text-[10px] text-gray-400 mt-1">
                             Linked {req.expenseID} · {req.description}
                           </p>
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            {req.branchId ? (
+                              <span className="inline-flex px-3 py-1 rounded-full text-[9px] font-bold uppercase bg-slate-100 text-slate-700">
+                                {branchNameById[req.branchId] || req.branchId}
+                              </span>
+                            ) : null}
+                            {req.isStaffLoan ? (
+                              <span className="inline-flex px-3 py-1 rounded-full text-[9px] font-bold uppercase bg-teal-100 text-teal-800">
+                                Staff loan
+                              </span>
+                            ) : null}
+                          </div>
                           {req.approvedBy ? (
                             <p className="text-[10px] text-gray-400 mt-1">
                               {req.approvedBy}
@@ -1576,6 +1601,65 @@ const Account = () => {
                     </div>
                   );
                 })}
+                </section>
+
+                <section className="space-y-4 border-t border-slate-100 pt-6">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-xs font-bold uppercase tracking-widest text-[#134e4a]">
+                        2) Expenses (posted records)
+                      </h3>
+                      <p className="text-[11px] text-gray-500 mt-1">
+                        Record completed spending entries after request approval/payout.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setExpenseForm((f) => ({
+                          ...f,
+                          debitAccountId: String(bankAccounts[0]?.id ?? ''),
+                        }));
+                        setShowExpenseModal(true);
+                      }}
+                      className="z-btn-secondary"
+                    >
+                      <Plus size={16} /> New expense
+                    </button>
+                  </div>
+                {filteredExpenses.map((ex) => (
+                  <div
+                    key={ex.expenseID}
+                    className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-6 bg-gray-50/50 border border-transparent rounded-2xl hover:border-teal-100 hover:bg-white transition-all"
+                  >
+                    <div className="flex items-center gap-4 min-w-0">
+                      <div className="bg-white p-3 rounded-xl text-gray-400 text-[#134e4a] shadow-sm shrink-0">
+                        <Receipt size={18} />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-gray-700 uppercase">{ex.expenseID}</p>
+                        <p className="text-[10px] text-gray-500 mt-1">
+                          {ex.expenseType} · {ex.category}
+                        </p>
+                        {ex.branchId ? (
+                          <p className="text-[10px] mt-1">
+                            <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 font-bold uppercase text-slate-700">
+                              {branchNameById[ex.branchId] || ex.branchId}
+                            </span>
+                          </p>
+                        ) : null}
+                        <p className="text-[10px] text-gray-400 mt-1">
+                          {ex.paymentMethod} · Ref {ex.reference}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="text-left sm:text-right shrink-0">
+                      <p className="text-sm font-black text-[#134e4a]">{formatNgn(ex.amountNgn)}</p>
+                      <p className="text-[10px] font-bold text-gray-400 uppercase">{ex.date}</p>
+                    </div>
+                  </div>
+                ))}
+                </section>
               </div>
             )}
 
@@ -1656,7 +1740,12 @@ const Account = () => {
                             {line.amountNgn < 0 ? ' DR' : ' CR'}
                           </div>
                           <div className="col-span-3 text-[10px] text-gray-500">
-                            {line.systemMatch ?? '—'}
+                            {line.systemMatch ?? reconSuggestionsById[line.id]?.text ?? '—'}
+                            {line.branchId ? (
+                              <span className="ml-2 inline-flex rounded-full bg-slate-100 px-2 py-0.5 font-bold uppercase text-slate-700">
+                                {branchNameById[line.branchId] || line.branchId}
+                              </span>
+                            ) : null}
                           </div>
                           <div className="col-span-1">
                             <span
@@ -1683,6 +1772,20 @@ const Account = () => {
                               placeholder="System match e.g. receipt id, treasury ref, GL batch…"
                               className="flex-1 min-w-0 rounded-lg border border-gray-200 bg-white px-3 py-2 text-[11px] outline-none focus:ring-2 focus:ring-[#134e4a]/15"
                             />
+                            {reconSuggestionsById[line.id] ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setReconDrafts((d) => ({
+                                    ...d,
+                                    [line.id]: reconSuggestionsById[line.id].text,
+                                  }))
+                                }
+                                className="rounded-lg border border-teal-200 bg-teal-50 text-teal-800 px-3 py-2 text-[10px] font-bold uppercase tracking-wide"
+                              >
+                                Use suggestion ({reconSuggestionsById[line.id].confidence})
+                              </button>
+                            ) : null}
                             <div className="flex flex-wrap gap-2 shrink-0">
                               <button
                                 type="button"
@@ -2553,44 +2656,84 @@ const Account = () => {
             </div>
             <form className="space-y-4" onSubmit={savePayRequest}>
               <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                  Expense ID (linked)
-                </label>
-                <select
-                  required
-                  value={requestForm.expenseID}
-                  onChange={(e) =>
-                    setRequestForm((f) => ({ ...f, expenseID: e.target.value }))
-                  }
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                >
-                  <option value="">Select expense…</option>
-                  {expenses.map((ex) => (
-                    <option key={ex.expenseID} value={ex.expenseID}>
-                      {ex.expenseID} — {formatNgn(ex.amountNgn)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
+                <div className="flex items-center justify-between">
                   <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                    Amount requested (₦)
+                    Request lines
                   </label>
-                  <input
-                    required
-                    type="number"
-                    min="1"
-                    value={requestForm.amountRequestedNgn}
-                    onChange={(e) =>
+                  <button
+                    type="button"
+                    onClick={() =>
                       setRequestForm((f) => ({
                         ...f,
-                        amountRequestedNgn: e.target.value,
+                        rows: [...f.rows, createPaymentRequestLine()],
                       }))
                     }
-                    className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                  />
+                    className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-[#134e4a]"
+                  >
+                    <Plus size={12} /> Add line
+                  </button>
                 </div>
+                <div className="space-y-2">
+                  {requestForm.rows.map((row, idx) => (
+                    <div key={row.id} className="grid grid-cols-12 gap-2 items-center">
+                      <select
+                        required
+                        value={row.expenseID}
+                        onChange={(e) =>
+                          setRequestForm((f) => ({
+                            ...f,
+                            rows: f.rows.map((x) =>
+                              x.id === row.id ? { ...x, expenseID: e.target.value } : x
+                            ),
+                          }))
+                        }
+                        className="col-span-7 w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-3 text-xs font-bold outline-none"
+                      >
+                        <option value="">Expense #{idx + 1}</option>
+                        {expenses.map((ex) => (
+                          <option key={ex.expenseID} value={ex.expenseID}>
+                            {ex.expenseID} — {formatNgn(ex.amountNgn)}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        required
+                        type="number"
+                        min="1"
+                        value={row.amountRequestedNgn}
+                        onChange={(e) =>
+                          setRequestForm((f) => ({
+                            ...f,
+                            rows: f.rows.map((x) =>
+                              x.id === row.id
+                                ? { ...x, amountRequestedNgn: e.target.value }
+                                : x
+                            ),
+                          }))
+                        }
+                        placeholder="Amount (₦)"
+                        className="col-span-4 w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-3 text-xs font-bold outline-none"
+                      />
+                      <button
+                        type="button"
+                        disabled={requestForm.rows.length === 1}
+                        onClick={() =>
+                          setRequestForm((f) => ({
+                            ...f,
+                            rows:
+                              f.rows.length === 1 ? f.rows : f.rows.filter((x) => x.id !== row.id),
+                          }))
+                        }
+                        className="col-span-1 rounded-lg border border-gray-200 bg-white px-2 py-2 text-gray-500 disabled:opacity-40"
+                        title="Remove line"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
                     Request date

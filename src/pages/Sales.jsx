@@ -38,12 +38,12 @@ import AdvancePaymentModal from '../components/AdvancePaymentModal';
 import CuttingListModal from '../components/CuttingListModal';
 import RefundModal from '../components/RefundModal';
 import { MainPanel, PageHeader, PageShell, PageTabs } from '../components/layout';
-import { SALES_MOCK, SALES_YARD_COIL_REGISTER, formatNgn } from '../Data/mockData';
+import { formatNgn } from '../Data/mockData';
 import { useToast } from '../context/ToastContext';
 import { useCustomers } from '../context/CustomersContext';
 import { useInventory } from '../context/InventoryContext';
 import { useWorkspace } from '../context/WorkspaceContext';
-import { loadSpotPrices } from '../lib/dashboardSpotPrices';
+import { spotPricesRowsFromMasterData } from '../lib/spotPricesFromMasterData';
 import { apiFetch } from '../lib/apiBase';
 import {
   SALES_ROLE_LABELS,
@@ -56,8 +56,6 @@ import {
   cuttingListEditBlockedReason,
 } from '../lib/salesWorkspaceAccess';
 import {
-  loadRefunds,
-  saveRefunds,
   normalizeRefund,
   refundApprovedAmount,
   refundOutstandingAmount,
@@ -189,34 +187,33 @@ const Sales = () => {
 
   const quotations = useMemo(
     () =>
-      ws?.hasWorkspaceData
-        ? Array.isArray(ws?.snapshot?.quotations)
-          ? ws.snapshot.quotations
-          : []
-        : SALES_MOCK.quotations,
+      ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.quotations) ? ws.snapshot.quotations : [],
     [ws]
   );
-  const receipts = useMemo(
-    () =>
-      ws?.hasWorkspaceData
-        ? Array.isArray(ws?.snapshot?.receipts)
-          ? ws.snapshot.receipts
-          : []
-        : SALES_MOCK.receipts,
+  const importedReceipts = useMemo(
+    () => (ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.receipts) ? ws.snapshot.receipts : []),
     [ws]
   );
   const cuttingLists = useMemo(
     () =>
-      ws?.hasWorkspaceData
-        ? Array.isArray(ws?.snapshot?.cuttingLists)
-          ? ws.snapshot.cuttingLists
-          : []
-        : SALES_MOCK.cuttingLists,
+      ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.cuttingLists) ? ws.snapshot.cuttingLists : [],
     [ws]
   );
   const yardRegister = useMemo(
+    () => (Array.isArray(ws?.snapshot?.yardCoilRegister) ? ws.snapshot.yardCoilRegister : []),
+    [ws]
+  );
+
+  const spotPrices = useMemo(
+    () => spotPricesRowsFromMasterData(ws?.snapshot?.masterData),
+    [ws?.snapshot?.masterData]
+  );
+
+  const refunds = useMemo(
     () =>
-      ws?.snapshot?.yardCoilRegister?.length > 0 ? ws.snapshot.yardCoilRegister : SALES_YARD_COIL_REGISTER,
+      ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.refunds)
+        ? ws.snapshot.refunds.map((r) => normalizeRefund(r))
+        : [],
     [ws]
   );
 
@@ -398,13 +395,6 @@ const Sales = () => {
     return { kind: 'ok', title: 'Available', detail: summary };
   }, [stockSearchActive, stockSearchMatches]);
 
-  const [refunds, setRefunds] = useState(() => loadRefunds());
-  const [spotPrices, setSpotPrices] = useState(() => loadSpotPrices());
-
-  useEffect(() => {
-    saveRefunds(refunds);
-  }, [refunds]);
-
   const filteredQuotations = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return quotations.filter((row) => {
@@ -427,8 +417,8 @@ const Sales = () => {
   }, [quotations, searchQuery]);
 
   const mergedReceiptRows = useMemo(
-    () => mergeReceiptRowsForSales(receipts, quotations, ledgerSyncKey),
-    [receipts, quotations, ledgerSyncKey]
+    () => mergeReceiptRowsForSales(importedReceipts, quotations, ledgerSyncKey),
+    [importedReceipts, quotations, ledgerSyncKey]
   );
 
   const filteredMergedReceipts = useMemo(() => {
@@ -546,6 +536,7 @@ const Sales = () => {
     const action = st.openSalesAction;
     const tab = st.focusSalesTab;
     const gsq = st.globalSearchQuery;
+    const record = st.openSalesRecord;
     const openCustomerCreate = st.openCustomerCreate === true;
 
     if (action) {
@@ -568,6 +559,47 @@ const Sales = () => {
       return;
     }
 
+    const recordId = String(record?.id || '').trim();
+    if (record && recordId) {
+      if (record.type === 'quotation') {
+        const q = quotations.find((x) => x.id === recordId);
+        setActiveTab('quotations');
+        setSearchQuery('');
+        if (q) {
+          setSelectedItem(q);
+          setQuotationAccessMode('view');
+          setShowQuotationModal(true);
+        } else {
+          showToast(`Quotation ${recordId} not found.`, { variant: 'error' });
+        }
+      } else if (record.type === 'receipt') {
+        const r = mergedReceiptRows.find((x) => x.id === recordId);
+        setActiveTab('receipts');
+        setSearchQuery('');
+        if (r) {
+          setSelectedItem(r);
+          setReceiptAccessMode('view');
+          setShowReceiptModal(true);
+        } else {
+          showToast(`Receipt ${recordId} not found.`, { variant: 'error' });
+        }
+      } else if (record.type === 'refund') {
+        const rf = refunds.find((x) => x.refundID === recordId);
+        setActiveTab('refund');
+        setSearchQuery('');
+        if (rf) {
+          setSelectedItem(rf);
+          setRefundModalMode('view');
+          setRefundModalKey((k) => k + 1);
+          setShowRefundModal(true);
+        } else {
+          showToast(`Refund ${recordId} not found.`, { variant: 'error' });
+        }
+      }
+      navigate(location.pathname, { replace: true, state: {} });
+      return;
+    }
+
     const hasTab = tab && Object.prototype.hasOwnProperty.call(TAB_LABELS, tab);
     const hasSearch = typeof gsq === 'string' && gsq.trim();
     if (!openCustomerCreate && !hasTab && !hasSearch) return;
@@ -582,13 +614,7 @@ const Sales = () => {
     else if (hasTab || openCustomerCreate) setSearchQuery('');
 
     navigate(location.pathname, { replace: true, state: {} });
-  }, [location.state, location.pathname, navigate]);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  /* eslint-disable react-hooks/set-state-in-effect */
-  useEffect(() => {
-    setSpotPrices(loadSpotPrices());
-  }, [location.pathname, location.key]);
+  }, [location.state, location.pathname, navigate, mergedReceiptRows, quotations, refunds, showToast]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
@@ -679,20 +705,13 @@ const Sales = () => {
       );
       return { ok: true };
     }
-    if (refundModalMode === 'create') {
-      setRefunds((prev) => [normalized, ...prev]);
-      showToast(`Refund request ${normalized.refundID} submitted for approval.`);
-    } else {
-      setRefunds((prev) =>
-        prev.map((r) => (r.refundID === normalized.refundID ? normalized : r))
-      );
-      showToast(
-        refundModalMode === 'approve'
-          ? `Refund ${normalized.refundID} marked ${normalized.status}.`
-          : 'Refund record updated.'
-      );
-    }
-    return { ok: true };
+    showToast(
+      ws?.usingCachedData
+        ? 'Reconnect to save refunds — workspace is read-only.'
+        : 'Sign in and connect to the API to save refund requests.',
+      { variant: 'info' }
+    );
+    return { ok: false };
   };
 
   const persistCuttingList = async (payload) => {
@@ -812,13 +831,13 @@ const Sales = () => {
                     Spot price list
                   </p>
                   <p className="text-[11px] text-slate-500 mt-1 leading-snug">
-                    ₦ per metre — saved in this browser (same as dashboard).
+                    ₦ per metre from Setup → master data (same source as the dashboard).
                   </p>
                 </div>
                 <button
                   type="button"
                   onClick={() => navigate('/')}
-                  title="Open dashboard to edit prices"
+                  title="Open dashboard to edit prices (Settings permission required)"
                   className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[9px] font-semibold uppercase tracking-wide text-[#134e4a] hover:bg-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/20"
                 >
                   <Pencil size={12} strokeWidth={2} />
@@ -826,23 +845,29 @@ const Sales = () => {
                 </button>
               </div>
               <div className="max-h-[220px] overflow-y-auto custom-scrollbar pr-1">
-                {spotPrices.map((row) => (
-                  <div
-                    key={row.id}
-                    className="grid grid-cols-[1fr_auto] gap-x-2 items-start border-b border-slate-100 py-2.5 last:border-b-0"
-                  >
-                    <div className="min-w-0">
-                      <span className="text-xs font-semibold text-slate-800">{row.gaugeLabel}</span>
-                      <span className="text-[9px] text-slate-500 ml-1">{row.productType}</span>
-                      {row.note ? (
-                        <span className="block text-[9px] text-slate-400 mt-0.5">{row.note}</span>
-                      ) : null}
+                {spotPrices.length === 0 ? (
+                  <p className="text-[11px] text-slate-500 py-2">
+                    No per-metre price list — check Settings → master data or your role&apos;s access.
+                  </p>
+                ) : (
+                  spotPrices.map((row) => (
+                    <div
+                      key={row.id}
+                      className="grid grid-cols-[1fr_auto] gap-x-2 items-start border-b border-slate-100 py-2.5 last:border-b-0"
+                    >
+                      <div className="min-w-0">
+                        <span className="text-xs font-semibold text-slate-800">{row.gaugeLabel}</span>
+                        <span className="text-[9px] text-slate-500 ml-1">{row.productType}</span>
+                        {row.note ? (
+                          <span className="block text-[9px] text-slate-400 mt-0.5">{row.note}</span>
+                        ) : null}
+                      </div>
+                      <span className="text-xs font-bold text-[#134e4a] tabular-nums text-right whitespace-nowrap pt-0.5">
+                        ₦{row.priceNgn.toLocaleString()}/m
+                      </span>
                     </div>
-                    <span className="text-xs font-bold text-[#134e4a] tabular-nums text-right whitespace-nowrap pt-0.5">
-                      ₦{row.priceNgn.toLocaleString()}/m
-                    </span>
-                  </div>
-                ))}
+                  ))
+                )}
               </div>
             </div>
           </section>
@@ -1253,7 +1278,7 @@ const Sales = () => {
                               }`}
                               title={r._subLabel || ''}
                             >
-                              {r.source === 'ledger' ? 'Ledger' : 'Sample'}
+                              {r.source === 'ledger' ? 'Ledger' : 'Imported'}
                             </span>
                           </div>
                           <div className="col-span-2 text-xs font-bold text-[#134e4a] tabular-nums">{r.id}</div>
@@ -1450,7 +1475,7 @@ const Sales = () => {
                     onAddClose={() => setCustomerAddOpen(false)}
                     createdByLabel={salesRoleLabel}
                     quotations={quotations}
-                    receipts={receipts}
+                    receipts={importedReceipts}
                     cuttingLists={cuttingLists}
                     liveMode={Boolean(ws?.hasWorkspaceData)}
                   />
@@ -1479,7 +1504,7 @@ const Sales = () => {
         accessMode={receiptAccessMode}
         onClose={() => setShowReceiptModal(false)}
         quotations={quotations}
-        mockReceiptsForHistory={receipts}
+        importedReceiptsForHistory={importedReceipts}
         ledgerNonce={ledgerSyncKey}
         onLedgerChange={onLedgerSynced}
         useLedgerApi={Boolean(ws?.canMutate)}
@@ -1601,7 +1626,7 @@ const Sales = () => {
         accessMode={cuttingAccessMode}
         onClose={() => setShowCuttingModal(false)}
         quotations={quotations}
-        receipts={receipts}
+        receipts={importedReceipts}
         cuttingLists={cuttingLists}
         onPersist={persistCuttingList}
         onCuttingListUpdated={(cl) => setSelectedItem(cl)}
@@ -1617,9 +1642,9 @@ const Sales = () => {
         requesterLabel={salesRoleLabel}
         approverLabel={salesRoleLabel}
         quotations={quotations}
-        receipts={receipts}
+        receipts={importedReceipts}
         cuttingLists={cuttingLists}
-        availableStock={ws?.snapshot?.salesAvailableStock ?? SALES_MOCK.availableStock}
+        availableStock={ws?.snapshot?.salesAvailableStock ?? []}
       />
     </PageShell>
   );

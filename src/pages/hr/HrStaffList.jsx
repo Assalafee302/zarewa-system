@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, Navigate } from 'react-router-dom';
-import { ChevronRight, Search, UserPlus, X } from 'lucide-react';
+import { Search, UserPlus, X } from 'lucide-react';
 import { MainPanel, ModalFrame, PageHeader } from '../../components/layout';
 import { useHrWorkspace } from '../../context/HrWorkspaceContext';
 import { useToast } from '../../context/ToastContext';
@@ -8,6 +8,7 @@ import { useWorkspace } from '../../context/WorkspaceContext';
 import { apiFetch } from '../../lib/apiBase';
 import { formatNgn } from '../../hr/hrFormat';
 import HrCapsLoading from './hrCapsLoading';
+import { HrOpsToolbar, HrSectionCard } from './hrUx';
 
 const ROLE_OPTIONS = [
   { value: 'viewer', label: 'Read only' },
@@ -145,14 +146,14 @@ export default function HrStaffList() {
     <>
       <PageHeader
         title="Staff directory"
-        subtitle="Employee files scoped to your workspace branch (unless HQ view-all is enabled)."
+        subtitle="Employee files scoped to your workspace branch (unless HQ view-all is enabled). Open a record by clicking the name."
         actions={
           <div className="flex flex-wrap gap-2">
             {caps.canManageStaff ? (
               <button
                 type="button"
                 onClick={openRegister}
-                className="inline-flex items-center gap-2 rounded-xl bg-[#7028e6] px-3 py-2 text-[11px] font-black uppercase text-white"
+                className="inline-flex items-center gap-2 rounded-xl bg-[#134e4a] px-3 py-2 text-[11px] font-black uppercase text-white"
               >
                 <UserPlus size={14} />
                 Register staff
@@ -162,6 +163,15 @@ export default function HrStaffList() {
         }
       />
       <MainPanel>
+        <HrOpsToolbar
+          left={<p className="text-xs font-semibold text-slate-600">Primary directory for operations and payroll inputs.</p>}
+          right={
+            <p className="text-xs font-medium text-slate-500">
+              {busy ? 'Loading…' : `${filtered.length} of ${rows.length} shown`}
+            </p>
+          }
+        />
+        <HrSectionCard title="Directory table" subtitle="Compact searchable staff list">
         <div className="mb-4 flex flex-wrap items-center gap-3">
           <div className="relative min-w-[200px] flex-1 max-w-md">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
@@ -194,37 +204,47 @@ export default function HrStaffList() {
               <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-500">
                 <tr>
                   <th className="px-4 py-3">Name</th>
-                  <th className="px-4 py-3">Role / job</th>
-                  <th className="px-4 py-3">Branch</th>
+                  <th className="px-4 py-3 hidden md:table-cell">Role / job</th>
+                  <th className="px-4 py-3 hidden sm:table-cell">Branch</th>
+                  <th className="px-4 py-3 hidden lg:table-cell">HR file</th>
                   <th className="px-4 py-3 text-right">Package</th>
-                  <th className="px-4 py-3 text-right" />
                 </tr>
               </thead>
               <tbody>
                 {filtered.map((s) => (
-                  <tr key={s.userId} className="border-t border-slate-100 hover:bg-violet-50/30">
+                  <tr key={s.userId} className="border-t border-slate-100 hover:bg-teal-50/30">
                     <td className="px-4 py-3">
-                      <p className="font-semibold text-slate-900">{s.displayName || s.username}</p>
-                      <p className="text-xs text-slate-500">
-                        {s.employeeNo || s.username} · {s.roleKey || '—'}
-                      </p>
+                      <Link
+                        to={`/hr/staff/${encodeURIComponent(s.userId)}`}
+                        className="group block rounded-lg -m-1 p-1 text-left no-underline hover:bg-teal-100/40"
+                      >
+                        <p className="font-semibold text-[#134e4a] group-hover:underline">
+                          {s.displayName || s.username}
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          {s.employeeNo || s.username} · {s.roleKey || '—'}
+                        </p>
+                      </Link>
                     </td>
-                    <td className="px-4 py-3 text-xs text-slate-700">
+                    <td className="px-4 py-3 text-xs text-slate-700 hidden md:table-cell">
                       <span className="font-medium">{s.jobTitle || '—'}</span>
                       {s.department ? <span className="text-slate-500"> · {s.department}</span> : null}
                     </td>
-                    <td className="px-4 py-3 text-xs font-medium">{s.branchId || '—'}</td>
+                    <td className="px-4 py-3 text-xs font-medium hidden sm:table-cell">{s.branchId || '—'}</td>
+                    <td className="px-4 py-3 text-xs text-slate-600 hidden lg:table-cell">
+                      {s.nextOfKin?.name ? (
+                        <span className="mr-1 rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-900">Kin</span>
+                      ) : (
+                        <span className="mr-1 rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-900">Kin missing</span>
+                      )}
+                      {s.probationEndIso ? (
+                        <span className="rounded bg-slate-100 px-1.5 py-0.5 font-semibold text-slate-700">
+                          Probation {String(s.probationEndIso)}
+                        </span>
+                      ) : null}
+                    </td>
                     <td className="px-4 py-3 text-right text-xs font-semibold tabular-nums text-slate-800">
                       ₦{formatNgn(packageGross(s))}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <Link
-                        className="inline-flex items-center gap-1 rounded-lg bg-violet-600 px-3 py-1.5 text-[11px] font-black uppercase text-white hover:bg-violet-700"
-                        to={`/hr/staff/${encodeURIComponent(s.userId)}`}
-                      >
-                        Open
-                        <ChevronRight size={14} />
-                      </Link>
                     </td>
                   </tr>
                 ))}
@@ -234,24 +254,28 @@ export default function HrStaffList() {
         )}
 
         <p className="mt-6 text-xs text-slate-500">
-          Payroll and attendance use these files.{' '}
-          <Link to="/hr/payroll" className="text-violet-700 hover:underline">
-            Payroll runs
+          <Link to="/hr/staff/directory-quality" className="text-[#134e4a] hover:underline">
+            Directory data quality
           </Link>
           {' · '}
-          <Link to="/hr/time" className="text-violet-700 hover:underline">
-            Attendance
+          <Link to="/hr/payroll" className="text-[#134e4a] hover:underline">
+            Payroll
           </Link>
           {' · '}
-          <Link to="/hr/talent" className="text-violet-700 hover:underline">
-            HR requests
+          <Link to="/hr/time" className="text-[#134e4a] hover:underline">
+            Time &amp; attendance
+          </Link>
+          {' · '}
+          <Link to="/hr/talent" className="text-[#134e4a] hover:underline">
+            Requests
           </Link>
         </p>
+        </HrSectionCard>
       </MainPanel>
 
       <ModalFrame isOpen={regOpen} onClose={() => setRegOpen(false)}>
         <div className="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-[28px] border border-slate-200/90 bg-white shadow-xl">
-          <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-100 bg-violet-600 px-5 py-4 text-white">
+          <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-100 bg-[#134e4a] px-5 py-4 text-white">
             <h2 className="text-base font-black">Register staff</h2>
             <button type="button" className="rounded-xl p-2 hover:bg-white/10" aria-label="Close" onClick={() => setRegOpen(false)}>
               <X size={20} />
@@ -396,7 +420,7 @@ export default function HrStaffList() {
             <button
               type="submit"
               disabled={regBusy}
-              className="w-full rounded-xl bg-[#7028e6] px-4 py-2.5 text-[11px] font-black uppercase text-white disabled:opacity-50"
+              className="w-full rounded-xl bg-[#134e4a] px-4 py-2.5 text-[11px] font-black uppercase text-white disabled:opacity-50"
             >
               Create account
             </button>

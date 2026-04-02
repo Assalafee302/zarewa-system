@@ -1,6 +1,7 @@
 /**
  * Customer ledger — advances, receipts against quotations, applications, overpayments → advance.
- * Persisted in localStorage (demo). Mock `paidNgn` on quotations stays frozen; ledger entries adjust effective due.
+ * Source of truth is the in-memory ledger snapshot replaced from bootstrap.
+ * localStorage is write-through cache only (not read as authority).
  */
 import {
   sumForQuotationInEntries,
@@ -16,6 +17,7 @@ import {
 } from './customerLedgerCore.js';
 
 const STORAGE_KEY = 'zarewa.customerLedger.v1';
+let ledgerEntriesState = [];
 
 /** @typedef {'ADVANCE_IN'|'ADVANCE_APPLIED'|'RECEIPT'|'OVERPAY_ADVANCE'|'REFUND_ADVANCE'} LedgerEntryType */
 
@@ -36,26 +38,23 @@ const STORAGE_KEY = 'zarewa.customerLedger.v1';
  */
 
 export function loadLedgerEntries() {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    const p = JSON.parse(raw || '[]');
-    return Array.isArray(p) ? p : [];
-  } catch {
-    return [];
-  }
+  return Array.isArray(ledgerEntriesState) ? ledgerEntriesState : [];
 }
 
 /** Replace ledger from server bootstrap (keeps UI + localStorage aligned with API). */
 export function replaceLedgerEntries(entries) {
-  if (typeof window === 'undefined') return;
   if (!Array.isArray(entries)) return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+  ledgerEntriesState = entries.map((row) => ({ ...row }));
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(ledgerEntriesState));
+  }
 }
 
 function saveLedgerEntries(list) {
-  if (typeof window === 'undefined') return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+  ledgerEntriesState = Array.isArray(list) ? list.map((row) => ({ ...row })) : [];
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(ledgerEntriesState));
+  }
 }
 
 function nextId() {
@@ -80,7 +79,7 @@ export function sumForQuotation(quotationId, type) {
 }
 
 /**
- * Effective amount still due on a quotation (mock paid + ledger receipts + ledger advance applied).
+ * Effective amount still due on a quotation (quotation paid + ledger receipts + ledger advance applied).
  * @param {{ id: string, totalNgn?: number, paidNgn?: number }} q
  */
 export function amountDueOnQuotation(q) {
@@ -147,7 +146,7 @@ export function recordAdvanceAppliedToQuotation({
 
 /**
  * Payment with quotation: receipt portion + optional overpay → advance.
- * @param {{ id: string, totalNgn?: number, paidNgn?: number }} quotationRow - from SALES_MOCK
+ * @param {{ id: string, totalNgn?: number, paidNgn?: number }} quotationRow - from workspace quotation row
  */
 export function recordReceiptWithQuotation({
   customerID,

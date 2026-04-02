@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, useNavigate, Link, useParams } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, useNavigate, Link, useParams, Navigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
 import Sales from './pages/Sales';
 import Procurement from './pages/Procurement';
 import SupplierProfile from './pages/SupplierProfile';
+import CoilProfile from './pages/CoilProfile';
 import Operations from './pages/Operations';
 import Account from './pages/Account';
 import Customers from './pages/Customers';
@@ -21,13 +22,20 @@ import HrSalaryWelfare from './pages/hr/HrSalaryWelfare';
 import HrPayroll from './pages/hr/HrPayroll';
 import HrTime from './pages/hr/HrTime';
 import HrTalent from './pages/hr/HrTalent';
+import HrCompliance from './pages/hr/HrCompliance';
+import HrNextDirectory from './pages/hr/HrNextDirectory';
+import HrNextUatChecklist from './pages/hr/HrNextUatChecklist';
 import LoginScreen from './components/auth/LoginScreen';
+import ModuleRouteGuard from './components/ModuleRouteGuard';
 
 function HrStaffProfileRoute() {
   const { userId } = useParams();
   return <StaffProfile key={userId} />;
 }
-import { Search, Bell, Command, Menu, UserCircle } from 'lucide-react';
+function HrEntryIndexRoute() {
+  return <Navigate to="/hr/overview" replace />;
+}
+import { Search, Bell, Command, Menu } from 'lucide-react';
 import { CustomersProvider } from './context/CustomersContext';
 import { InventoryProvider } from './context/InventoryContext';
 import { ToastProvider } from './context/ToastContext';
@@ -39,6 +47,126 @@ import { BranchWorkspaceBar } from './components/layout/BranchWorkspaceBar';
 import { apiFetch } from './lib/apiBase';
 import { buildWorkspaceNotifications } from './lib/workspaceNotifications';
 import { searchWorkspaceSnapshot } from './lib/workspaceSearchLocal';
+
+function PolicyAckGate() {
+  const ws = useWorkspace();
+  const user = ws?.session?.user;
+  const [open, setOpen] = useState(false);
+  const [required, setRequired] = useState([]);
+  const [missing, setMissing] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [signatureName, setSignatureName] = useState(user?.displayName || '');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setSignatureName(user?.displayName || '');
+  }, [user?.displayName]);
+
+  const reload = useCallback(async () => {
+    if (!user) return;
+    const { ok, data } = await apiFetch('/api/hr/policy-requirements');
+    if (!ok || !data?.ok) return;
+    const reqs = Array.isArray(data.required) ? data.required : [];
+    const miss = Array.isArray(data.missing) ? data.missing : [];
+    setRequired(reqs);
+    setMissing(miss);
+    setOpen(miss.length > 0);
+  }, [user]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload, ws?.refreshEpoch]);
+
+  const acceptAll = useCallback(async () => {
+    if (!user) return;
+    const name = String(signatureName || '').trim();
+    if (!name) {
+      setError('Enter your name to sign.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      for (const p of missing) {
+        const { ok, data } = await apiFetch('/api/hr/policy-acknowledgements', {
+          method: 'POST',
+          body: JSON.stringify({
+            policyKey: p.key,
+            policyVersion: p.version,
+            signatureName: name,
+            context: { channel: 'policy-gate' },
+          }),
+        });
+        if (!ok || !data?.ok) {
+          throw new Error(data?.error || `Could not record acceptance for ${p.key}.`);
+        }
+      }
+      await reload();
+      setOpen(false);
+    } catch (e) {
+      setError(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }, [missing, reload, signatureName, user]);
+
+  if (!user || !open) return null;
+
+  const byKey = new Map(required.map((p) => [p.key, p]));
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl">
+        <h2 className="text-base font-black text-slate-900">Policy acknowledgement required</h2>
+        <p className="mt-1 text-xs text-slate-600">
+          Before you can edit HR records, upload attendance, or run payroll, you must accept the required policies.
+        </p>
+        <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+          <p className="text-[10px] font-bold uppercase text-slate-500">Pending</p>
+          <ul className="mt-2 space-y-1 text-sm">
+            {missing.map((m) => (
+              <li key={`${m.key}:${m.version}`} className="flex items-center justify-between gap-3">
+                <span className="font-semibold text-slate-800">{byKey.get(m.key)?.label || m.key}</span>
+                <span className="text-xs text-slate-500">{m.version}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div className="mt-4">
+          <label className="block text-[11px] font-bold text-slate-600">Name (signature)</label>
+          <input
+            value={signatureName}
+            onChange={(e) => setSignatureName(e.target.value)}
+            className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
+            placeholder="Your name"
+          />
+        </div>
+        {error ? (
+          <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-900">
+            {error}
+          </div>
+        ) : null}
+        <div className="mt-4 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => void reload()}
+            disabled={busy}
+            className="rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black uppercase text-slate-700"
+          >
+            Refresh
+          </button>
+          <button
+            type="button"
+            onClick={() => void acceptAll()}
+            disabled={busy}
+            className="rounded-xl bg-[#134e4a] px-3 py-2 text-[11px] font-black uppercase text-white"
+          >
+            {busy ? 'Saving...' : 'Accept & continue'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function AppShell() {
   const navigate = useNavigate();
@@ -181,6 +309,7 @@ function AppShell() {
 
   return (
     <div className="flex min-h-screen w-full z-app-bg font-sans selection:bg-teal-100 selection:text-[#134e4a]">
+      <PolicyAckGate />
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[1200] focus:rounded-xl focus:bg-[#134e4a] focus:text-white focus:px-4 focus:py-3 focus:text-sm focus:font-bold focus:shadow-xl"
@@ -356,35 +485,55 @@ function AppShell() {
                 ) : null}
               </div>
 
-              {ws?.canAccessModule?.('hr') ? (
-                <Link
-                  to="/hr/staff/me"
-                  className="hidden sm:inline-flex items-center gap-2 rounded-2xl border border-gray-100/90 bg-white/95 px-3 py-2 text-[11px] font-bold uppercase tracking-wide text-[#134e4a] shadow-sm transition hover:border-teal-200 hover:shadow-md"
-                  title="Open your HR staff profile"
-                >
-                  <UserCircle size={18} className="text-gray-400" aria-hidden />
-                  <span>My profile</span>
-                </Link>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => navigate('/settings')}
+              <div
                 className="flex items-center gap-3 rounded-zarewa border border-gray-100/90 bg-white/95 py-1.5 pl-1.5 pr-4 text-left shadow-sm transition hover:border-teal-200 hover:shadow-md"
-                title={`${userName} · ${userRole} — Open settings`}
-                aria-label={`Signed in as ${userName}. Open settings.`}
+                role="group"
+                aria-label={`Signed in as ${userName}`}
               >
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#134e4a] text-[11px] font-black text-[#2dd4bf] shadow-inner">
+                <button
+                  type="button"
+                  onClick={() => navigate('/settings')}
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#134e4a] text-[11px] font-black text-[#2dd4bf] shadow-inner transition hover:brightness-110 active:scale-[0.98]"
+                  title={`${userName} · ${userRole} — Open settings`}
+                  aria-label="Open settings"
+                >
                   {userInitials}
+                </button>
+                <div className="hidden min-[380px]:block min-w-0">
+                  {ws?.canAccessModule?.('hr') ? (
+                    <>
+                      <Link
+                        to="/hr/staff/me"
+                        className="block rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/40 focus-visible:ring-offset-1"
+                        title="Open your HR staff profile"
+                        aria-label={`${userName} — Open your profile`}
+                      >
+                        <p className="text-[10px] font-black uppercase leading-none tracking-tighter text-[#134e4a] hover:underline underline-offset-2">
+                          {userName}
+                        </p>
+                      </Link>
+                      <p className="mt-0.5 text-[9px] font-bold uppercase leading-none tracking-widest text-gray-400">
+                        {userRole}
+                      </p>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => navigate('/settings')}
+                      className="w-full text-left"
+                      title={`${userName} · ${userRole} — Open settings`}
+                      aria-label={`Signed in as ${userName}. Open settings.`}
+                    >
+                      <p className="text-[10px] font-black uppercase leading-none tracking-tighter text-[#134e4a]">
+                        {userName}
+                      </p>
+                      <p className="mt-0.5 text-[9px] font-bold uppercase leading-none tracking-widest text-gray-400">
+                        {userRole}
+                      </p>
+                    </button>
+                  )}
                 </div>
-                <div className="hidden min-[380px]:block">
-                  <p className="text-[10px] font-black uppercase leading-none tracking-tighter text-[#134e4a]">
-                    {userName}
-                  </p>
-                  <p className="mt-0.5 text-[9px] font-bold uppercase leading-none tracking-widest text-gray-400">
-                    {userRole}
-                  </p>
-                </div>
-              </button>
+              </div>
             </div>
           </div>
         </div>
@@ -392,25 +541,116 @@ function AppShell() {
         <main id="main-content" className="outline-none" tabIndex={-1}>
           <Routes>
             <Route path="/" element={<Dashboard />} />
-            <Route path="/sales" element={<Sales />} />
-            <Route path="/customers" element={<Customers />} />
-            <Route path="/customers/:customerId" element={<CustomerDashboard />} />
-            <Route path="/procurement" element={<Procurement />} />
-            <Route path="/procurement/suppliers/:supplierId" element={<SupplierProfile />} />
-            <Route path="/operations" element={<Operations />} />
-            <Route path="/deliveries" element={<Deliveries />} />
-            <Route path="/accounts" element={<Account />} />
-            <Route path="/reports" element={<Reports />} />
-            <Route path="/settings" element={<Settings />} />
-            <Route path="/hr" element={<HrLayout />}>
-              <Route index element={<HrHome />} />
+            <Route
+              path="/sales"
+              element={
+                <ModuleRouteGuard moduleKey="sales">
+                  <Sales />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
+              path="/customers"
+              element={
+                <ModuleRouteGuard moduleKey="sales">
+                  <Customers />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
+              path="/customers/:customerId"
+              element={
+                <ModuleRouteGuard moduleKey="sales">
+                  <CustomerDashboard />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
+              path="/procurement"
+              element={
+                <ModuleRouteGuard moduleKey="procurement">
+                  <Procurement />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
+              path="/procurement/suppliers/:supplierId"
+              element={
+                <ModuleRouteGuard moduleKey="procurement">
+                  <SupplierProfile />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
+              path="/operations"
+              element={
+                <ModuleRouteGuard moduleKey="operations">
+                  <Operations />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
+              path="/operations/coils/:coilNo"
+              element={
+                <ModuleRouteGuard moduleKey="operations">
+                  <CoilProfile />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
+              path="/deliveries"
+              element={
+                <ModuleRouteGuard moduleKey="operations">
+                  <Deliveries />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
+              path="/accounts"
+              element={
+                <ModuleRouteGuard moduleKey="finance">
+                  <Account />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
+              path="/reports"
+              element={
+                <ModuleRouteGuard moduleKey="reports">
+                  <Reports />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                <ModuleRouteGuard moduleKey="settings">
+                  <Settings />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
+              path="/hr"
+              element={
+                <ModuleRouteGuard moduleKey="hr">
+                  <HrLayout />
+                </ModuleRouteGuard>
+              }
+            >
+              <Route index element={<HrEntryIndexRoute />} />
+              <Route path="overview" element={<HrHome />} />
               <Route path="salary-welfare" element={<HrSalaryWelfare />} />
               <Route path="staff" element={<HrStaffList />} />
+              <Route path="staff/directory-quality" element={<HrNextDirectory />} />
               <Route path="staff/:userId" element={<HrStaffProfileRoute />} />
               <Route path="payroll" element={<HrPayroll />} />
               <Route path="time" element={<HrTime />} />
               <Route path="talent" element={<HrTalent />} />
+              <Route path="compliance" element={<HrCompliance />} />
+              <Route path="uat-checklist" element={<HrNextUatChecklist />} />
             </Route>
+            <Route path="/hr-next/uat" element={<Navigate to="/hr/uat-checklist" replace />} />
+            <Route path="/hr-next" element={<Navigate to="/hr/staff/directory-quality" replace />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </main>
@@ -439,6 +679,10 @@ function LoadingScreen() {
 
 function AuthGate() {
   const ws = useWorkspace();
+
+  if (!ws) {
+    return <LoadingScreen />;
+  }
 
   if (ws.status === 'checking') {
     return <LoadingScreen />;

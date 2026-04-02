@@ -1,4 +1,5 @@
 import { branchPredicate } from './branchSql.js';
+import { normalizeWorkspaceDepartment } from './departmentRoleTemplates.js';
 
 /** @param {import('better-sqlite3').Database} db */
 
@@ -15,7 +16,7 @@ function branchWhere(db, table, scope) {
   if (scope === 'ALL' || !scope || !hasColumn(db, table, 'branch_id')) {
     return { sql: '', args: [] };
   }
-  return { sql: ` AND (branch_id = ? OR branch_id IS NULL)`, args: [scope] };
+  return { sql: ` AND branch_id = ?`, args: [scope] };
 }
 
 function parseCrmTagsJson(raw) {
@@ -52,24 +53,29 @@ function mapCustomerRow(row) {
   };
 }
 
-export function listCustomers(db) {
+export function listCustomers(db, branchScope = 'ALL') {
+  const b = branchWhere(db, 'customers', branchScope);
   return db
-    .prepare(`SELECT * FROM customers ORDER BY name COLLATE NOCASE`)
-    .all()
+    .prepare(`SELECT * FROM customers WHERE 1=1${b.sql} ORDER BY name COLLATE NOCASE`)
+    .all(...b.args)
     .map((row) => mapCustomerRow(row));
 }
 
-export function getCustomer(db, customerId) {
-  const row = db.prepare(`SELECT * FROM customers WHERE customer_id = ?`).get(customerId);
+export function getCustomer(db, customerId, branchScope = 'ALL') {
+  const b = branchWhere(db, 'customers', branchScope);
+  const row = db
+    .prepare(`SELECT * FROM customers WHERE customer_id = ?${b.sql}`)
+    .get(customerId, ...b.args);
   return mapCustomerRow(row);
 }
 
-export function listCustomerCrmInteractions(db, customerId) {
+export function listCustomerCrmInteractions(db, customerId, branchScope = 'ALL') {
+  const b = branchWhere(db, 'customer_crm_interactions', branchScope);
   return db
     .prepare(
-      `SELECT * FROM customer_crm_interactions WHERE customer_id = ? ORDER BY at_iso DESC, id DESC`
+      `SELECT * FROM customer_crm_interactions WHERE customer_id = ?${b.sql} ORDER BY at_iso DESC, id DESC`
     )
-    .all(customerId)
+    .all(customerId, ...b.args)
     .map((row) => ({
       id: row.id,
       customerID: row.customer_id,
@@ -275,10 +281,11 @@ export function listLedgerEntriesForCustomer(db, customerId, branchScope = 'ALL'
     .map(mapLedgerRow);
 }
 
-export function listSuppliers(db) {
+export function listSuppliers(db, branchScope = 'ALL') {
+  const b = branchWhere(db, 'suppliers', branchScope);
   return db
-    .prepare(`SELECT * FROM suppliers ORDER BY name COLLATE NOCASE`)
-    .all()
+    .prepare(`SELECT * FROM suppliers WHERE 1=1${b.sql} ORDER BY name COLLATE NOCASE`)
+    .all(...b.args)
     .map((row) => ({
       supplierID: row.supplier_id,
       name: row.name,
@@ -289,10 +296,11 @@ export function listSuppliers(db) {
     }));
 }
 
-export function listTransportAgents(db) {
+export function listTransportAgents(db, branchScope = 'ALL') {
+  const b = branchWhere(db, 'transport_agents', branchScope);
   return db
-    .prepare(`SELECT * FROM transport_agents ORDER BY name`)
-    .all()
+    .prepare(`SELECT * FROM transport_agents WHERE 1=1${b.sql} ORDER BY name`)
+    .all(...b.args)
     .map((row) => ({
       id: row.id,
       name: row.name,
@@ -301,10 +309,11 @@ export function listTransportAgents(db) {
     }));
 }
 
-export function listProducts(db) {
+export function listProducts(db, branchScope = 'ALL') {
+  const b = branchWhere(db, 'products', branchScope);
   return db
-    .prepare(`SELECT * FROM products ORDER BY name`)
-    .all()
+    .prepare(`SELECT * FROM products WHERE 1=1${b.sql} ORDER BY name`)
+    .all(...b.args)
     .map((row) => {
       let dashboardAttrs = {};
       try {
@@ -395,6 +404,8 @@ export function listCoilLots(db, branchScope = 'ALL') {
       supplierName: row.supplier_name,
       receivedAtISO: row.received_at_iso,
       branchId: row.branch_id ?? '',
+      parentCoilNo: row.parent_coil_no ?? '',
+      materialOriginNote: row.material_origin_note ?? '',
     }));
 }
 
@@ -531,6 +542,10 @@ export function listProductionJobs(db, branchScope = 'ALL') {
       actualWeightKg: Number(row.actual_weight_kg) || 0,
       conversionAlertState: row.conversion_alert_state ?? 'Pending',
       managerReviewRequired: Boolean(row.manager_review_required),
+      managerReviewSignedAtISO: row.manager_review_signed_at_iso ?? '',
+      managerReviewSignedByUserId: row.manager_review_signed_by_user_id ?? '',
+      managerReviewSignedByName: row.manager_review_signed_by_name ?? '',
+      managerReviewRemark: row.manager_review_remark ?? '',
       operatorName: row.operator_name ?? '',
       branchId: row.branch_id ?? '',
     }));
@@ -668,10 +683,22 @@ export function listExpenses(db, branchScope = 'ALL') {
     }));
 }
 
-export function listPaymentRequests(db) {
+export function listPaymentRequests(db, branchScope = 'ALL') {
+  const useScope = branchScope !== 'ALL' && String(branchScope || '').trim();
+  const scopeSql = useScope ? ` AND (e.branch_id = ? OR e.branch_id IS NULL)` : '';
+  const scopeArgs = useScope ? [branchScope] : [];
   return db
-    .prepare(`SELECT * FROM payment_requests ORDER BY request_date DESC`)
-    .all()
+    .prepare(
+      `SELECT pr.*, e.branch_id AS expense_branch_id, e.category AS expense_category, e.reference AS expense_reference,
+              hr.user_id AS staff_user_id, u.display_name AS staff_display_name
+       FROM payment_requests pr
+       LEFT JOIN expenses e ON e.expense_id = pr.expense_id
+       LEFT JOIN hr_requests hr ON hr.id = e.reference
+       LEFT JOIN app_users u ON u.id = hr.user_id
+       WHERE 1=1${scopeSql}
+       ORDER BY pr.request_date DESC`
+    )
+    .all(...scopeArgs)
     .map((row) => ({
       requestID: row.request_id,
       expenseID: row.expense_id,
@@ -686,6 +713,12 @@ export function listPaymentRequests(db) {
       paidAtISO: row.paid_at_iso ?? '',
       paidBy: row.paid_by ?? '',
       paymentNote: row.payment_note ?? '',
+      branchId: row.expense_branch_id ?? '',
+      expenseCategory: row.expense_category ?? '',
+      isStaffLoan: String(row.expense_category || '').toLowerCase().includes('staff loan'),
+      hrRequestId: row.expense_reference ?? '',
+      staffUserId: row.staff_user_id ?? '',
+      staffDisplayName: row.staff_display_name ?? '',
     }));
 }
 
@@ -782,6 +815,7 @@ export function listAppUsers(db) {
       displayName: row.display_name,
       email: row.email && String(row.email).trim() ? String(row.email).trim().toLowerCase() : '',
       roleKey: row.role_key,
+      department: normalizeWorkspaceDepartment(row.department),
       status: row.status,
       lastLoginAtISO: row.last_login_at_iso ?? '',
       createdAtISO: row.created_at_iso,
@@ -936,6 +970,63 @@ export function workspaceReportAggregateCounts(db, branchScope = 'ALL') {
   };
 }
 
+/**
+ * Dashboard-only payload: aggregates + small recent slices.
+ * Keep this fast and stable for caching.
+ * @param {import('better-sqlite3').Database} db
+ * @param {string | import('./branchScope.js').BranchScope} [branchScope]
+ * @param {{ recentLimit?: number }} [opts]
+ */
+export function dashboardSummary(db, branchScope = 'ALL', opts = {}) {
+  const recentLimit = Math.max(1, Math.min(100, Number(opts.recentLimit) || 12));
+  const counts = workspaceReportAggregateCounts(db, branchScope);
+  const productionMetrics = computeProductionMetricsRollup(db, branchScope);
+
+  const rq = branchWhere(db, 'quotations', branchScope);
+  const recentQuotations = db
+    .prepare(`SELECT id, customer_id, customer_name, date_iso, total_ngn, status FROM quotations WHERE 1=1${rq.sql} ORDER BY date_iso DESC, id DESC LIMIT ?`)
+    .all(...rq.args, recentLimit)
+    .map((row) => ({
+      id: row.id,
+      customerID: row.customer_id ?? '',
+      customer: row.customer_name ?? '',
+      dateISO: row.date_iso ?? '',
+      totalNgn: Number(row.total_ngn) || 0,
+      status: row.status ?? '',
+    }));
+
+  const rr = branchWhere(db, 'sales_receipts', branchScope);
+  const recentReceipts = db
+    .prepare(
+      `SELECT id, customer_id, customer_name, quotation_ref, date_iso, amount_ngn, method, status
+         FROM sales_receipts WHERE 1=1${rr.sql}
+         ORDER BY date_iso DESC, id DESC
+         LIMIT ?`
+    )
+    .all(...rr.args, recentLimit)
+    .map((row) => ({
+      id: row.id,
+      customerID: row.customer_id ?? '',
+      customer: row.customer_name ?? '',
+      quotationRef: row.quotation_ref ?? '',
+      dateISO: row.date_iso ?? '',
+      amountNgn: Number(row.amount_ngn) || 0,
+      method: row.method ?? '',
+      status: row.status ?? '',
+    }));
+
+  return {
+    ok: true,
+    branchScope,
+    counts,
+    productionMetrics,
+    recent: {
+      quotations: recentQuotations,
+      receipts: recentReceipts,
+    },
+  };
+}
+
 export function getJsonBlob(db, key) {
   const row = db.prepare(`SELECT payload FROM app_json_blobs WHERE key = ?`).get(key);
   if (!row) return null;
@@ -944,4 +1035,9 @@ export function getJsonBlob(db, key) {
   } catch {
     return null;
   }
+}
+
+export function setJsonBlob(db, key, value) {
+  const payload = typeof value === 'string' ? value : JSON.stringify(value ?? null);
+  db.prepare(`INSERT OR REPLACE INTO app_json_blobs (key, payload) VALUES (?,?)`).run(key, payload);
 }

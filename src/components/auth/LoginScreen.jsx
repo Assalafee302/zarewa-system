@@ -1,28 +1,125 @@
 import React, { useState } from 'react';
-import { ShieldCheck, LockKeyhole, Building2, ArrowRight, AlertTriangle } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { ShieldCheck, LockKeyhole, Building2, ArrowRight, AlertTriangle, RotateCcw } from 'lucide-react';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { ZAREWA_LOGO_SRC } from '../../Data/companyQuotation';
+import { resolvePostLoginPath } from '../../lib/departmentWorkspace';
+import loginHeroSrc from '../../../assets/longspan-roof-login-hero.png';
 
 export default function LoginScreen() {
+  const navigate = useNavigate();
   const ws = useWorkspace();
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('Admin@123');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
 
-  const submit = async (e) => {
+  const [mode, setMode] = useState('login'); // 'login' | 'forgot' | 'reset'
+  const [identifier, setIdentifier] = useState('');
+  const [resetToken, setResetToken] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+
+  const submitLogin = async (e) => {
     e.preventDefault();
     setBusy(true);
     setError('');
+    setSuccess('');
     try {
-      const r = await ws.login(username, password);
+      const fd = new FormData(e.currentTarget);
+      const user = String(fd.get('username') ?? username).trim();
+      const pass = String(fd.get('password') ?? password);
+      const r = await ws.login(user, pass);
       if (!r.ok) {
         setError(r.error || 'Could not sign in.');
+      } else {
+        const perms = Array.isArray(r.data?.permissions) ? r.data.permissions : [];
+        navigate(resolvePostLoginPath(r.data?.user, perms), { replace: true });
       }
     } catch (err) {
       setError(String(err?.message || err || 'Could not sign in.'));
     }
     setBusy(false);
+  };
+
+  const submitForgot = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError('');
+    setSuccess('');
+    try {
+      const fd = new FormData(e.currentTarget);
+      const id = String(fd.get('identifier') ?? identifier).trim();
+      if (!id) {
+        setError('Please enter your username or email.');
+        setBusy(false);
+        return;
+      }
+      const r = await ws.forgotPassword(id);
+      if (!r.ok) {
+        setError(r.error || 'Could not request reset.');
+        setBusy(false);
+        return;
+      }
+      const msg = r.data?.message || 'Reset code created. Continue to set your new password.';
+      setSuccess(msg);
+      setIdentifier(id);
+      if (r.data?.devResetToken) {
+        setResetToken(String(r.data.devResetToken));
+      }
+      setNewPassword('');
+      setMode('reset');
+    } catch (err) {
+      setError(String(err?.message || err || 'Could not request reset.'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitReset = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError('');
+    setSuccess('');
+    try {
+      const fd = new FormData(e.currentTarget);
+      const token = String(fd.get('resetToken') ?? resetToken).trim();
+      const id = String(fd.get('identifier') ?? identifier).trim();
+      const next = String(fd.get('newPassword') ?? newPassword);
+
+      if (!id) {
+        setError('Identifier is required.');
+        setBusy(false);
+        return;
+      }
+      if (!token) {
+        setError('Reset code is required.');
+        setBusy(false);
+        return;
+      }
+      if (!next || next.length < 6) {
+        setError('New password must be at least 6 characters.');
+        setBusy(false);
+        return;
+      }
+
+      const r = await ws.resetPassword(id, token, next);
+      if (!r.ok) {
+        setError(r.error || 'Could not reset password.');
+        setBusy(false);
+        return;
+      }
+
+      setSuccess(r.data?.message || 'Password updated. You can sign in now.');
+      setMode('login');
+      setPassword('');
+      setNewPassword('');
+      setResetToken('');
+    } catch (err) {
+      setError(String(err?.message || err || 'Could not reset password.'));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -73,29 +170,28 @@ export default function LoginScreen() {
             ))}
           </div>
 
-          <div className="mt-8 rounded-[28px] border border-slate-200/80 bg-slate-950 p-6 text-white shadow-xl">
-            <div className="flex items-center gap-3">
-              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-teal-400/15 text-teal-300">
-                <Building2 size={22} />
-              </div>
-              <div>
-                <p className="text-[11px] font-black uppercase tracking-[0.18em] text-white/45">
-                  Initial admin access
-                </p>
-                <p className="mt-1 text-sm font-semibold text-white/90">
-                  Use the seeded administrator account for first sign-in, then change the password in
-                  Settings.
-                </p>
-              </div>
-            </div>
-            <div className="mt-5 grid gap-3 sm:grid-cols-2">
-              <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
-                <p className="text-[10px] font-black uppercase tracking-[0.16em] text-white/45">Username</p>
-                <p className="mt-1 text-lg font-black tracking-tight">admin</p>
-              </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
-                <p className="text-[10px] font-black uppercase tracking-[0.16em] text-white/45">Password</p>
-                <p className="mt-1 text-lg font-black tracking-tight">Admin@123</p>
+          <div className="mt-8 overflow-hidden rounded-[28px] border border-slate-200/80 bg-slate-950 text-white shadow-xl">
+            <div className="relative">
+              <img
+                src={loginHeroSrc}
+                alt="Long-span roof production line"
+                className="h-[260px] w-full object-cover sm:h-[300px]"
+              />
+              <div className="absolute inset-0 bg-gradient-to-t from-slate-950/75 via-slate-950/30 to-transparent" />
+              <div className="absolute bottom-0 left-0 right-0 p-6 sm:p-7">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-teal-400/15 text-teal-300">
+                    <Building2 size={22} />
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-black uppercase tracking-[0.18em] text-white/45">
+                      Production visibility
+                    </p>
+                    <p className="mt-1 text-sm font-semibold text-white/90">
+                      Secure login for real-time treasury controls and end-to-end production workflows.
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -107,61 +203,228 @@ export default function LoginScreen() {
               <LockKeyhole size={22} />
             </div>
             <div>
-              <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">Secure sign in</p>
-              <h2 className="mt-1 text-2xl font-black tracking-tight text-[#134e4a]">Open your workspace</h2>
+              <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">
+                {mode === 'login' ? 'Secure sign in' : 'Password recovery'}
+              </p>
+              <h2 className="mt-1 text-2xl font-black tracking-tight text-[#134e4a]">
+                {mode === 'login'
+                  ? 'Open your workspace'
+                  : mode === 'forgot'
+                    ? 'Forgot your password'
+                    : 'Reset password'}
+              </h2>
             </div>
           </div>
 
-          <form className="mt-8 space-y-5" onSubmit={submit}>
-            <div>
-              <label className="z-field-label" htmlFor="login-username">
-                Username
-              </label>
-              <input
-                id="login-username"
-                autoComplete="username"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="z-input"
-                placeholder="Enter your username"
-              />
+          {success ? (
+            <div className="flex items-start gap-3 rounded-2xl border border-teal-200 bg-teal-50 px-4 py-3 text-sm text-teal-900">
+              <span className="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-teal-400/15 text-teal-700">
+                ✓
+              </span>
+              <span>{success}</span>
             </div>
-            <div>
-              <label className="z-field-label" htmlFor="login-password">
-                Password
-              </label>
-              <input
-                id="login-password"
-                type="password"
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="z-input"
-                placeholder="Enter your password"
-              />
-            </div>
+          ) : null}
 
-            {error ? (
-              <div className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
-                <AlertTriangle size={18} className="mt-0.5 shrink-0" />
-                <span>{error}</span>
-              </div>
-            ) : null}
+          <form className="mt-8 space-y-5" onSubmit={mode === 'login' ? submitLogin : mode === 'forgot' ? submitForgot : submitReset}>
+            {mode === 'login' ? (
+              <>
+                <div>
+                  <label className="z-field-label" htmlFor="login-username">
+                    Username
+                  </label>
+                  <input
+                    id="login-username"
+                    name="username"
+                    autoComplete="username"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    className="z-input"
+                    placeholder="Enter your username"
+                  />
+                </div>
+                <div>
+                  <label className="z-field-label" htmlFor="login-password">
+                    Password
+                  </label>
+                  <input
+                    id="login-password"
+                    name="password"
+                    type="password"
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="z-input"
+                    placeholder="Enter your password"
+                  />
+                </div>
 
-            {ws.status === 'offline' ? (
-              <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-                API server is offline. Start the backend to sign in to the live database.
-              </div>
-            ) : null}
+                <div className="flex items-center justify-between gap-4">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      setError('');
+                      setSuccess('');
+                      setMode('forgot');
+                      setIdentifier(username);
+                    }}
+                    className="text-sm font-semibold text-[#134e4a] hover:underline disabled:cursor-wait disabled:opacity-70"
+                  >
+                    Forgot password?
+                  </button>
+                </div>
 
-            <button
-              type="submit"
-              disabled={busy}
-              className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-[#134e4a] px-5 py-3.5 text-sm font-black text-white shadow-lg shadow-teal-950/15 transition hover:brightness-105 disabled:cursor-wait disabled:opacity-70"
-            >
-              {busy ? 'Signing in…' : 'Enter workspace'}
-              <ArrowRight size={17} />
-            </button>
+                {error ? (
+                  <div className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+                    <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+                    <span>{error}</span>
+                  </div>
+                ) : null}
+
+                {ws.status === 'offline' ? (
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                    API server is offline. Start the backend to sign in to the live database.
+                  </div>
+                ) : null}
+
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-[#134e4a] px-5 py-3.5 text-sm font-black text-white shadow-lg shadow-teal-950/15 transition hover:brightness-105 disabled:cursor-wait disabled:opacity-70"
+                >
+                  {busy ? 'Signing in…' : 'Enter workspace'}
+                  <ArrowRight size={17} />
+                </button>
+              </>
+            ) : mode === 'forgot' ? (
+              <>
+                <div>
+                  <label className="z-field-label" htmlFor="forgot-identifier">
+                    Username or email
+                  </label>
+                  <input
+                    id="forgot-identifier"
+                    name="identifier"
+                    value={identifier}
+                    onChange={(e) => setIdentifier(e.target.value)}
+                    className="z-input"
+                    placeholder="Enter your username or email"
+                    autoComplete="username"
+                  />
+                </div>
+
+                {error ? (
+                  <div className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+                    <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+                    <span>{error}</span>
+                  </div>
+                ) : null}
+
+                {ws.status === 'offline' ? (
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                    API server is offline. Start the backend to request a reset code.
+                  </div>
+                ) : null}
+
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-[#134e4a] px-5 py-3.5 text-sm font-black text-white shadow-lg shadow-teal-950/15 transition hover:brightness-105 disabled:cursor-wait disabled:opacity-70"
+                >
+                  {busy ? 'Requesting…' : 'Send reset code'}
+                  <ArrowRight size={17} />
+                </button>
+
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setError('');
+                    setSuccess('');
+                    setMode('login');
+                  }}
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-5 py-3.5 text-sm font-black text-[#134e4a] shadow-sm transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-70"
+                >
+                  <RotateCcw size={17} />
+                  Back to sign in
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="text-sm text-slate-600">
+                  Enter the reset code you received, then set a new password.
+                </div>
+
+                <input type="hidden" name="identifier" value={identifier} />
+
+                <div>
+                  <label className="z-field-label" htmlFor="reset-token">
+                    Reset code
+                  </label>
+                  <input
+                    id="reset-token"
+                    name="resetToken"
+                    value={resetToken}
+                    onChange={(e) => setResetToken(e.target.value)}
+                    className="z-input"
+                    placeholder="Enter reset code"
+                    autoComplete="one-time-code"
+                  />
+                </div>
+
+                <div>
+                  <label className="z-field-label" htmlFor="reset-password">
+                    New password
+                  </label>
+                  <input
+                    id="reset-password"
+                    name="newPassword"
+                    type="password"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    className="z-input"
+                    placeholder="Enter a new password"
+                    autoComplete="new-password"
+                  />
+                </div>
+
+                {error ? (
+                  <div className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+                    <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+                    <span>{error}</span>
+                  </div>
+                ) : null}
+
+                {ws.status === 'offline' ? (
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                    API server is offline. Start the backend to reset your password.
+                  </div>
+                ) : null}
+
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-[#134e4a] px-5 py-3.5 text-sm font-black text-white shadow-lg shadow-teal-950/15 transition hover:brightness-105 disabled:cursor-wait disabled:opacity-70"
+                >
+                  {busy ? 'Resetting…' : 'Reset password'}
+                  <ArrowRight size={17} />
+                </button>
+
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setError('');
+                    setSuccess('');
+                    setMode('login');
+                  }}
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-5 py-3.5 text-sm font-black text-[#134e4a] shadow-sm transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-70"
+                >
+                  <RotateCcw size={17} />
+                  Back to sign in
+                </button>
+              </>
+            )}
           </form>
         </section>
       </div>

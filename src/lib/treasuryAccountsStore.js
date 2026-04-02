@@ -1,9 +1,22 @@
 /**
- * Treasury accounts shared between Finance (Accounts page) and Sales (quotation pay-in).
- * Persisted in localStorage so new accounts added in Finance appear on quotations.
+ * Treasury helpers: live list comes from workspace bootstrap (`snapshot.treasuryAccounts`).
+ * localStorage helpers remain for legacy / tooling only — Sales modals use the snapshot.
  */
 
 const STORAGE_KEY = 'zarewa.finance.treasuryAccounts';
+
+/** @param {{ treasuryAccounts?: object[] } | null | undefined} snapshot */
+export function treasuryAccountsFromSnapshot(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.treasuryAccounts)) return [];
+  return snapshot.treasuryAccounts.map((a) => ({
+    id: a.id,
+    name: String(a.name ?? ''),
+    bankName: String(a.bankName ?? ''),
+    balance: Number(a.balance) || 0,
+    type: a.type === 'Cash' ? 'Cash' : 'Bank',
+    accNo: String(a.accNo ?? 'N/A'),
+  }));
+}
 
 export function defaultTreasuryAccounts() {
   return [

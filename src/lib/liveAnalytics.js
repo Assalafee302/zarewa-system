@@ -144,6 +144,95 @@ export function liveCashflowMonthly(receipts = [], expenses = [], count = 6, tre
   }));
 }
 
+/** Align with sales-side rough yield (kg ↔ m) — planning estimate, not dispatch truth. */
+function roughKgFromMeters(meters, gaugeMmNum) {
+  const m = Number(meters);
+  if (!Number.isFinite(m) || m <= 0) return 0;
+  const g = Number(gaugeMmNum) > 0 ? Number(gaugeMmNum) : 0.26;
+  const kgPerM = g <= 0.22 ? 2.35 : g <= 0.26 ? 2.65 : g <= 0.3 ? 2.9 : g <= 0.45 ? 3.4 : 3.8;
+  return Math.round(m * kgPerM);
+}
+
+function materialSpecFromQuotation(q) {
+  if (!q) return { colour: '—', gauge: '—', profile: '—' };
+  const colour = String(q.materialColor ?? q.material_color ?? q.color ?? '').trim();
+  const gauge = String(q.materialGauge ?? q.material_gauge ?? q.gauge ?? '').trim();
+  const profile = String(q.materialDesign ?? q.material_design ?? q.profile ?? '').trim();
+  return {
+    colour: colour || '—',
+    gauge: gauge || '—',
+    profile: profile || '—',
+  };
+}
+
+function monthToDateRangeISO(base = new Date()) {
+  const end = base instanceof Date && !Number.isNaN(base.getTime()) ? base : new Date();
+  const start = new Date(end.getFullYear(), end.getMonth(), 1);
+  return { startIso: start.toISOString().slice(0, 10), endIso: end.toISOString().slice(0, 10) };
+}
+
+/**
+ * Top material combinations (colour × gauge × profile) by sales in a date range.
+ * Meters from cutting lists; revenue = sum of quotation totalNgn for distinct quotes
+ * linked to those lists (each quote counted once per bucket).
+ */
+export function liveTopSalesPerformersByMaterial(cuttingLists = [], quotations = [], opts = {}) {
+  const { limit = 5 } = opts;
+  const { startIso, endIso } = opts.startIso && opts.endIso ? opts : monthToDateRangeISO();
+
+  const quoteById = new Map();
+  (quotations || []).forEach((q) => {
+    if (q?.id) quoteById.set(q.id, q);
+  });
+
+  const buckets = new Map();
+  for (const cl of cuttingLists || []) {
+    const d = toIsoDate(cl.dateISO);
+    if (!d || d < startIso || d > endIso) continue;
+    const m = cuttingMeters(cl);
+    if (m <= 0) continue;
+    const q = quoteById.get(cl.quotationRef);
+    const spec = materialSpecFromQuotation(q);
+    const key = `${spec.colour}\0${spec.gauge}\0${spec.profile}`;
+    let row = buckets.get(key);
+    if (!row) {
+      const gaugeMm = Number(String(spec.gauge || '').match(/(\d+(?:\.\d+)?)/)?.[1]) || 0;
+      row = {
+        colour: spec.colour,
+        gaugeRaw: spec.gauge,
+        gaugeMm,
+        materialType: spec.profile,
+        metersSold: 0,
+        quoteIds: new Set(),
+      };
+      buckets.set(key, row);
+    }
+    row.metersSold += m;
+    if (q?.id) row.quoteIds.add(q.id);
+  }
+
+  const rows = [...buckets.values()].map((row) => {
+    let revenueNgn = 0;
+    for (const id of row.quoteIds) {
+      const q = quoteById.get(id);
+      revenueNgn += Number(q?.totalNgn) || 0;
+    }
+    const weightKg = roughKgFromMeters(row.metersSold, row.gaugeMm);
+    return {
+      colour: row.colour,
+      gaugeRaw: row.gaugeRaw,
+      gaugeMm: row.gaugeMm,
+      materialType: row.materialType,
+      metersSold: row.metersSold,
+      weightKg,
+      revenueNgn,
+    };
+  });
+
+  rows.sort((a, b) => (b.revenueNgn - a.revenueNgn) || (b.metersSold - a.metersSold));
+  return rows.slice(0, limit).map((r, i) => ({ ...r, rank: i + 1 }));
+}
+
 export function liveProductionPulse(cuttingLists = [], movements = [], wipByProduct = {}, coilRequests = []) {
   const now = new Date();
   const sevenDaysAgo = new Date(now);
