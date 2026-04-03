@@ -10,7 +10,7 @@ on:
 jobs:
   build-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -25,16 +25,10 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Unit & integration tests
-        run: npm run test
-
-      - name: Production build
-        run: npm run build
-
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: End-to-end tests
-        run: npm run test:e2e
+      - name: Release gate (build + Vitest + Playwright)
+        run: node scripts/verify-complete.mjs
         env:
           CI: true

@@ -1,40 +1,15 @@
 import { test, expect } from '@playwright/test';
-
-async function apiSignIn(page, username, password) {
-  await page.goto('/');
-  await expect(page.getByRole('heading', { name: /open your workspace/i })).toBeVisible({ timeout: 15_000 });
-  const loginRes = await page.request.post('/api/session/login', { data: { username, password } });
-  const bodyText = await loginRes.text();
-  expect(loginRes.status(), bodyText).toBe(200);
-  const cookies = await page.context().cookies();
-  const csrf = cookies.find((c) => c.name === 'zarewa_csrf')?.value;
-  expect(String(csrf || '')).toBeTruthy();
-  await page.context().setExtraHTTPHeaders({ 'x-csrf-token': csrf });
-  await page.goto('/');
-  await expect(page.getByRole('navigation', { name: 'Modules' })).toBeVisible({ timeout: 20_000 });
-}
+import { csrfHeader, signInViaApi } from './helpers/auth.js';
 
 async function apiSignOut(page) {
-  await page.request.post('/api/session/logout');
+  try {
+    const headers = await csrfHeader(page);
+    await page.request.post('/api/session/logout', { headers });
+  } catch {
+    /* no session */
+  }
   await page.context().setExtraHTTPHeaders({});
   await page.context().clearCookies();
-}
-
-async function apiAcceptRequiredPolicies(page, signatureName) {
-  const reqs = await page.request.get('/api/hr/policy-requirements');
-  if (reqs.status() !== 200) return;
-  const json = await reqs.json().catch(() => null);
-  const missing = Array.isArray(json?.missing) ? json.missing : [];
-  for (const p of missing) {
-    await page.request.post('/api/hr/policy-acknowledgements', {
-      data: {
-        policyKey: p.key,
-        policyVersion: p.version,
-        signatureName,
-        context: { channel: 'playwright' },
-      },
-    });
-  }
 }
 
 async function pickTreasuryAccountId(page) {
@@ -54,8 +29,7 @@ test.describe('HR loan lifecycle', () => {
     const staffUsername = `pw.loan.staff.${runTag}`;
     const periodYyyymm = '202603';
 
-    await apiSignIn(page, 'admin', 'Admin@123');
-    await apiAcceptRequiredPolicies(page, 'Admin');
+    await signInViaApi(page, 'admin', 'Admin@123');
     const register = await page.request.post('/api/hr/staff/register', {
       data: {
         username: staffUsername,
@@ -76,7 +50,7 @@ test.describe('HR loan lifecycle', () => {
     const staffUserId = (await register.json()).userId;
     await apiSignOut(page);
 
-    await apiSignIn(page, staffUsername, 'Staff@123456');
+    await signInViaApi(page, staffUsername, 'Staff@123456');
     const create = await page.request.post('/api/hr/requests', {
       data: {
         kind: 'loan',
@@ -91,8 +65,7 @@ test.describe('HR loan lifecycle', () => {
     expect(submit.status()).toBe(200);
     await apiSignOut(page);
 
-    // HR manager approves + disburses.
-    await apiSignIn(page, 'hr.manager', 'HrManager@12345!');
+    await signInViaApi(page, 'hr.manager', 'HrManager@12345!');
     expect(
       (
         await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/hr-review`, {
@@ -109,7 +82,6 @@ test.describe('HR loan lifecycle', () => {
       ).status()
     ).toBe(200);
 
-    // Finance approves + pays payment request to set loanDisbursedAtIso + principalOutstandingNgn.
     const list = await page.request.get('/api/hr/requests?kind=loan');
     const listJson = await list.json();
     const row = (listJson.requests || []).find((r) => r.id === loanId);
@@ -117,7 +89,7 @@ test.describe('HR loan lifecycle', () => {
     expect(String(prId || '')).toBeTruthy();
     await apiSignOut(page);
 
-    await apiSignIn(page, 'finance.manager', 'Finance@123');
+    await signInViaApi(page, 'finance.manager', 'Finance@123');
     expect(
       (await page.request.post(`/api/payment-requests/${encodeURIComponent(prId)}/decision`, { data: { status: 'Approved' } }))
         .status()
@@ -132,9 +104,7 @@ test.describe('HR loan lifecycle', () => {
     ).toBe(201);
     await apiSignOut(page);
 
-    // Maintain: set principalOutstanding < deductionPerMonth, recompute should cap.
-    await apiSignIn(page, 'hr.manager', 'HrManager@12345!');
-    await apiAcceptRequiredPolicies(page, 'HR Manager');
+    await signInViaApi(page, 'hr.manager', 'HrManager@12345!');
     const maint = await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/loan-maintenance`, {
       data: { principalOutstandingNgn: 5_000, deductionPerMonthNgn: 10_000, note: 'Cap principal for test' },
     });
@@ -151,4 +121,3 @@ test.describe('HR loan lifecycle', () => {
     expect(Number(loanDed.amountNgn)).toBe(5_000);
   });
 });
-

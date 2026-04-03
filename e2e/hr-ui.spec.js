@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { signInViaUi } from './helpers/auth';
+import { csrfHeader, signInViaUi, signOutViaApi } from './helpers/auth.js';
 
 test.describe.configure({ timeout: 180_000 });
 
@@ -23,8 +23,26 @@ test.describe('HR UI flows (targeted)', () => {
     await firstRow.getByRole('button', { name: /recompute/i }).click();
     await expect(page.getByText(/payroll recomputed/i)).toBeVisible({ timeout: 15_000 });
 
-    // Lock it.
-    await firstRow.getByRole('button', { name: /lock/i }).click();
+    const runsRes = await page.request.get('/api/hr/payroll-runs');
+    expect(runsRes.status()).toBe(200);
+    const run = (await runsRes.json()).runs?.find((r) => String(r.periodYyyymm) === '209912');
+    expect(run?.id, 'draft run for 209912').toBeTruthy();
+
+    await signOutViaApi(page);
+    await signInViaUi(page, 'md', 'Md@1234567890!');
+    const mdRes = await page.request.post(`/api/hr/payroll-runs/${encodeURIComponent(run.id)}/md-approve`, {
+      headers: await csrfHeader(page),
+    });
+    expect(mdRes.status(), await mdRes.text()).toBe(200);
+
+    await signOutViaApi(page);
+    await signInViaUi(page, 'hr.manager', 'HrManager@12345!');
+    await page.getByRole('navigation', { name: 'Modules' }).getByRole('link', { name: 'HR' }).click();
+    await page.getByRole('link', { name: /^payroll$/i }).click();
+    await expect(page.getByRole('heading', { name: /payroll runs/i })).toBeVisible();
+
+    const rowAfter = page.locator('table tbody tr').first();
+    await rowAfter.getByRole('button', { name: /lock/i }).click();
     await expect(page.getByText(/run updated/i)).toBeVisible({ timeout: 15_000 });
   });
 

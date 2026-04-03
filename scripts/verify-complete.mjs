@@ -8,17 +8,19 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-/** Windows: shell:true so PATH resolves npm.cmd; shell:false often yields null status / spawn errors. */
-const spawnOpts = {
-  cwd: root,
-  stdio: 'inherit',
-  shell: true,
-  env: { ...process.env, FORCE_COLOR: '1' },
-};
+const isWin = process.platform === 'win32';
+/** Windows needs shell to run npm.cmd; Unix uses shell:false to avoid DEP0190 / injection footguns. */
+const npmSpawn = () => ({ cmd: isWin ? 'npm.cmd' : 'npm', shell: isWin });
 
 function run(title, args) {
   console.log(`\n${'='.repeat(72)}\n  ${title}\n${'='.repeat(72)}\n`);
-  const r = spawnSync('npm', args, spawnOpts);
+  const { cmd, shell } = npmSpawn();
+  const r = spawnSync(cmd, args, {
+    cwd: root,
+    stdio: 'inherit',
+    shell,
+    env: { ...process.env, FORCE_COLOR: '1' },
+  });
   if (r.error) {
     console.error(`\n[verify-complete] FAILED: ${title}\n`, r.error);
     process.exit(1);

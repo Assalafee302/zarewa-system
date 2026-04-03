@@ -1,20 +1,5 @@
 import { test, expect } from '@playwright/test';
-
-async function apiSignIn(page, username, password) {
-  await page.goto('/');
-  await expect(page.getByRole('heading', { name: /open your workspace/i })).toBeVisible({
-    timeout: 15_000,
-  });
-  const loginRes = await page.request.post('/api/session/login', { data: { username, password } });
-  const bodyText = await loginRes.text();
-  expect(loginRes.status(), bodyText).toBe(200);
-  const cookies = await page.context().cookies();
-  const csrf = cookies.find((c) => c.name === 'zarewa_csrf')?.value;
-  expect(String(csrf || '')).toBeTruthy();
-  await page.context().setExtraHTTPHeaders({ 'x-csrf-token': csrf });
-  await page.goto('/');
-  await expect(page.getByRole('navigation', { name: 'Modules' })).toBeVisible({ timeout: 20_000 });
-}
+import { signInViaApi } from './helpers/auth.js';
 
 async function pickTreasuryAccountId(page) {
   const boot = await page.request.get('/api/bootstrap');
@@ -37,7 +22,7 @@ test.describe('HR stress (opt-in)', () => {
     const maxMs = Math.max(5_000, Number(process.env.HR_STRESS_MAX_MS || 120_000));
     expect(periodYyyymm).toMatch(/^\d{6}$/);
 
-    await apiSignIn(page, 'admin', 'Admin@123');
+    await signInViaApi(page, 'admin', 'Admin@123');
     const treasuryAccountId = await pickTreasuryAccountId(page);
 
     const staff = [];

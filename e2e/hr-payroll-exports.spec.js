@@ -1,24 +1,11 @@
 import { test, expect } from '@playwright/test';
-
-async function apiSignIn(page, username, password) {
-  await page.goto('/');
-  await expect(page.getByRole('heading', { name: /open your workspace/i })).toBeVisible({ timeout: 15_000 });
-  const loginRes = await page.request.post('/api/session/login', { data: { username, password } });
-  const bodyText = await loginRes.text();
-  expect(loginRes.status(), bodyText).toBe(200);
-  const cookies = await page.context().cookies();
-  const csrf = cookies.find((c) => c.name === 'zarewa_csrf')?.value;
-  expect(String(csrf || '')).toBeTruthy();
-  await page.context().setExtraHTTPHeaders({ 'x-csrf-token': csrf });
-  await page.goto('/');
-  await expect(page.getByRole('navigation', { name: 'Modules' })).toBeVisible({ timeout: 20_000 });
-}
+import { signInViaApi, signOutViaApi } from './helpers/auth.js';
 
 test.describe.configure({ timeout: 180_000 });
 
 test.describe('HR payroll locking + exports', () => {
   test('locked run blocks recompute; exports return CSV with expected headers', async ({ page }) => {
-    await apiSignIn(page, 'hr.manager', 'HrManager@12345!');
+    await signInViaApi(page, 'hr.manager', 'HrManager@12345!');
     const periodYyyymm = '202603';
 
     const createRun = await page.request.post('/api/hr/payroll-runs', { data: { periodYyyymm } });
@@ -27,6 +14,13 @@ test.describe('HR payroll locking + exports', () => {
 
     const recompute = await page.request.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/recompute`);
     expect(recompute.status()).toBe(200);
+
+    await signOutViaApi(page);
+    await signInViaApi(page, 'md', 'Md@1234567890!');
+    const mdOk = await page.request.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/md-approve`);
+    expect(mdOk.status(), await mdOk.text()).toBe(200);
+    await signOutViaApi(page);
+    await signInViaApi(page, 'hr.manager', 'HrManager@12345!');
 
     const lock = await page.request.patch(`/api/hr/payroll-runs/${encodeURIComponent(runId)}`, {
       data: { status: 'locked' },

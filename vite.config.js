@@ -18,11 +18,25 @@ export default defineConfig({
   },
   test: {
     globals: false,
-    environment: 'jsdom',
-    environmentMatchGlobs: [['**/server/**', 'node'], ['**/shared/**', 'node']],
-    setupFiles: './src/test/setup.js',
-    include: ['src/**/*.{test,spec}.{js,jsx}', 'server/**/*.test.js', 'shared/**/*.test.js'],
     pool: 'forks',
-    testTimeout: 15_000,
+    projects: [
+      {
+        test: {
+          name: 'client',
+          environment: 'jsdom',
+          include: ['src/**/*.{test,spec}.{js,jsx}'],
+          setupFiles: './src/test/setup.js',
+          testTimeout: 15_000,
+        },
+      },
+      {
+        test: {
+          name: 'node',
+          environment: 'node',
+          include: ['server/**/*.test.js', 'shared/**/*.test.js'],
+          testTimeout: 15_000,
+        },
+      },
+    ],
   },
 })
