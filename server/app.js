@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import express from 'express';
 import cors from 'cors';
 import { registerHttpApi } from './httpApi.js';
@@ -38,5 +40,29 @@ export function createApp(db) {
   app.use(attachAuthContext(db));
 
   registerHttpApi(app, db);
+
+  const staticRoot = path.resolve(
+    process.env.ZAREWA_STATIC_DIR || path.join(process.cwd(), 'dist')
+  );
+  const spaIndex = path.join(staticRoot, 'index.html');
+  if (fs.existsSync(spaIndex)) {
+    app.use(
+      express.static(staticRoot, {
+        index: false,
+        maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0,
+        setHeaders(res, filePath) {
+          if (/[/\\]assets[/\\]/.test(filePath)) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          }
+        },
+      })
+    );
+    app.use((req, res, next) => {
+      if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+      if (req.path.startsWith('/api')) return next();
+      res.sendFile(spaIndex, (err) => (err ? next(err) : undefined));
+    });
+  }
+
   return app;
 }

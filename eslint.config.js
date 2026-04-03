@@ -33,6 +33,8 @@ export default defineConfig([
     rules: {
       // Framer Motion uses `const motion` with `motion.div` in JSX; `motion` is otherwise flagged as unused.
       'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]|^motion$' }],
+      // Async data loads triggered from useEffect (`void load()`) are intentional; the rule flags all such helpers.
+      'react-hooks/set-state-in-effect': 'off',
     },
   },
   {
