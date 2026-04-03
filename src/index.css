@@ -28,11 +28,16 @@
   animation: z-toast-in 0.28s ease-out;
 }
 
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 body {
   margin: 0;
   background-color: var(--color-sequence-bg);
   font-family:
-    'Inter',
+    'Plus Jakarta Sans',
     system-ui,
     -apple-system,
     Segoe UI,
@@ -40,39 +45,52 @@ body {
     sans-serif;
   color: #0f172a;
   text-rendering: optimizeLegibility;
+  overflow-x: clip;
+  -webkit-tap-highlight-color: rgb(19 78 74 / 0.08);
+}
+
+/* Faster taps on controls; avoid breaking document scroll */
+button,
+[role='button'],
+a,
+input[type='submit'],
+input[type='button'],
+select,
+summary {
+  touch-action: manipulation;
 }
 
 /* Shared field styles — keep list pages visually aligned */
 .z-input-search {
   @apply w-full bg-gray-50 border border-gray-100 rounded-xl py-2.5 pl-10 pr-4 text-sm outline-none transition-all;
-  @apply focus:border-teal-500/30 focus:ring-2 focus:ring-[#134e4a]/10;
+  @apply focus:border-teal-500/30 focus:ring-2 focus:ring-zarewa-teal/10;
 }
 
 .z-card-dark {
-  @apply bg-[#134e4a] p-6 rounded-zarewa text-white shadow-xl;
+  @apply bg-zarewa-teal p-6 rounded-zarewa text-white shadow-xl;
 }
 
 .z-card-muted {
-  @apply bg-white/95 p-6 rounded-zarewa border border-white/80;
-  box-shadow: var(--shadow-zarewa-card);
+  @apply bg-white/60 backdrop-blur-3xl p-6 rounded-zarewa border border-white/80;
+  box-shadow: 0 20px 60px -32px rgba(15, 23, 42, 0.1), 0 10px 24px -18px rgba(20, 83, 45, 0.06);
 }
 
 .z-section-title-dark {
-  @apply text-[10px] font-bold text-white/40 uppercase tracking-[0.2em] mb-4;
+  @apply text-xs font-bold text-white/40 uppercase tracking-[0.18em] mb-4;
 }
 
 .z-section-title {
-  @apply text-xs font-bold text-[#134e4a] uppercase tracking-widest mb-4;
+  @apply text-xs font-bold text-zarewa-teal uppercase tracking-widest mb-4;
 }
 
 .z-btn-primary {
-  @apply inline-flex items-center justify-center gap-2 bg-[#134e4a] text-white px-6 py-2.5 rounded-xl font-bold text-xs shadow-lg shadow-teal-900/10 hover:brightness-110 transition-all;
-  @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/30 focus-visible:ring-offset-2 focus-visible:ring-offset-[#F8FAFC];
+  @apply inline-flex items-center justify-center gap-2 bg-zarewa-teal text-white px-6 py-2.5 rounded-xl font-bold text-xs shadow-lg shadow-teal-900/10 hover:brightness-110 transition-all;
+  @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zarewa-teal/30 focus-visible:ring-offset-2 focus-visible:ring-offset-[#F8FAFC];
 }
 
 .z-btn-secondary {
-  @apply inline-flex items-center justify-center gap-2 bg-white border border-gray-100 text-[#134e4a] px-6 py-2.5 rounded-xl font-bold text-xs shadow-sm hover:bg-gray-50 transition-all;
-  @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/20 focus-visible:ring-offset-2 focus-visible:ring-offset-[#F8FAFC];
+  @apply inline-flex items-center justify-center gap-2 bg-white border border-gray-100 text-zarewa-teal px-6 py-2.5 rounded-xl font-bold text-xs shadow-sm hover:bg-gray-50 transition-all;
+  @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zarewa-teal/20 focus-visible:ring-offset-2 focus-visible:ring-offset-[#F8FAFC];
 }
 
 .z-empty-state {
@@ -84,22 +102,22 @@ body {
 
 /* Unified form labels — use across modals and pages */
 .z-field-label {
-  @apply block text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-1.5 ml-0.5;
+  @apply block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1.5 ml-0.5;
 }
 
 .z-input {
-  @apply w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-semibold text-[#134e4a] outline-none transition-all;
-  @apply focus:border-teal-500/35 focus:ring-2 focus:ring-[#134e4a]/10;
+  @apply w-full bg-gray-50 border border-gray-100 rounded-xl py-3.5 min-h-11 px-4 text-base sm:text-sm font-semibold text-zarewa-teal outline-none transition-all;
+  @apply focus:border-teal-500/35 focus:ring-2 focus:ring-zarewa-teal/10;
 }
 
 .z-textarea {
   @apply w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-medium text-gray-800 outline-none transition-all resize-none;
-  @apply focus:border-teal-500/35 focus:ring-2 focus:ring-[#134e4a]/10;
+  @apply focus:border-teal-500/35 focus:ring-2 focus:ring-zarewa-teal/10;
 }
 
 .z-select {
-  @apply w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-semibold text-[#134e4a] appearance-none outline-none cursor-pointer transition-all;
-  @apply focus:border-teal-500/35 focus:ring-2 focus:ring-[#134e4a]/10;
+  @apply w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-semibold text-zarewa-teal appearance-none outline-none cursor-pointer transition-all;
+  @apply focus:border-teal-500/35 focus:ring-2 focus:ring-zarewa-teal/10;
 }
 
 /* Modal inner panels (sits inside ModalFrame) */
@@ -122,8 +140,8 @@ body {
 }
 
 .z-kpi-card {
-  @apply rounded-[26px] border border-white/80 bg-white/96 p-5 text-left transition-all duration-200;
-  box-shadow: var(--shadow-zarewa-card);
+  @apply rounded-[28px] border border-white/80 bg-white/60 backdrop-blur-3xl p-5 text-left transition-all duration-300;
+  box-shadow: 0 20px 60px -32px rgba(15, 23, 42, 0.1), 0 10px 24px -18px rgba(20, 83, 45, 0.06);
 }
 
 .z-kpi-card:hover {
@@ -131,17 +149,17 @@ body {
 }
 
 .z-soft-panel {
-  @apply rounded-[28px] border border-white/80 bg-white/94;
-  box-shadow: var(--shadow-zarewa-card);
+  @apply rounded-[28px] border border-white/80 bg-white/60 backdrop-blur-3xl;
+  box-shadow: 0 20px 60px -32px rgba(15, 23, 42, 0.1), 0 10px 24px -18px rgba(20, 83, 45, 0.06);
 }
 
 .z-status-pill {
-  @apply inline-flex items-center rounded-full border px-3 py-1 text-[10px] font-black uppercase tracking-[0.14em];
+  @apply inline-flex items-center rounded-full border px-3 py-1 text-xs font-bold uppercase tracking-[0.12em];
 }
 
 .z-toolbar-shell {
-  @apply rounded-[26px] border border-white/80 bg-white/88 backdrop-blur-xl;
-  box-shadow: var(--shadow-zarewa-card);
+  @apply rounded-[28px] border border-white/80 bg-white/70 backdrop-blur-2xl;
+  box-shadow: 0 20px 60px -32px rgba(15, 23, 42, 0.1), 0 10px 24px -18px rgba(20, 83, 45, 0.06);
 }
 
 .custom-scrollbar {
@@ -173,7 +191,7 @@ body {
 
 /* Unified data lists — same rhythm as Sales / Operations tables */
 .z-list-thead {
-  @apply hidden sm:grid px-4 text-[10px] font-bold text-slate-500 uppercase tracking-wider border-b border-slate-200 pb-2 mb-0 gap-x-3;
+  @apply hidden sm:grid px-4 text-xs font-bold text-slate-500 uppercase tracking-wider border-b border-slate-200 pb-2 mb-0 gap-x-3;
 }
 
 .z-list-row {
@@ -181,8 +199,8 @@ body {
 }
 
 .z-panel-section {
-  @apply rounded-[28px] border border-white/80 bg-white/95 p-6 sm:p-7;
-  box-shadow: var(--shadow-zarewa-card);
+  @apply rounded-[28px] border border-white/80 bg-white/60 backdrop-blur-3xl p-6 sm:p-7;
+  box-shadow: 0 20px 60px -32px rgba(15, 23, 42, 0.1), 0 10px 24px -18px rgba(20, 83, 45, 0.06);
 }
 
 .z-form-actions {
@@ -190,8 +208,8 @@ body {
 }
 
 .z-page-hero {
-  @apply rounded-[28px] border border-white/80 bg-white/95 p-6 sm:p-7 mb-8;
-  box-shadow: var(--shadow-zarewa-card);
+  @apply rounded-[28px] border border-white/80 bg-white/60 backdrop-blur-3xl p-6 sm:p-7 mb-8;
+  box-shadow: 0 20px 60px -32px rgba(15, 23, 42, 0.1), 0 10px 24px -18px rgba(20, 83, 45, 0.06);
 }
 
 /* A4 report preview on screen (inside modal) */
@@ -218,7 +236,7 @@ body {
   margin-right: auto;
   box-sizing: border-box;
   font-family:
-    'Inter',
+    'Plus Jakarta Sans',
     system-ui,
     -apple-system,
     Segoe UI,
@@ -772,7 +790,7 @@ body {
   --cl-border: #e2e8f0;
   --cl-text-muted: #64748b;
   font-family:
-    'Inter',
+    'Plus Jakarta Sans',
     system-ui,
     -apple-system,
     Segoe UI,
@@ -1465,6 +1483,12 @@ body {
     box-sizing: border-box;
     z-index: auto !important;
     pointer-events: auto !important;
+  }
+
+  .quotation-print-root,
+  .quotation-print-root * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
   }
 
   /* A5 cutting list pack — own width + named page size */

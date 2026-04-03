@@ -22,6 +22,7 @@ import { DEFAULT_BRANCH_ID } from './branches.js';
 import { seedAuthUsers } from './auth.js';
 import { seedMasterData } from './masterData.js';
 import { seedProductionLineDemo } from './seedProductionLineDemo.js';
+import { seedHrIfEmpty } from './hrOps.js';
 
 /**
  * Idempotent seed: fills empty tables. Safe on existing DBs after migrations.
@@ -37,8 +38,8 @@ export function seedEverything(db) {
       INSERT INTO customers (
         customer_id, name, phone_number, email, address_shipping, address_billing,
         status, tier, payment_terms, created_by, created_at_iso, last_activity_iso,
-        company_name, lead_source, preferred_contact, follow_up_iso, crm_tags_json, crm_profile_notes
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        company_name, lead_source, preferred_contact, follow_up_iso, crm_tags_json, crm_profile_notes, branch_id
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `);
     const insQ = db.prepare(`
       INSERT INTO quotations (
@@ -70,7 +71,8 @@ export function seedEverything(db) {
           c.preferredContact ?? '',
           c.followUpISO ?? '',
           tagsJson,
-          c.crmProfileNotes ?? ''
+          c.crmProfileNotes ?? '',
+          DEFAULT_BRANCH_ID
         );
       }
       for (const q of QUOTATIONS_SEED) {
@@ -100,14 +102,14 @@ export function seedEverything(db) {
   const supCount = db.prepare('SELECT COUNT(*) AS c FROM suppliers').get().c;
   if (supCount === 0) {
     const insS = db.prepare(
-      `INSERT INTO suppliers (supplier_id, name, city, payment_terms, quality_score, notes) VALUES (?,?,?,?,?,?)`
+      `INSERT INTO suppliers (supplier_id, name, city, payment_terms, quality_score, notes, branch_id) VALUES (?,?,?,?,?,?,?)`
     );
     const insA = db.prepare(
-      `INSERT INTO transport_agents (id, name, region, phone) VALUES (?,?,?,?)`
+      `INSERT INTO transport_agents (id, name, region, phone, branch_id) VALUES (?,?,?,?,?)`
     );
     const insP = db.prepare(
-      `INSERT INTO products (product_id, name, stock_level, unit, low_stock_threshold, reorder_qty, gauge, colour, material_type, dashboard_attrs_json)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`
+      `INSERT INTO products (product_id, name, stock_level, unit, low_stock_threshold, reorder_qty, gauge, colour, material_type, dashboard_attrs_json, branch_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
     );
     const insPo = db.prepare(`
       INSERT INTO purchase_orders (
@@ -163,7 +165,7 @@ export function seedEverything(db) {
       `INSERT INTO accounts_payable (ap_id, supplier_name, po_ref, invoice_ref, amount_ngn, paid_ngn, due_date_iso, payment_method) VALUES (?,?,?,?,?,?,?,?)`
     );
     const insBr = db.prepare(
-      `INSERT INTO bank_reconciliation_lines (id, bank_date_iso, description, amount_ngn, system_match, status) VALUES (?,?,?,?,?,?)`
+      `INSERT INTO bank_reconciliation_lines (id, bank_date_iso, description, amount_ngn, system_match, status, branch_id) VALUES (?,?,?,?,?,?,?)`
     );
     const insCat = db.prepare(
       `INSERT INTO procurement_catalog (id, color, gauge, product_id, offer_kg, offer_meters, conversion_kg_per_m, label) VALUES (?,?,?,?,?,?,?,?)`
@@ -175,10 +177,10 @@ export function seedEverything(db) {
 
     db.transaction(() => {
       for (const s of SUPPLIERS_SEED) {
-        insS.run(s.supplierID, s.name, s.city, s.paymentTerms, s.qualityScore, s.notes);
+        insS.run(s.supplierID, s.name, s.city, s.paymentTerms, s.qualityScore, s.notes, DEFAULT_BRANCH_ID);
       }
       for (const a of TRANSPORT_AGENTS_SEED) {
-        insA.run(a.id, a.name, a.region, a.phone);
+        insA.run(a.id, a.name, a.region, a.phone, DEFAULT_BRANCH_ID);
       }
       for (const p of PRODUCTS_SEED) {
         insP.run(
@@ -191,7 +193,8 @@ export function seedEverything(db) {
           p.dashboardAttrs?.gauge ?? null,
           p.dashboardAttrs?.colour ?? null,
           p.dashboardAttrs?.materialType ?? null,
-          JSON.stringify(p.dashboardAttrs ?? {})
+          JSON.stringify(p.dashboardAttrs ?? {}),
+          DEFAULT_BRANCH_ID
         );
       }
       for (const { po, lines } of PURCHASE_ORDERS_SEED) {
@@ -355,7 +358,15 @@ export function seedEverything(db) {
         );
       }
       for (const b of BANK_RECONCILIATION_SEED) {
-        insBr.run(b.id, b.bankDateISO, b.description, b.amountNgn, b.systemMatch, b.status);
+        insBr.run(
+          b.id,
+          b.bankDateISO,
+          b.description,
+          b.amountNgn,
+          b.systemMatch,
+          b.status,
+          b.branchId ?? DEFAULT_BRANCH_ID
+        );
       }
       for (const c of PROCUREMENT_CATALOG_SEED) {
         insCat.run(c.id, c.color, c.gauge, c.productID, c.offerKg, c.offerMeters, c.conversionKgPerM, c.label);
@@ -371,7 +382,7 @@ export function seedEverything(db) {
   const crmCount = db.prepare(`SELECT COUNT(*) AS c FROM customer_crm_interactions`).get().c;
   if (crmCount === 0) {
     db.prepare(
-      `INSERT INTO customer_crm_interactions (id, customer_id, at_iso, kind, title, detail, created_by_name) VALUES (?,?,?,?,?,?,?)`
+      `INSERT INTO customer_crm_interactions (id, customer_id, at_iso, kind, title, detail, created_by_name, branch_id) VALUES (?,?,?,?,?,?,?,?)`
     ).run(
       'CRM-DEMO-1',
       'CUS-001',
@@ -379,9 +390,11 @@ export function seedEverything(db) {
       'call',
       'Gauge follow-up',
       'Confirmed interest in 0.45 HMB for April delivery window.',
-      'Auwal Idris'
+      'Auwal Idris',
+      DEFAULT_BRANCH_ID
     );
   }
 
   seedProductionLineDemo(db);
+  seedHrIfEmpty(db);
 }

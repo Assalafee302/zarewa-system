@@ -142,6 +142,7 @@ const MASTER_DATA_CONFIG = {
       if (!['product', 'accessory', 'service'].includes(itemType)) {
         throw new Error('Quote item type must be product, accessory, or service.');
       }
+      const invPid = trimText(payload.inventoryProductId ?? payload.inventory_product_id ?? '');
       return {
         itemType,
         name: requireName(payload.name, 'Item name'),
@@ -149,6 +150,7 @@ const MASTER_DATA_CONFIG = {
         defaultUnitPriceNgn: roundMoney(payload.defaultUnitPriceNgn),
         active: boolFlag(payload.active),
         sortOrder: sortNumber(payload.sortOrder, fallbackSort),
+        inventoryProductId: invPid || null,
       };
     },
     toClient(row) {
@@ -160,6 +162,7 @@ const MASTER_DATA_CONFIG = {
         defaultUnitPriceNgn: roundMoney(row.default_unit_price_ngn),
         active: Boolean(row.active),
         sortOrder: Number(row.sort_order) || 0,
+        inventoryProductId: row.inventory_product_id ?? '',
       };
     },
   },
@@ -535,9 +538,10 @@ function getStatements(kind, row) {
           row.defaultUnitPriceNgn,
           row.active,
           row.sortOrder,
+          row.inventoryProductId || null,
         ],
-        insertSql: `INSERT INTO setup_quote_items (item_id, item_type, name, unit, default_unit_price_ngn, active, sort_order) VALUES (?,?,?,?,?,?,?)`,
-        updateSql: `UPDATE setup_quote_items SET item_type = ?, name = ?, unit = ?, default_unit_price_ngn = ?, active = ?, sort_order = ? WHERE item_id = ?`,
+        insertSql: `INSERT INTO setup_quote_items (item_id, item_type, name, unit, default_unit_price_ngn, active, sort_order, inventory_product_id) VALUES (?,?,?,?,?,?,?,?)`,
+        updateSql: `UPDATE setup_quote_items SET item_type = ?, name = ?, unit = ?, default_unit_price_ngn = ?, active = ?, sort_order = ?, inventory_product_id = ? WHERE item_id = ?`,
       };
     case 'colours':
       return {

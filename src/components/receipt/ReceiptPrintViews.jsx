@@ -30,7 +30,7 @@ function QuotationPaymentHistoryQuick({ rows = [], highlightReceiptId = '' }) {
           );
         })}
       </ul>
-      <p className="text-[7px] text-slate-500 mt-1">Ledger + sample rows; totals match books.</p>
+      <p className="text-[7px] text-slate-500 mt-1">Ledger + imported rows; totals match books.</p>
     </div>
   );
 }
@@ -208,7 +208,7 @@ export function ReceiptPrintFull({
                   </tbody>
                 </table>
               </div>
-              <p className="rpt-full-hint">Ledger and sample rows. Highlighted line matches this printout.</p>
+              <p className="rpt-full-hint">Ledger and imported rows. Highlighted line matches this printout.</p>
             </section>
           ) : null}
 

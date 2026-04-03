@@ -18,10 +18,12 @@
  *
  * These tests are live API exercises (in-memory DB each time), not UI flows.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import request from 'supertest';
 import { createDatabase } from './db.js';
 import { createApp } from './app.js';
+
+const openDbs = [];
 
 async function loginAs(agent, username, password) {
   const res = await agent.post('/api/session/login').send({ username, password });
@@ -30,14 +32,18 @@ async function loginAs(agent, username, password) {
 }
 
 async function createSession() {
-  const app = createApp(createDatabase(':memory:'));
+  const db = createDatabase(':memory:');
+  openDbs.push(db);
+  const app = createApp(db);
   const agent = request.agent(app);
   await loginAs(agent, 'admin', 'Admin@123');
   return { app, agent };
 }
 
 async function createSessionAs(username, password) {
-  const app = createApp(createDatabase(':memory:'));
+  const db = createDatabase(':memory:');
+  openDbs.push(db);
+  const app = createApp(db);
   const agent = request.agent(app);
   await loginAs(agent, username, password);
   return { app, agent };
@@ -91,19 +97,28 @@ async function ensureTreasuryAccounts(agent, count, key) {
 
 async function createCustomer(agent, key, name) {
   const customerID = `CUS-${key}`;
-  const res = await agent.post('/api/customers').send({
-    customerID,
-    name,
-    phoneNumber: `080${String(Math.abs(hashCode(customerID))).slice(0, 8).padEnd(8, '0')}`,
-    email: `${customerID.toLowerCase()}@example.com`,
-    addressShipping: `${key} site`,
-    addressBilling: `${key} bill`,
-    status: 'Active',
-    tier: 'Retail',
-    paymentTerms: 'Cash',
-  });
-  expect(res.status).toBe(201);
-  return customerID;
+  // Phone numbers are derived from a hash; in rare cases the generated phone can collide
+  // with seeded/demo data, causing a 409 duplicate registration. Retry with a salt.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const salted = `${customerID}:${attempt}`;
+    const phoneNumber = `080${String(Math.abs(hashCode(salted))).slice(0, 8).padEnd(8, '0')}`;
+    const res = await agent.post('/api/customers').send({
+      customerID,
+      name,
+      phoneNumber,
+      email: `${customerID.toLowerCase()}@example.com`,
+      addressShipping: `${key} site`,
+      addressBilling: `${key} bill`,
+      status: 'Active',
+      tier: 'Retail',
+      paymentTerms: 'Cash',
+    });
+    if (res.status === 201) return customerID;
+    if (res.status !== 409) {
+      throw new Error(`createCustomer failed: status=${res.status}, body=${JSON.stringify(res.body)}`);
+    }
+  }
+  throw new Error(`createCustomer failed after retries for ${customerID}`);
 }
 
 async function createQuotation(agent, customerID, key, lines, projectName = key) {
@@ -641,7 +656,7 @@ function buildArchetypes() {
           expenseType: 'Blocked',
           amountNgn: 5000,
           date: '2026-03-29',
-          category: 'Diesel',
+          category: 'Operational — rent & utilities',
           paymentMethod: 'Cash',
           treasuryAccountId: 1,
           reference: 'NOPE',
@@ -717,7 +732,7 @@ function buildArchetypes() {
           expenseType: 'Fuel',
           amountNgn: 40_000,
           date: '2026-03-29',
-          category: 'Diesel',
+          category: 'Operational — rent & utilities',
           paymentMethod: 'Cash',
           reference: 'EX-A19',
         });
@@ -749,7 +764,7 @@ function buildArchetypes() {
           expenseType: 'Backdated',
           amountNgn: 3000,
           date: '2026-04-10',
-          category: 'Diesel',
+          category: 'Operational — rent & utilities',
           paymentMethod: 'Cash',
           treasuryAccountId: 1,
           reference: 'BLK',
@@ -763,7 +778,7 @@ function buildArchetypes() {
           expenseType: 'After unlock',
           amountNgn: 3000,
           date: '2026-04-10',
-          category: 'Diesel',
+          category: 'Operational — rent & utilities',
           paymentMethod: 'Cash',
           treasuryAccountId: 1,
           reference: 'OK',
@@ -963,7 +978,7 @@ function buildArchetypes() {
           expenseType: 'Repairs',
           amountNgn: 22_000,
           date: '2026-03-29',
-          category: 'Maintenance',
+          category: 'Maintenance — plant & equipment',
           paymentMethod: 'Cash',
           reference: 'EX-A28',
         });
@@ -1235,7 +1250,7 @@ function buildArchetypes() {
           expenseType: 'Doubtful',
           amountNgn: 99_000,
           date: '2026-03-29',
-          category: 'Maintenance',
+          category: 'Maintenance — plant & equipment',
           paymentMethod: 'Cash',
           reference: 'EX-A36',
         });
@@ -1302,7 +1317,7 @@ function buildArchetypes() {
           expenseType: 'Generator',
           amountNgn: 500_000,
           date: '2026-03-29',
-          category: 'Maintenance',
+          category: 'Maintenance — plant & equipment',
           paymentMethod: 'Mixed',
           reference: 'EX-A39',
         });
@@ -1450,7 +1465,7 @@ function buildArchetypes() {
           expenseType: 'Fake fuel',
           amountNgn: 50_000,
           date: '2026-03-29',
-          category: 'Diesel',
+          category: 'Operational — rent & utilities',
           paymentMethod: 'Cash',
           treasuryAccountId: 1,
           reference: 'BAD',
@@ -1464,6 +1479,11 @@ function buildArchetypes() {
 const ARCHETYPES = buildArchetypes();
 
 describe('Customer service archetypes (45 personalities)', () => {
+  afterAll(() => {
+    for (const db of openDbs) db.close();
+    openDbs.length = 0;
+  });
+
   it.each(ARCHETYPES)('$id — $title', async ({ run }) => {
     await run();
   }, 45_000);

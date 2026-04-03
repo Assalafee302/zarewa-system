@@ -5,14 +5,35 @@ export function apiUrl(path) {
   return `${base}${p}`;
 }
 
+function getCookie(name) {
+  const target = `${encodeURIComponent(name)}=`;
+  const parts = String(document.cookie || '').split(';');
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (trimmed.startsWith(target)) {
+      return decodeURIComponent(trimmed.slice(target.length));
+    }
+  }
+  return null;
+}
+
 export async function apiFetch(path, options = {}) {
+  const method = String(options.method || 'GET').toUpperCase();
+  const needsCsrf = method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS';
+
+  const csrfToken = needsCsrf ? getCookie('zarewa_csrf') : null;
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(options.headers || {}),
+  };
+  if (needsCsrf && csrfToken) {
+    headers['X-CSRF-Token'] = csrfToken;
+  }
+
   const r = await fetch(apiUrl(path), {
     credentials: 'include',
     ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options.headers || {}),
-    },
+    headers,
   });
   const text = await r.text();
   let data = null;

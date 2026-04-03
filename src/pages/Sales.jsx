@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState, createPortal } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, createPortal } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Search,
@@ -6,7 +6,6 @@ import {
   FileText,
   Scissors,
   Receipt as ReceiptIcon,
-  Clock,
   MoreVertical,
   RotateCcw,
   Banknote,
@@ -38,12 +37,12 @@ import AdvancePaymentModal from '../components/AdvancePaymentModal';
 import CuttingListModal from '../components/CuttingListModal';
 import RefundModal from '../components/RefundModal';
 import { MainPanel, PageHeader, PageShell, PageTabs } from '../components/layout';
-import { SALES_MOCK, SALES_YARD_COIL_REGISTER, formatNgn } from '../Data/mockData';
+import { formatNgn } from '../Data/mockData';
 import { useToast } from '../context/ToastContext';
 import { useCustomers } from '../context/CustomersContext';
 import { useInventory } from '../context/InventoryContext';
 import { useWorkspace } from '../context/WorkspaceContext';
-import { loadSpotPrices } from '../lib/dashboardSpotPrices';
+import { spotPricesRowsFromMasterData } from '../lib/spotPricesFromMasterData';
 import { apiFetch } from '../lib/apiBase';
 import {
   SALES_ROLE_LABELS,
@@ -56,8 +55,6 @@ import {
   cuttingListEditBlockedReason,
 } from '../lib/salesWorkspaceAccess';
 import {
-  loadRefunds,
-  saveRefunds,
   normalizeRefund,
   refundApprovedAmount,
   refundOutstandingAmount,
@@ -71,14 +68,35 @@ const TAB_LABELS = {
   customers: 'Customers',
 };
 
-/** Match dashboard list rows — slate surfaces, teal accents */
-const TABLE_HEAD =
-  'hidden sm:grid grid-cols-12 px-4 text-[9px] font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-200 pb-2 mb-2 gap-1';
+/** Compact rows — aligned with Stock / Ops / Finance / Procurement */
+const CARD_ROW =
+  'rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md py-1.5 px-2.5 shadow-sm transition-colors hover:bg-white/70';
 
-const ROW_SHELL =
-  'grid grid-cols-12 items-center gap-y-3 px-4 py-3.5 rounded-xl border border-slate-200/90 bg-white shadow-sm transition-all hover:border-slate-300 hover:shadow-md group';
+const CHIP =
+  'inline-flex items-center text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border shrink-0';
 
-const PILL = 'inline-flex items-center px-2 py-0.5 rounded-md text-[9px] font-semibold uppercase tracking-wide';
+function quotePayChipBorder(ps) {
+  if (ps === 'Paid') return 'border-emerald-200 bg-emerald-50 text-emerald-800';
+  if (ps === 'Partial') return 'border-amber-200 bg-amber-50 text-amber-800';
+  return 'border-slate-200 bg-slate-50 text-slate-600';
+}
+
+function quoteApprovalChipBorder(st) {
+  if (st === 'Approved') return 'border-emerald-200 bg-emerald-50 text-emerald-800';
+  return 'border-amber-200 bg-amber-50 text-amber-800';
+}
+
+function receiptSourceChipBorder(src) {
+  if (src === 'ledger') return 'border-emerald-200 bg-emerald-50 text-emerald-900';
+  return 'border-slate-200 bg-slate-50 text-slate-600';
+}
+
+function refundStatusChipBorder(st) {
+  if (st === 'Paid') return 'border-sky-200 bg-sky-50 text-sky-900';
+  if (st === 'Approved') return 'border-emerald-200 bg-emerald-50 text-emerald-800';
+  if (st === 'Rejected') return 'border-rose-200 bg-rose-50 text-rose-800';
+  return 'border-amber-200 bg-amber-50 text-amber-800';
+}
 
 function firstGaugeNumeric(gaugeStr) {
   const m = String(gaugeStr ?? '').match(/(\d+(?:\.\d+)?)/);
@@ -100,7 +118,17 @@ function colourShort(colourStr) {
   return tok.length > 8 ? `${tok.slice(0, 7)}…` : tok;
 }
 
-function SalesRowMenu({ rowKey, openKey, setOpenKey, onView, onEdit, editDisabled, editTitle }) {
+function SalesRowMenu({
+  rowKey,
+  openKey,
+  setOpenKey,
+  onView,
+  onEdit,
+  editDisabled,
+  editTitle,
+  onAddReceipt,
+  onReviewAudit,
+}) {
   const open = openKey === rowKey;
   return (
     <div className="relative shrink-0" data-sales-action-menu>
@@ -130,6 +158,34 @@ function SalesRowMenu({ rowKey, openKey, setOpenKey, onView, onEdit, editDisable
             <Eye size={14} className="text-slate-400 shrink-0" />
             View
           </button>
+          {onAddReceipt && (
+            <button
+              type="button"
+              role="menuitem"
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-emerald-700 hover:bg-emerald-50"
+              onClick={() => {
+                onAddReceipt();
+                setOpenKey(null);
+              }}
+            >
+              <ReceiptIcon size={14} className="text-emerald-400 shrink-0" />
+              Add Receipt
+            </button>
+          )}
+          {onReviewAudit && (
+            <button
+              type="button"
+              role="menuitem"
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-[#134e4a] hover:bg-slate-50"
+              onClick={() => {
+                onReviewAudit();
+                setOpenKey(null);
+              }}
+            >
+              <FileText size={14} className="text-slate-400 shrink-0" />
+              Review Audit
+            </button>
+          )}
           <button
             type="button"
             role="menuitem"
@@ -181,6 +237,7 @@ const Sales = () => {
   const [advanceViewEntry, setAdvanceViewEntry] = useState(null);
   const [advancePrintEntry, setAdvancePrintEntry] = useState(null);
   const [ledgerNonce, setLedgerNonce] = useState(0);
+  const [showCount, setShowCount] = useState(20);
   const salesRole = loadSalesWorkspaceRole(ws?.session?.user?.roleKey);
   const salesRoleLabel = ws?.session?.user?.roleLabel ?? SALES_ROLE_LABELS[salesRole] ?? salesRole;
   const canApproveRefunds = ws?.hasPermission?.('refunds.approve') || ws?.hasPermission?.('finance.approve');
@@ -189,34 +246,33 @@ const Sales = () => {
 
   const quotations = useMemo(
     () =>
-      ws?.hasWorkspaceData
-        ? Array.isArray(ws?.snapshot?.quotations)
-          ? ws.snapshot.quotations
-          : []
-        : SALES_MOCK.quotations,
+      ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.quotations) ? ws.snapshot.quotations : [],
     [ws]
   );
-  const receipts = useMemo(
-    () =>
-      ws?.hasWorkspaceData
-        ? Array.isArray(ws?.snapshot?.receipts)
-          ? ws.snapshot.receipts
-          : []
-        : SALES_MOCK.receipts,
+  const importedReceipts = useMemo(
+    () => (ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.receipts) ? ws.snapshot.receipts : []),
     [ws]
   );
   const cuttingLists = useMemo(
     () =>
-      ws?.hasWorkspaceData
-        ? Array.isArray(ws?.snapshot?.cuttingLists)
-          ? ws.snapshot.cuttingLists
-          : []
-        : SALES_MOCK.cuttingLists,
+      ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.cuttingLists) ? ws.snapshot.cuttingLists : [],
     [ws]
   );
   const yardRegister = useMemo(
+    () => (Array.isArray(ws?.snapshot?.yardCoilRegister) ? ws.snapshot.yardCoilRegister : []),
+    [ws]
+  );
+
+  const spotPrices = useMemo(
+    () => spotPricesRowsFromMasterData(ws?.snapshot?.masterData),
+    [ws?.snapshot?.masterData]
+  );
+
+  const refunds = useMemo(
     () =>
-      ws?.snapshot?.yardCoilRegister?.length > 0 ? ws.snapshot.yardCoilRegister : SALES_YARD_COIL_REGISTER,
+      ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.refunds)
+        ? ws.snapshot.refunds.map((r) => normalizeRefund(r))
+        : [],
     [ws]
   );
 
@@ -398,93 +454,80 @@ const Sales = () => {
     return { kind: 'ok', title: 'Available', detail: summary };
   }, [stockSearchActive, stockSearchMatches]);
 
-  const [refunds, setRefunds] = useState(() => loadRefunds());
-  const [spotPrices, setSpotPrices] = useState(() => loadSpotPrices());
-
-  useEffect(() => {
-    saveRefunds(refunds);
-  }, [refunds]);
-
   const filteredQuotations = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return quotations.filter((row) => {
+    const filtered = quotations.filter((row) => {
       if (!q) return true;
       const blob = [
-        row.id,
-        row.customer,
-        row.customerID,
-        row.date,
-        row.total,
-        row.status,
-        row.paymentStatus,
-        row.paidNgn,
-        row.totalNgn,
+        row.id, row.customer, row.customerID, row.date, row.total, row.status, row.paymentStatus, row.paidNgn, row.totalNgn,
       ]
         .join(' ')
         .toLowerCase();
       return blob.includes(q);
     });
-  }, [quotations, searchQuery]);
+    return filtered
+      .sort((a, b) => (b.dateISO || b.date || '').localeCompare(a.dateISO || a.date || ''))
+      .slice(0, showCount);
+  }, [quotations, searchQuery, showCount]);
 
   const mergedReceiptRows = useMemo(
-    () => mergeReceiptRowsForSales(receipts, quotations, ledgerSyncKey),
-    [receipts, quotations, ledgerSyncKey]
+    () => mergeReceiptRowsForSales(importedReceipts, quotations, ledgerSyncKey),
+    [importedReceipts, quotations, ledgerSyncKey]
   );
+
+  const quotationsRef = useRef(quotations);
+  const mergedReceiptRowsRef = useRef(mergedReceiptRows);
+  const refundsRef = useRef(refunds);
+
+  useEffect(() => {
+    quotationsRef.current = quotations;
+    mergedReceiptRowsRef.current = mergedReceiptRows;
+    refundsRef.current = refunds;
+  }, [quotations, mergedReceiptRows, refunds]);
 
   const filteredMergedReceipts = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return mergedReceiptRows;
-    return mergedReceiptRows.filter((row) => {
+    const filtered = mergedReceiptRows.filter((row) => {
+      if (!q) return true;
       const blob = [
-        row.id,
-        row.customer,
-        row.quotationRef,
-        row.date,
-        row.dateISO,
-        row.amount,
-        row.source,
-        row._payBadge,
-        row._subLabel,
-        row._detailNote,
+        row.id, row.customer, row.quotationRef, row.date, row.dateISO, row.amount, row.source, row._payBadge, row._subLabel, row._detailNote,
       ]
         .join(' ')
         .toLowerCase();
       return blob.includes(q);
     });
-  }, [mergedReceiptRows, searchQuery]);
+    return filtered
+      .sort((a, b) => (b.dateISO || b.date || '').localeCompare(a.dateISO || a.date || ''))
+      .slice(0, showCount);
+  }, [mergedReceiptRows, searchQuery, showCount]);
 
   const filteredCuttingLists = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return cuttingLists.filter((row) => {
+    const filtered = cuttingLists.filter((row) => {
       if (!q) return true;
       const blob = `${row.id} ${row.customer} ${row.date} ${row.total} ${row.status}`.toLowerCase();
       return blob.includes(q);
     });
-  }, [cuttingLists, searchQuery]);
+    return filtered
+      .sort((a, b) => (b.dateISO || b.date || '').localeCompare(a.dateISO || a.date || ''))
+      .slice(0, showCount);
+  }, [cuttingLists, searchQuery, showCount]);
 
   const filteredRefunds = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return refunds.filter((row) => {
+    const filtered = refunds.filter((row) => {
       if (!q) return true;
       const blob = [
-        row.refundID,
-        row.customer,
-        row.quotationRef,
-        row.product,
-        row.reason,
-        row.reasonCategory,
-        row.status,
-        row.amountNgn,
-        row.approvedAmountNgn,
-        row.paidAmountNgn,
-        row.paymentNote,
-        row.managerComments,
+        row.refundID, row.customer, row.quotationRef, row.product, row.reason, row.reasonCategory, row.status, row.amountNgn, row.approvedAmountNgn, row.paidAmountNgn, row.paymentNote, row.managerComments,
       ]
         .join(' ')
         .toLowerCase();
       return blob.includes(q);
     });
-  }, [refunds, searchQuery]);
+    return filtered
+      .sort((a, b) => (b.requestedAtISO || b.requested_at_iso || '').localeCompare(a.requestedAtISO || a.requested_at_iso || ''))
+      .slice(0, showCount);
+  }, [refunds, searchQuery, showCount]);
 
   const filteredCustomersCount = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -534,6 +577,7 @@ const Sales = () => {
     setActiveTab(id);
     setSearchQuery('');
     setCustomerAddOpen(false);
+    setShowCount(20);
   };
 
   /**
@@ -546,6 +590,7 @@ const Sales = () => {
     const action = st.openSalesAction;
     const tab = st.focusSalesTab;
     const gsq = st.globalSearchQuery;
+    const record = st.openSalesRecord;
     const openCustomerCreate = st.openCustomerCreate === true;
 
     if (action) {
@@ -568,6 +613,47 @@ const Sales = () => {
       return;
     }
 
+    const recordId = String(record?.id || '').trim();
+    if (record && recordId) {
+      if (record.type === 'quotation') {
+        const q = quotationsRef.current.find((x) => x.id === recordId);
+        setActiveTab('quotations');
+        setSearchQuery('');
+        if (q) {
+          setSelectedItem(q);
+          setQuotationAccessMode('view');
+          setShowQuotationModal(true);
+        } else {
+          showToast(`Quotation ${recordId} not found.`, { variant: 'error' });
+        }
+      } else if (record.type === 'receipt') {
+        const r = mergedReceiptRowsRef.current.find((x) => x.id === recordId);
+        setActiveTab('receipts');
+        setSearchQuery('');
+        if (r) {
+          setSelectedItem(r);
+          setReceiptAccessMode('view');
+          setShowReceiptModal(true);
+        } else {
+          showToast(`Receipt ${recordId} not found.`, { variant: 'error' });
+        }
+      } else if (record.type === 'refund') {
+        const rf = refundsRef.current.find((x) => x.refundID === recordId);
+        setActiveTab('refund');
+        setSearchQuery('');
+        if (rf) {
+          setSelectedItem(rf);
+          setRefundModalMode('view');
+          setRefundModalKey((k) => k + 1);
+          setShowRefundModal(true);
+        } else {
+          showToast(`Refund ${recordId} not found.`, { variant: 'error' });
+        }
+      }
+      navigate(location.pathname, { replace: true, state: {} });
+      return;
+    }
+
     const hasTab = tab && Object.prototype.hasOwnProperty.call(TAB_LABELS, tab);
     const hasSearch = typeof gsq === 'string' && gsq.trim();
     if (!openCustomerCreate && !hasTab && !hasSearch) return;
@@ -582,13 +668,7 @@ const Sales = () => {
     else if (hasTab || openCustomerCreate) setSearchQuery('');
 
     navigate(location.pathname, { replace: true, state: {} });
-  }, [location.state, location.pathname, navigate]);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  /* eslint-disable react-hooks/set-state-in-effect */
-  useEffect(() => {
-    setSpotPrices(loadSpotPrices());
-  }, [location.pathname, location.key]);
+  }, [location.state, location.pathname, navigate, showToast]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
@@ -679,20 +759,13 @@ const Sales = () => {
       );
       return { ok: true };
     }
-    if (refundModalMode === 'create') {
-      setRefunds((prev) => [normalized, ...prev]);
-      showToast(`Refund request ${normalized.refundID} submitted for approval.`);
-    } else {
-      setRefunds((prev) =>
-        prev.map((r) => (r.refundID === normalized.refundID ? normalized : r))
-      );
-      showToast(
-        refundModalMode === 'approve'
-          ? `Refund ${normalized.refundID} marked ${normalized.status}.`
-          : 'Refund record updated.'
-      );
-    }
-    return { ok: true };
+    showToast(
+      ws?.usingCachedData
+        ? 'Reconnect to save refunds — workspace is read-only.'
+        : 'Sign in and connect to the API to save refund requests.',
+      { variant: 'info' }
+    );
+    return { ok: false };
   };
 
   const persistCuttingList = async (payload) => {
@@ -745,6 +818,7 @@ const Sales = () => {
   return (
     <PageShell blurred={isAnyModalOpen}>
       <PageHeader
+        eyebrow="Sales"
         title="Sales"
         subtitle="Quotations, receipts, cutting lists, refunds & customers — yard pricing matches the dashboard spot list; stock check is in the sidebar."
         actions={
@@ -776,284 +850,221 @@ const Sales = () => {
         }
       />
 
-      <div
-        className={`grid grid-cols-1 gap-6 lg:gap-8 min-w-0 ${
-          activeTab === 'receipts' ? 'lg:grid-cols-3' : 'lg:grid-cols-4'
-        }`}
-      >
-        {activeTab === 'receipts' ? (
-          <>
-            <ReceiptsTransactionsPanel
-              receipts={filteredMergedReceipts}
-              ledgerNonce={ledgerSyncKey}
-              onOpenReceipt={(r) => {
-                setSelectedItem(r);
-                setReceiptAccessMode('view');
-                setShowReceiptModal(true);
-              }}
-            />
-            <ReceiptsAdvancesPanel
-              ledgerNonce={ledgerSyncKey}
-              onSelectAdvance={(e) => setAdvanceViewEntry(e)}
-              onLinkAdvance={(e) => setLinkAdvanceEntry(e)}
-            />
-          </>
-        ) : (
-          <aside className="lg:col-span-1 space-y-5">
-          {activeTab === 'quotations' ? (
+      <div className="flex flex-wrap items-center justify-between gap-4 mb-6 -mt-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {activeTab === 'quotations' && (
+            <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
+              <Plus size={16} strokeWidth={2} /> New quotation
+            </button>
+          )}
+          {activeTab === 'receipts' && (
             <>
-          <section className="rounded-xl border border-slate-200/90 bg-white shadow-sm overflow-hidden">
-            <div className="h-1 bg-[#134e4a]" aria-hidden />
-            <div className="p-5">
-              <div className="flex items-start justify-between gap-3 mb-3">
-                <div className="min-w-0">
-                  <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 flex items-center gap-1.5">
-                    <Banknote size={14} className="text-[#134e4a] shrink-0" strokeWidth={2} />
-                    Spot price list
-                  </p>
-                  <p className="text-[11px] text-slate-500 mt-1 leading-snug">
-                    ₦ per metre — saved in this browser (same as dashboard).
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => navigate('/')}
-                  title="Open dashboard to edit prices"
-                  className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[9px] font-semibold uppercase tracking-wide text-[#134e4a] hover:bg-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/20"
-                >
-                  <Pencil size={12} strokeWidth={2} />
-                  Edit
-                </button>
-              </div>
-              <div className="max-h-[220px] overflow-y-auto custom-scrollbar pr-1">
-                {spotPrices.map((row) => (
-                  <div
-                    key={row.id}
-                    className="grid grid-cols-[1fr_auto] gap-x-2 items-start border-b border-slate-100 py-2.5 last:border-b-0"
-                  >
-                    <div className="min-w-0">
-                      <span className="text-xs font-semibold text-slate-800">{row.gaugeLabel}</span>
-                      <span className="text-[9px] text-slate-500 ml-1">{row.productType}</span>
-                      {row.note ? (
-                        <span className="block text-[9px] text-slate-400 mt-0.5">{row.note}</span>
-                      ) : null}
-                    </div>
-                    <span className="text-xs font-bold text-[#134e4a] tabular-nums text-right whitespace-nowrap pt-0.5">
-                      ₦{row.priceNgn.toLocaleString()}/m
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </section>
+              <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
+                <Plus size={16} strokeWidth={2} /> New receipt
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAdvanceModal(true)}
+                className="inline-flex items-center justify-center gap-2 rounded-lg border border-amber-200 bg-amber-50 text-amber-950 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider shadow-sm hover:bg-amber-100 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/40 focus-visible:ring-offset-2 shrink-0"
+                title="Payment before quotation — customer deposit / liability"
+              >
+                <Wallet size={16} strokeWidth={2} /> Advance payment
+              </button>
+            </>
+          )}
+          {activeTab === 'cuttinglist' && (
+            <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
+              <Plus size={16} strokeWidth={2} /> New cutting list
+            </button>
+          )}
+          {activeTab === 'refund' && (
+            <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
+              <Plus size={16} strokeWidth={2} /> New refund
+            </button>
+          )}
+          {activeTab === 'customers' && (
+            <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
+              <Plus size={16} strokeWidth={2} /> Add customer
+            </button>
+          )}
+        </div>
+        <div className="relative flex-1 max-w-md min-w-[200px]">
+          <Search
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
+            size={16}
+            strokeWidth={2}
+          />
+          <input
+            type="search"
+            placeholder={
+              activeTab === 'customers'
+                ? 'Search name, phone, ID, tier…'
+                : 'Search ID, customer, date…'
+            }
+            className="w-full bg-white border border-slate-200 rounded-lg py-2.5 pl-10 pr-4 text-[11px] font-semibold text-slate-800 outline-none transition-all placeholder:text-slate-400 focus:border-[#134e4a]/35 focus:ring-2 focus:ring-[#134e4a]/10 shadow-sm"
+            autoComplete="off"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+        </div>
+      </div>
 
-          <section className="rounded-xl border border-slate-200/90 bg-white shadow-sm overflow-hidden">
-            <div className="h-1 bg-[#134e4a]" aria-hidden />
-            <div className="px-5 pt-4 pb-3 border-b border-slate-100">
-              <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 flex items-center gap-1.5">
-                <Package size={14} className="text-[#134e4a] shrink-0" strokeWidth={2} />
-                Stock availability
-              </p>
-              <p className="text-[11px] text-slate-500 mt-1 leading-snug">
-                Choose material type, gauge, and/or colour — see if we have matching coil or raw kg on file. Est. metres
-                are planning-only; confirm in Operations.
-              </p>
-            </div>
-            <div className="p-4 space-y-3">
-              {coilInventoryRows.length === 0 ? (
-                <p className="text-[11px] font-medium text-slate-500 leading-relaxed">
-                  No stock lines yet — post a store GRN under Production → store receipt.
-                </p>
-              ) : (
-                <>
-                  <div className="space-y-2">
-                    <label className="block text-[9px] font-semibold text-slate-400 uppercase tracking-wide">
-                      Material type
-                    </label>
-                    <div className="relative">
-                      <select
-                        value={stockMatType}
-                        onChange={(e) => setStockMatType(e.target.value)}
-                        className="w-full appearance-none rounded-lg border border-slate-200 bg-slate-50 py-2 pl-3 pr-8 text-xs font-semibold text-[#134e4a] outline-none focus:border-[#134e4a]/35 focus:ring-2 focus:ring-[#134e4a]/10"
+      <div className="grid grid-cols-1 gap-6 lg:gap-8 min-w-0 lg:grid-cols-4">
+        {activeTab !== 'customers' && (
+          <aside className="lg:col-span-1 hidden lg:flex flex-col gap-5 sticky top-6">
+            {activeTab === 'quotations' ? (
+              <>
+                {/* Spot prices */}
+                <section className="rounded-xl border border-slate-200/90 bg-white shadow-sm overflow-hidden">
+                  <div className="h-1 bg-[#134e4a]" aria-hidden />
+                  <div className="p-5">
+                    <div className="flex items-start justify-between gap-3 mb-3">
+                      <div className="min-w-0">
+                        <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 flex items-center gap-1.5">
+                          <Banknote size={14} className="text-[#134e4a] shrink-0" strokeWidth={2} />
+                          Spot price list
+                        </p>
+                        <p className="text-[11px] text-slate-500 mt-1 leading-snug">
+                          ₦ per metre from Setup → master data.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => navigate('/')}
+                        className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[9px] font-semibold uppercase tracking-wide text-[#134e4a] hover:bg-white transition-colors"
                       >
-                        <option value="">Any type</option>
-                        {stockSearchOptions.types.map((t) => (
-                          <option key={t} value={t}>
-                            {t}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown
-                        size={14}
-                        className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400"
-                      />
+                        <Pencil size={12} strokeWidth={2} />
+                        Edit
+                      </button>
+                    </div>
+                    <div className="max-h-[220px] overflow-y-auto custom-scrollbar pr-1">
+                      {spotPrices.length === 0 ? (
+                        <p className="text-[11px] text-slate-500 py-2">No prices found.</p>
+                      ) : (
+                        spotPrices.map((row) => (
+                          <div key={row.id} className="grid grid-cols-[1fr_auto] gap-x-2 items-start border-b border-slate-100 py-2.5 last:border-b-0">
+                            <div className="min-w-0">
+                              <span className="text-xs font-semibold text-slate-800">{row.gaugeLabel}</span>
+                              <span className="text-[9px] text-slate-500 ml-1">{row.productType}</span>
+                            </div>
+                            <span className="text-xs font-bold text-[#134e4a] tabular-nums text-right whitespace-nowrap pt-0.5">
+                              ₦{row.priceNgn.toLocaleString()}/m
+                            </span>
+                          </div>
+                        ))
+                      )}
                     </div>
                   </div>
-                  <div className="space-y-2">
-                    <label className="block text-[9px] font-semibold text-slate-400 uppercase tracking-wide">
-                      Gauge
-                    </label>
-                    <div className="relative">
-                      <select
-                        value={stockGaugeFilter}
-                        onChange={(e) => setStockGaugeFilter(e.target.value)}
-                        className="w-full appearance-none rounded-lg border border-slate-200 bg-slate-50 py-2 pl-3 pr-8 text-xs font-semibold text-[#134e4a] outline-none focus:border-[#134e4a]/35 focus:ring-2 focus:ring-[#134e4a]/10"
-                      >
-                        <option value="">Any gauge</option>
-                        {stockSearchOptions.gauges.map((g) => (
-                          <option key={g} value={g}>
-                            {String(g).includes('mm') ? g : `${g} mm`}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown
-                        size={14}
-                        className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400"
-                      />
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="block text-[9px] font-semibold text-slate-400 uppercase tracking-wide">
-                      Colour
-                    </label>
-                    <div className="relative">
-                      <select
-                        value={stockColourFilter}
-                        onChange={(e) => setStockColourFilter(e.target.value)}
-                        className="w-full appearance-none rounded-lg border border-slate-200 bg-slate-50 py-2 pl-3 pr-8 text-xs font-semibold text-[#134e4a] outline-none focus:border-[#134e4a]/35 focus:ring-2 focus:ring-[#134e4a]/10"
-                      >
-                        <option value="">Any colour</option>
-                        {stockSearchOptions.colours.map((c) => (
-                          <option key={c} value={c}>
-                            {c}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown
-                        size={14}
-                        className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400"
-                      />
-                    </div>
-                  </div>
+                </section>
 
-                  {!stockSearchActive ? (
-                    <p className="text-[10px] text-slate-400 leading-snug">
-                      Select at least one filter to check availability.
+                {/* Stock check */}
+                <section className="rounded-xl border border-slate-200/90 bg-white shadow-sm overflow-hidden">
+                  <div className="h-1 bg-[#134e4a]" aria-hidden />
+                  <div className="px-5 pt-4 pb-3 border-b border-slate-100">
+                    <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 flex items-center gap-1.5">
+                      <Package size={14} className="text-[#134e4a] shrink-0" strokeWidth={2} />
+                      Stock check
                     </p>
-                  ) : stockVerdict ? (
-                    <div
-                      className={`rounded-xl border p-3 ${
-                        stockVerdict.kind === 'ok'
-                          ? 'border-emerald-200 bg-emerald-50/80'
-                          : stockVerdict.kind === 'mixed'
-                            ? 'border-amber-200 bg-amber-50/80'
-                            : stockVerdict.kind === 'low'
-                              ? 'border-amber-300 bg-amber-50/90'
-                              : 'border-slate-200 bg-slate-50'
-                      }`}
-                    >
-                      <div className="flex items-start gap-2">
-                        {stockVerdict.kind === 'ok' ? (
-                          <CheckCircle2 className="shrink-0 text-emerald-600 mt-0.5" size={18} />
-                        ) : stockVerdict.kind === 'none' ? (
-                          <XCircle className="shrink-0 text-slate-500 mt-0.5" size={18} />
-                        ) : (
-                          <AlertTriangle className="shrink-0 text-amber-600 mt-0.5" size={18} />
-                        )}
-                        <div className="min-w-0">
-                          <p className="text-xs font-bold text-slate-900">{stockVerdict.title}</p>
-                          <p className="text-[10px] font-medium text-slate-600 mt-1 leading-snug">
-                            {stockVerdict.detail}
-                          </p>
+                  </div>
+                  <div className="p-4 space-y-3">
+                    <div className="space-y-2">
+                       <label className="block text-[9px] font-semibold text-slate-400 uppercase tracking-wide">Material</label>
+                       <div className="relative">
+                         <select 
+                           value={stockMatType} 
+                           onChange={(e) => setStockMatType(e.target.value)}
+                           className="w-full appearance-none rounded-lg border border-slate-200 bg-slate-50 py-2 pl-3 pr-8 text-xs font-semibold text-[#134e4a] focus:ring-2 focus:ring-[#134e4a]/10 focus:border-[#134e4a]/30 outline-none"
+                         >
+                           <option value="">Any type</option>
+                           {stockSearchOptions.types.map(t => <option key={t} value={t}>{t}</option>)}
+                         </select>
+                         <ChevronDown size={14} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                       </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-2">
+                        <label className="block text-[9px] font-semibold text-slate-400 uppercase tracking-wide">Gauge</label>
+                        <div className="relative">
+                          <select 
+                            value={stockGaugeFilter} 
+                            onChange={(e) => setStockGaugeFilter(e.target.value)}
+                            className="w-full appearance-none rounded-lg border border-slate-200 bg-slate-50 py-2 pl-3 pr-8 text-xs font-semibold text-[#134e4a] outline-none"
+                          >
+                            <option value="">Any</option>
+                            {stockSearchOptions.gauges.map(g => <option key={g} value={g}>{g}</option>)}
+                          </select>
+                          <ChevronDown size={14} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
                         </div>
                       </div>
-                      {stockSearchMatches.length > 0 ? (
-                        <div className="mt-3 max-h-[200px] overflow-y-auto custom-scrollbar border-t border-slate-200/80 pt-2">
-                          <p className="text-[8px] font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
-                            Matching lines
-                          </p>
-                          <ul className="space-y-1.5">
-                            {stockSearchMatches.map((row) => (
-                              <li
-                                key={row.id}
-                                className={`rounded-lg border px-2 py-1.5 text-[9px] ${
-                                  row.low
-                                    ? 'border-amber-200 bg-white/80'
-                                    : 'border-slate-200 bg-white'
-                                }`}
-                              >
-                                <span className="font-bold text-[#134e4a] tabular-nums">{row.id}</span>
-                                <span className="text-slate-400"> · </span>
-                                <span className="font-semibold text-slate-800">{row.colour}</span>
-                                <span className="text-slate-400"> · </span>
-                                <span className="tabular-nums text-slate-700">{row.gaugeLabel}</span>
-                                <span className="block text-slate-500 mt-0.5 truncate" title={row.materialType}>
-                                  {row.materialType}
-                                </span>
-                                <span className="tabular-nums text-slate-600">
-                                  {row.kgDisplay}
-                                  {row.estMeters != null ? ` · ~${row.estMeters.toLocaleString()} m` : ''}
-                                </span>
-                                {row.loc ? (
-                                  <span className="block text-[8px] text-slate-400">Loc: {row.loc}</span>
-                                ) : null}
-                              </li>
-                            ))}
-                          </ul>
+                      <div className="space-y-2">
+                        <label className="block text-[9px] font-semibold text-slate-400 uppercase tracking-wide">Colour</label>
+                        <div className="relative">
+                          <select 
+                            value={stockColourFilter} 
+                            onChange={(e) => setStockColourFilter(e.target.value)}
+                            className="w-full appearance-none rounded-lg border border-slate-200 bg-slate-50 py-2 pl-3 pr-8 text-xs font-semibold text-[#134e4a] outline-none"
+                          >
+                            <option value="">Any</option>
+                            {stockSearchOptions.colours.map(c => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                          <ChevronDown size={14} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
                         </div>
-                      ) : null}
+                      </div>
                     </div>
-                  ) : null}
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setStockMatType('');
-                      setStockGaugeFilter('');
-                      setStockColourFilter('');
-                    }}
-                    className="w-full rounded-lg border border-slate-200 py-2 text-[9px] font-semibold uppercase tracking-wide text-slate-600 hover:bg-slate-50"
-                  >
-                    Clear filters
-                  </button>
-                </>
-              )}
-            </div>
-          </section>
-            </>
-          ) : (
-            <section className="rounded-xl border border-dashed border-slate-200 bg-slate-50/40 p-5">
-              <p className="text-[10px] font-medium text-slate-500 leading-relaxed">
-                <span className="font-semibold text-[#134e4a]">Spot prices</span> and{' '}
-                <span className="font-semibold text-[#134e4a]">stock check</span> are on the{' '}
-                <strong>Quotations</strong> tab. <span className="font-semibold text-emerald-700">Receipts</span> tools
-                (transactions & advances) are on the <strong>Receipts</strong> tab.
-              </p>
-            </section>
-          )}
+                    {stockSearchActive && stockVerdict && (
+                      <div className={`p-3 rounded-lg border ${stockVerdict.kind === 'ok' ? 'bg-emerald-50 border-emerald-100' : 'bg-amber-50 border-amber-100'}`}>
+                        <p className="text-xs font-bold text-slate-900">{stockVerdict.title}</p>
+                        <p className="text-[10px] text-slate-600 mt-1">{stockVerdict.detail}</p>
+                      </div>
+                    )}
+
+                    <button 
+                      onClick={() => { setStockMatType(''); setStockGaugeFilter(''); setStockColourFilter(''); }}
+                      className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all"
+                    >
+                      Clear filters
+                    </button>
+                  </div>
+                </section>
+              </>
+            ) : activeTab === 'receipts' ? (
+              <ReceiptsAdvancesPanel 
+                className="!h-auto !min-h-0 shadow-sm"
+                ledgerNonce={ledgerNonce}
+                onSelectAdvance={setAdvanceViewEntry}
+                onLinkAdvance={setLinkAdvanceEntry}
+              />
+            ) : (
+              <section className="rounded-xl border border-dashed border-slate-200 bg-slate-50/40 p-5">
+                <p className="text-[10px] font-medium text-slate-500 leading-relaxed">
+                  <span className="font-semibold text-[#134e4a]">Spot prices</span> and stock check are on the <strong>Quotations</strong> tab.
+                </p>
+              </section>
+            )}
           </aside>
         )}
 
         <div
           className={
-            activeTab === 'receipts' ? 'min-w-0 min-h-[min(520px,72vh)] flex flex-col' : 'lg:col-span-3 min-w-0'
+            'lg:col-span-3 min-w-0'
           }
         >
           <MainPanel
             className={`!rounded-xl !border-slate-200/90 !shadow-sm !bg-white !backdrop-blur-none border !border-solid !p-0 overflow-hidden ${
               activeTab === 'receipts'
-                ? 'min-h-[min(520px,72vh)] flex-1 min-h-0'
+                ? 'min-h-[min(520px,72vh)]'
                 : 'min-h-[min(480px,72vh)] sm:min-h-[560px]'
             }`}
           >
             <div className="h-1 bg-[#134e4a]" aria-hidden />
             <div className="p-5 sm:p-6 md:p-8">
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between mb-6">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between mb-4">
                 <div className="shrink-0">
-                  <h2 className="text-xs font-semibold uppercase tracking-widest text-slate-700">
+                  <h2 className="text-[10px] font-bold uppercase tracking-widest text-[#134e4a]">
                     {TAB_LABELS[activeTab] ?? 'Records'}
                   </h2>
-                  <p className="text-[10px] font-medium text-slate-500 mt-1 tabular-nums">
+                  <p className="text-[9px] font-semibold text-slate-400 mt-1 tabular-nums">
                     {activeTab === 'quotations' && (
                       <>
                         {listStats.quotations.shown} showing
@@ -1080,365 +1091,332 @@ const Sales = () => {
                     )}
                   </p>
                 </div>
-                <div className="relative flex-1 w-full sm:max-w-md min-w-0">
-                  <Search
-                    className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
-                    size={16}
-                    strokeWidth={2}
-                  />
-                  <input
-                    type="search"
-                    placeholder={
-                      activeTab === 'customers'
-                        ? 'Search name, phone, ID, tier…'
-                        : 'Search ID, customer, date…'
-                    }
-                    className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2.5 pl-10 pr-4 text-sm text-slate-800 outline-none transition-all placeholder:text-slate-400 focus:border-[#134e4a]/35 focus:ring-2 focus:ring-[#134e4a]/10"
-                    autoComplete="off"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                  />
-                </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2 mb-5">
-                {activeTab === 'quotations' ? (
-                  <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
-                    <Plus size={16} strokeWidth={2} /> New quotation
-                  </button>
-                ) : null}
-                {activeTab === 'receipts' ? (
-                  <>
-                    <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
-                      <Plus size={16} strokeWidth={2} /> New receipt
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowAdvanceModal(true)}
-                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-amber-200 bg-amber-50 text-amber-950 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider shadow-sm hover:bg-amber-100 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/40 focus-visible:ring-offset-2 shrink-0"
-                      title="Payment before quotation — customer deposit / liability"
-                    >
-                      <Wallet size={16} strokeWidth={2} /> Advance payment
-                    </button>
-                  </>
-                ) : null}
-                {activeTab === 'cuttinglist' ? (
-                  <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
-                    <Plus size={16} strokeWidth={2} /> New cutting list
-                  </button>
-                ) : null}
-                {activeTab === 'refund' ? (
-                  <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
-                    <Plus size={16} strokeWidth={2} /> New refund
-                  </button>
-                ) : null}
-                {activeTab === 'customers' ? (
-                  <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
-                    <Plus size={16} strokeWidth={2} /> Add customer
-                  </button>
-                ) : null}
-              </div>
-
-              <div className="space-y-3">
+              <div className="space-y-2">
                 {activeTab === 'quotations' ? (
                   <>
-                    <div className={TABLE_HEAD}>
-                      <div className="col-span-2">ID</div>
-                      <div className="col-span-2">Customer</div>
-                      <div className="col-span-2">Date</div>
-                      <div className="col-span-2 text-right tabular-nums">Quote total</div>
-                      <div className="col-span-4">Approval & payment</div>
-                    </div>
                     {filteredQuotations.length === 0 ? (
-                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/50 py-14 px-6 text-center">
+                      <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/50 py-14 px-6 text-center">
                         <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">
                           No quotations match your search
                         </p>
                       </div>
                     ) : (
-                      filteredQuotations.map((q) => {
-                        const paid = q.paidNgn ?? 0;
-                        const totalN = q.totalNgn ?? 0;
-                        const balance = Math.max(0, totalN - paid);
-                        const payClass =
-                          q.paymentStatus === 'Paid'
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : q.paymentStatus === 'Partial'
-                              ? 'bg-amber-100 text-amber-800'
-                              : 'bg-slate-100 text-slate-600';
-                        return (
-                          <div key={q.id} className={ROW_SHELL}>
-                            <div className="col-span-12 sm:col-span-2 text-xs font-bold text-[#134e4a] tabular-nums">
-                              {q.id}
-                            </div>
-                            <div className="col-span-12 sm:col-span-2 text-sm font-semibold text-slate-800">
-                              {q.customer}
-                            </div>
-                            <div className="col-span-12 sm:col-span-2 text-xs text-slate-500 flex items-center gap-1 tabular-nums">
-                              <Clock size={12} className="shrink-0 opacity-60" /> {q.date}
-                            </div>
-                            <div className="col-span-12 sm:col-span-2 text-right text-sm font-bold text-[#134e4a] tabular-nums">
-                              {q.total}
-                            </div>
-                            <div className="col-span-12 sm:col-span-4 flex flex-wrap items-center justify-between gap-3">
-                              <div className="flex flex-col gap-1.5 min-w-0">
-                                <div className="flex flex-wrap gap-1.5">
-                                  <span
-                                    className={`${PILL} ${
-                                      q.status === 'Approved'
-                                        ? 'bg-emerald-100 text-emerald-800'
-                                        : 'bg-amber-100 text-amber-800'
-                                    }`}
+                      <ul className="space-y-1.5">
+                        {filteredQuotations.map((q) => {
+                          const paid = q.paidNgn ?? 0;
+                          const totalN = q.totalNgn ?? 0;
+                          const balance = Math.max(0, totalN - paid);
+                          const meta2 = [
+                            q.date,
+                            `Paid ${formatNgn(paid)}`,
+                            `Bal ${formatNgn(balance)}`,
+                            `Tot ${formatNgn(totalN)}`,
+                          ].join(' · ');
+                          return (
+                            <li key={q.id} className={CARD_ROW}>
+                              <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
+                                <div className="min-w-0 flex-1 leading-tight">
+                                  <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 min-w-0">
+                                    <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
+                                      <span className="tabular-nums font-mono">{q.id}</span>
+                                      <span className="font-medium text-slate-600"> · {q.customer}</span>
+                                    </p>
+                                    <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                                      <span className="text-[11px] font-black text-[#134e4a] tabular-nums">
+                                        {q.total}
+                                      </span>
+                                      <span className={`${CHIP} ${quoteApprovalChipBorder(q.status)}`}>
+                                        {q.status}
+                                      </span>
+                                      <span className={`${CHIP} ${quotePayChipBorder(q.paymentStatus)}`}>
+                                        {q.paymentStatus}
+                                      </span>
+                                      <SalesRowMenu
+                                        rowKey={`q-${q.id}`}
+                                        openKey={actionMenuKey}
+                                        setOpenKey={setActionMenuKey}
+                                        onView={() => {
+                                          setSelectedItem(q);
+                                          setQuotationAccessMode('view');
+                                          setShowQuotationModal(true);
+                                        }}
+                                        onEdit={() => {
+                                          setSelectedItem(q);
+                                          setQuotationAccessMode('edit');
+                                          setShowQuotationModal(true);
+                                        }}
+                                        editDisabled={!canEditQuotation(q, salesRole)}
+                                        editTitle={quotationEditBlockedReason(q, salesRole) ?? ''}
+                                        onAddReceipt={() => {
+                                          setSelectedItem(q);
+                                          setReceiptAccessMode('edit');
+                                          setShowReceiptModal(true);
+                                        }}
+                                        onReviewAudit={
+                                          ws?.hasPermission?.('manager.audit') ||
+                                          ['admin', 'md', 'ceo'].includes(ws?.session?.user?.roleKey)
+                                            ? () => {
+                                                navigate(`/manager?quoteRef=${encodeURIComponent(q.id)}`);
+                                              }
+                                            : undefined
+                                        }
+                                      />
+                                    </div>
+                                  </div>
+                                  <p
+                                    className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2 tabular-nums"
+                                    title={meta2}
                                   >
-                                    {q.status}
-                                  </span>
-                                  <span className={`${PILL} ${payClass}`}>{q.paymentStatus}</span>
+                                    {meta2}
+                                  </p>
                                 </div>
-                                <p className="text-[10px] font-semibold text-slate-500 leading-tight tabular-nums">
-                                  Paid {formatNgn(paid)} · Balance {formatNgn(balance)} · Total{' '}
-                                  {formatNgn(totalN)}
-                                </p>
                               </div>
-                              <SalesRowMenu
-                                rowKey={`q-${q.id}`}
-                                openKey={actionMenuKey}
-                                setOpenKey={setActionMenuKey}
-                                onView={() => {
-                                  setSelectedItem(q);
-                                  setQuotationAccessMode('view');
-                                  setShowQuotationModal(true);
-                                }}
-                                onEdit={() => {
-                                  setSelectedItem(q);
-                                  setQuotationAccessMode('edit');
-                                  setShowQuotationModal(true);
-                                }}
-                                editDisabled={!canEditQuotation(q, salesRole)}
-                                editTitle={quotationEditBlockedReason(q, salesRole) ?? ''}
-                              />
-                            </div>
-                          </div>
-                        );
-                      })
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    {quotations.length > showCount && (
+                      <div className="flex justify-center mt-6">
+                        <button
+                          type="button"
+                          onClick={() => setShowCount((c) => c + 20)}
+                          className="px-6 py-2 rounded-lg border border-slate-200 text-[10px] font-bold uppercase tracking-widest text-[#134e4a] hover:bg-slate-50 transition-colors"
+                        >
+                          Show more quotations
+                        </button>
+                      </div>
                     )}
                   </>
                 ) : null}
 
                 {activeTab === 'receipts' ? (
                   <>
-                    <div className={TABLE_HEAD}>
-                      <div className="col-span-1">Source</div>
-                      <div className="col-span-2">ID</div>
-                      <div className="col-span-2">Customer</div>
-                      <div className="col-span-2">Quotation</div>
-                      <div className="col-span-2">Date</div>
-                      <div className="col-span-2 text-right tabular-nums">Amount</div>
-                      <div className="col-span-1 text-center"> </div>
-                    </div>
                     {filteredMergedReceipts.length === 0 ? (
-                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/50 py-14 px-6 text-center">
+                      <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/50 py-14 px-6 text-center">
                         <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">
                           No receipts match your search
                         </p>
                       </div>
                     ) : (
-                      filteredMergedReceipts.map((r) => (
-                        <div key={r.id} className={`${ROW_SHELL} cursor-default`}>
-                          <div className="col-span-1">
-                            <span
-                              className={`${PILL} whitespace-nowrap ${
-                                r.source === 'ledger'
-                                  ? 'bg-emerald-100 text-emerald-900'
-                                  : 'bg-slate-100 text-slate-600'
-                              }`}
-                              title={r._subLabel || ''}
-                            >
-                              {r.source === 'ledger' ? 'Ledger' : 'Sample'}
-                            </span>
-                          </div>
-                          <div className="col-span-2 text-xs font-bold text-[#134e4a] tabular-nums">{r.id}</div>
-                          <div className="col-span-2 min-w-0">
-                            <p className="text-sm font-semibold text-slate-800 truncate">{r.customer}</p>
-                            {r._payBadge ? (
-                              <p
-                                className="text-[9px] font-medium text-slate-500 mt-0.5 line-clamp-2 leading-tight"
-                                title={r._payBadge}
-                              >
-                                {r._payBadge}
-                              </p>
-                            ) : null}
-                          </div>
-                          <div className="col-span-2 text-xs font-semibold text-slate-600 tabular-nums">
-                            {r.quotationRef}
-                          </div>
-                          <div className="col-span-2 text-xs text-slate-500 flex items-center gap-1 tabular-nums">
-                            <Clock size={12} className="shrink-0 opacity-60" /> {r.date}
-                          </div>
-                          <div className="col-span-2 text-right text-sm font-bold text-[#134e4a] tabular-nums">
-                            {r.amount}
-                          </div>
-                          <div className="col-span-1 flex justify-center items-center gap-1">
-                            <SalesRowMenu
-                              rowKey={`rc-${r.id}`}
-                              openKey={actionMenuKey}
-                              setOpenKey={setActionMenuKey}
-                              onView={() => {
-                                setSelectedItem(r);
-                                setReceiptAccessMode('view');
-                                setShowReceiptModal(true);
-                              }}
-                              onEdit={() => {
-                                setSelectedItem(r);
-                                setReceiptAccessMode('edit');
-                                setShowReceiptModal(true);
-                              }}
-                              editDisabled={!canEditReceipt(r, salesRole)}
-                              editTitle={receiptEditBlockedReason(r, salesRole) ?? ''}
-                            />
-                          </div>
-                        </div>
-                      ))
+                      <ul className="space-y-1.5">
+                        {filteredMergedReceipts.map((r) => {
+                          const meta2 = [r.quotationRef, r.date, r._payBadge].filter(Boolean).join(' · ');
+                          return (
+                            <li key={r.id} className={CARD_ROW}>
+                              <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
+                                <div className="min-w-0 flex-1 leading-tight">
+                                  <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 min-w-0">
+                                    <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                                      <span
+                                        className={`${CHIP} whitespace-nowrap ${receiptSourceChipBorder(r.source)}`}
+                                        title={r._subLabel || ''}
+                                      >
+                                        {r.source === 'ledger' ? 'Ledger' : 'Imported'}
+                                      </span>
+                                      <p className="text-[11px] font-bold text-[#134e4a] tabular-nums shrink-0">
+                                        {r.id}
+                                      </p>
+                                      <p className="text-[11px] font-medium text-slate-600 truncate min-w-0">
+                                        · {r.customer}
+                                      </p>
+                                    </div>
+                                    <div className="flex items-center gap-1.5 shrink-0">
+                                      <span className="text-[11px] font-black text-[#134e4a] tabular-nums">
+                                        {r.amount}
+                                      </span>
+                                      <SalesRowMenu
+                                        rowKey={`rc-${r.id}`}
+                                        openKey={actionMenuKey}
+                                        setOpenKey={setActionMenuKey}
+                                        onView={() => {
+                                          setSelectedItem(r);
+                                          setReceiptAccessMode('view');
+                                          setShowReceiptModal(true);
+                                        }}
+                                        onEdit={() => {
+                                          setSelectedItem(r);
+                                          setReceiptAccessMode('edit');
+                                          setShowReceiptModal(true);
+                                        }}
+                                        editDisabled={!canEditReceipt(r, salesRole)}
+                                        editTitle={receiptEditBlockedReason(r, salesRole) ?? ''}
+                                      />
+                                    </div>
+                                  </div>
+                                  {meta2 ? (
+                                    <p
+                                      className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2"
+                                      title={meta2}
+                                    >
+                                      {meta2}
+                                    </p>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    {(activeTab === 'receipts' ? mergedReceiptRows.length : 0) > showCount && (
+                      <div className="flex justify-center mt-6">
+                        <button
+                          type="button"
+                          onClick={() => setShowCount((c) => c + 20)}
+                          className="px-6 py-2 rounded-lg border border-slate-200 text-[10px] font-bold uppercase tracking-widest text-[#134e4a] hover:bg-slate-50 transition-colors"
+                        >
+                          Show more receipts
+                        </button>
+                      </div>
                     )}
                   </>
                 ) : null}
 
                 {activeTab === 'cuttinglist' ? (
                   <>
-                    <div className={TABLE_HEAD}>
-                      <div className="col-span-2">ID</div>
-                      <div className="col-span-4">Customer</div>
-                      <div className="col-span-2">Date</div>
-                      <div className="col-span-2 text-right tabular-nums">Length</div>
-                      <div className="col-span-2 text-center">Status</div>
-                    </div>
                     {filteredCuttingLists.length === 0 ? (
-                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/50 py-14 px-6 text-center">
+                      <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/50 py-14 px-6 text-center">
                         <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">
                           No cutting lists match your search
                         </p>
                       </div>
                     ) : (
-                      filteredCuttingLists.map((c) => (
-                        <div key={c.id} className={`${ROW_SHELL} cursor-default`}>
-                          <div className="col-span-2 text-xs font-bold text-[#134e4a] tabular-nums">{c.id}</div>
-                          <div className="col-span-4 text-sm font-semibold text-slate-800">{c.customer}</div>
-                          <div className="col-span-2 text-xs text-slate-500 flex items-center gap-1 tabular-nums">
-                            <Clock size={12} className="shrink-0 opacity-60" /> {c.date}
-                          </div>
-                          <div className="col-span-2 text-right text-sm font-bold text-[#134e4a] tabular-nums">
-                            {c.total}
-                          </div>
-                          <div className="col-span-2 flex justify-center items-center gap-3">
-                            <span className={`${PILL} bg-sky-100 text-sky-800`}>{c.status}</span>
-                            <SalesRowMenu
-                              rowKey={`cl-${c.id}`}
-                              openKey={actionMenuKey}
-                              setOpenKey={setActionMenuKey}
-                              onView={() => {
-                                setSelectedItem(c);
-                                setCuttingAccessMode('view');
-                                setShowCuttingModal(true);
-                              }}
-                              onEdit={() => {
-                                setSelectedItem(c);
-                                setCuttingAccessMode('edit');
-                                setShowCuttingModal(true);
-                              }}
-                              editDisabled={!canEditCuttingList(c)}
-                              editTitle={cuttingListEditBlockedReason(c) ?? ''}
-                            />
-                          </div>
-                        </div>
-                      ))
+                      <ul className="space-y-1.5">
+                        {filteredCuttingLists.map((c) => (
+                          <li key={c.id} className={CARD_ROW}>
+                            <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
+                              <div className="min-w-0 flex-1 leading-tight">
+                                <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 min-w-0">
+                                  <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
+                                    <span className="tabular-nums font-mono">{c.id}</span>
+                                    <span className="font-medium text-slate-600"> · {c.customer}</span>
+                                  </p>
+                                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                                    <span className="text-[11px] font-black text-[#134e4a] tabular-nums">
+                                      {c.total}
+                                    </span>
+                                    <span className={`${CHIP} border-sky-200 bg-sky-50 text-sky-800`}>
+                                      {c.status}
+                                    </span>
+                                    <SalesRowMenu
+                                      rowKey={`cl-${c.id}`}
+                                      openKey={actionMenuKey}
+                                      setOpenKey={setActionMenuKey}
+                                      onView={() => {
+                                        setSelectedItem(c);
+                                        setCuttingAccessMode('view');
+                                        setShowCuttingModal(true);
+                                      }}
+                                      onEdit={() => {
+                                        setSelectedItem(c);
+                                        setCuttingAccessMode('edit');
+                                        setShowCuttingModal(true);
+                                      }}
+                                      editDisabled={!canEditCuttingList(c)}
+                                      editTitle={cuttingListEditBlockedReason(c) ?? ''}
+                                    />
+                                  </div>
+                                </div>
+                                <p className="text-[8px] text-slate-500 mt-0.5 tabular-nums">{c.date}</p>
+                              </div>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {cuttingLists.length > showCount && (
+                      <div className="flex justify-center mt-6">
+                        <button
+                          type="button"
+                          onClick={() => setShowCount((c) => c + 20)}
+                          className="px-6 py-2 rounded-lg border border-slate-200 text-[10px] font-bold uppercase tracking-widest text-[#134e4a] hover:bg-slate-50 transition-colors"
+                        >
+                          Show more cutting lists
+                        </button>
+                      </div>
                     )}
                   </>
                 ) : null}
 
                 {activeTab === 'refund' ? (
                   <>
-                    <div className={TABLE_HEAD}>
-                      <div className="col-span-2">Refund ID</div>
-                      <div className="col-span-2">Customer</div>
-                      <div className="col-span-2">Quotation</div>
-                      <div className="col-span-2 text-right tabular-nums">Amount</div>
-                      <div className="col-span-3">Status</div>
-                      <div className="col-span-1 text-right"> </div>
-                    </div>
                     {filteredRefunds.length === 0 ? (
-                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/50 py-14 px-6 text-center">
+                      <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/50 py-14 px-6 text-center">
                         <RotateCcw size={40} className="mx-auto text-slate-200 mb-3" strokeWidth={1.5} />
                         <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">
                           No refunds match your search
                         </p>
                       </div>
                     ) : (
-                      filteredRefunds.map((r) => {
-                        const approvedAmountNgn = refundApprovedAmount(r);
-                        const paidAmountNgn = Number(r.paidAmountNgn) || 0;
-                        const outstandingAmountNgn = refundOutstandingAmount(r);
-                        return (
-                          <div key={r.refundID} className={`${ROW_SHELL} gap-y-2`}>
-                            <div className="col-span-12 sm:col-span-2 text-xs font-bold text-[#134e4a] tabular-nums">
-                              {r.refundID}
-                            </div>
-                            <div className="col-span-12 sm:col-span-2 text-sm font-semibold text-slate-800">
-                              {r.customer}
-                            </div>
-                            <div className="col-span-12 sm:col-span-2 text-xs font-semibold text-slate-600 tabular-nums">
-                              {r.quotationRef || '—'}
-                            </div>
-                            <div className="col-span-12 sm:col-span-2 text-right text-sm font-bold text-[#134e4a] tabular-nums">
-                              {formatNgn(r.amountNgn)}
-                            </div>
-                            <div className="col-span-12 sm:col-span-3 flex flex-wrap items-center gap-2">
-                              <span
-                                className={`${PILL} ${
-                                  r.status === 'Paid'
-                                    ? 'bg-sky-100 text-sky-900'
-                                    : r.status === 'Approved'
-                                      ? 'bg-emerald-100 text-emerald-800'
-                                      : r.status === 'Rejected'
-                                        ? 'bg-rose-100 text-rose-800'
-                                        : 'bg-amber-100 text-amber-800'
-                                }`}
-                              >
-                                {r.status}
-                              </span>
-                              {r.approvalDate ? (
-                                <span className="text-[10px] font-semibold text-slate-400 tabular-nums">
-                                  {r.approvalDate}
-                                </span>
-                              ) : null}
-                              {approvedAmountNgn > 0 ? (
-                                <span className="text-[10px] font-semibold text-slate-500 tabular-nums">
-                                  Approved {formatNgn(approvedAmountNgn)}
-                                </span>
-                              ) : null}
-                              {paidAmountNgn > 0 ? (
-                                <span className="text-[10px] font-semibold text-slate-500 tabular-nums">
-                                  Paid {formatNgn(paidAmountNgn)}
-                                </span>
-                              ) : null}
-                              {r.status === 'Approved' && outstandingAmountNgn > 0 ? (
-                                <span className="text-[10px] font-semibold text-amber-700 tabular-nums">
-                                  Balance {formatNgn(outstandingAmountNgn)}
-                                </span>
-                              ) : null}
-                            </div>
-                            <div className="col-span-12 sm:col-span-1 flex sm:justify-end">
-                              <SalesRowMenu
-                                rowKey={`rf-${r.refundID}`}
-                                openKey={actionMenuKey}
-                                setOpenKey={setActionMenuKey}
-                                onView={() => openRefundViewOnly(r)}
-                                onEdit={() => openRefundModal(r)}
-                                editDisabled={false}
-                                editTitle=""
-                              />
-                            </div>
-                          </div>
-                        );
-                      })
+                      <ul className="space-y-1.5">
+                        {filteredRefunds.map((r) => {
+                          const approvedAmountNgn = refundApprovedAmount(r);
+                          const paidAmountNgn = Number(r.paidAmountNgn) || 0;
+                          const outstandingAmountNgn = refundOutstandingAmount(r);
+                          const meta2 = [
+                            r.quotationRef || '—',
+                            r.approvalDate,
+                            approvedAmountNgn > 0 ? `Apvd ${formatNgn(approvedAmountNgn)}` : null,
+                            paidAmountNgn > 0 ? `Paid ${formatNgn(paidAmountNgn)}` : null,
+                            r.status === 'Approved' && outstandingAmountNgn > 0
+                              ? `Bal ${formatNgn(outstandingAmountNgn)}`
+                              : null,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ');
+                          return (
+                            <li key={r.refundID} className={CARD_ROW}>
+                              <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
+                                <div className="min-w-0 flex-1 leading-tight">
+                                  <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 min-w-0">
+                                    <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
+                                      <span className="font-mono tabular-nums">{r.refundID}</span>
+                                      <span className="font-medium text-slate-600"> · {r.customer}</span>
+                                    </p>
+                                    <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                                      <span className="text-[11px] font-black text-[#134e4a] tabular-nums">
+                                        {formatNgn(r.amountNgn)}
+                                      </span>
+                                      <span className={`${CHIP} ${refundStatusChipBorder(r.status)}`}>
+                                        {r.status}
+                                      </span>
+                                      <SalesRowMenu
+                                        rowKey={`rf-${r.refundID}`}
+                                        openKey={actionMenuKey}
+                                        setOpenKey={setActionMenuKey}
+                                        onView={() => openRefundViewOnly(r)}
+                                        onEdit={() => openRefundModal(r)}
+                                        editDisabled={false}
+                                        editTitle=""
+                                      />
+                                    </div>
+                                  </div>
+                                  <p
+                                    className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2 tabular-nums"
+                                    title={meta2}
+                                  >
+                                    {meta2}
+                                  </p>
+                                </div>
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    {refunds.length > showCount && (
+                      <div className="flex justify-center mt-6">
+                        <button
+                          type="button"
+                          onClick={() => setShowCount((c) => c + 20)}
+                          className="px-6 py-2 rounded-lg border border-slate-200 text-[10px] font-bold uppercase tracking-widest text-[#134e4a] hover:bg-slate-50 transition-colors"
+                        >
+                          Show more refunds
+                        </button>
+                      </div>
                     )}
                   </>
                 ) : null}
@@ -1450,9 +1428,8 @@ const Sales = () => {
                     onAddClose={() => setCustomerAddOpen(false)}
                     createdByLabel={salesRoleLabel}
                     quotations={quotations}
-                    receipts={receipts}
+                    receipts={importedReceipts}
                     cuttingLists={cuttingLists}
-                    liveMode={Boolean(ws?.hasWorkspaceData)}
                   />
                 ) : null}
               </div>
@@ -1479,7 +1456,7 @@ const Sales = () => {
         accessMode={receiptAccessMode}
         onClose={() => setShowReceiptModal(false)}
         quotations={quotations}
-        mockReceiptsForHistory={receipts}
+        importedReceiptsForHistory={importedReceipts}
         ledgerNonce={ledgerSyncKey}
         onLedgerChange={onLedgerSynced}
         useLedgerApi={Boolean(ws?.canMutate)}
@@ -1601,7 +1578,7 @@ const Sales = () => {
         accessMode={cuttingAccessMode}
         onClose={() => setShowCuttingModal(false)}
         quotations={quotations}
-        receipts={receipts}
+        receipts={importedReceipts}
         cuttingLists={cuttingLists}
         onPersist={persistCuttingList}
         onCuttingListUpdated={(cl) => setSelectedItem(cl)}
@@ -1617,9 +1594,9 @@ const Sales = () => {
         requesterLabel={salesRoleLabel}
         approverLabel={salesRoleLabel}
         quotations={quotations}
-        receipts={receipts}
+        receipts={importedReceipts}
         cuttingLists={cuttingLists}
-        availableStock={ws?.snapshot?.salesAvailableStock ?? SALES_MOCK.availableStock}
+        availableStock={ws?.snapshot?.salesAvailableStock ?? []}
       />
     </PageShell>
   );

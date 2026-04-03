@@ -2,10 +2,12 @@
  * Maps the 20 end-to-end transactional scenarios (customer → quote → payment → stock → finance)
  * to automated API checks. Each scenario is one test for clear failure attribution.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import request from 'supertest';
 import { createDatabase } from './db.js';
 import { createApp } from './app.js';
+
+const openDbs = [];
 
 async function loginAs(agent, username = 'admin', password = 'Admin@123') {
   const res = await agent.post('/api/session/login').send({ username, password });
@@ -14,7 +16,9 @@ async function loginAs(agent, username = 'admin', password = 'Admin@123') {
 }
 
 async function adminSession() {
-  const app = createApp(createDatabase(':memory:'));
+  const db = createDatabase(':memory:');
+  openDbs.push(db);
+  const app = createApp(db);
   const agent = request.agent(app);
   await loginAs(agent);
   return { app, agent };
@@ -27,8 +31,14 @@ function amountDueFor(summary, quotationId) {
 }
 
 describe('Transactional scenarios (business checklist)', () => {
+  afterAll(() => {
+    for (const db of openDbs) db.close();
+    openDbs.length = 0;
+  });
+
   it(
     '1. Customer creation — persisted profile usable for quotations',
+    { timeout: 25_000 },
     async () => {
       const { agent } = await adminSession();
       const create = await agent.post('/api/customers').send({
@@ -58,12 +68,12 @@ describe('Transactional scenarios (business checklist)', () => {
       });
       expect(quote.status).toBe(201);
       expect(quote.body.quotation.customerID).toBe('CUS-TX-01');
-    },
-    25_000
+    }
   );
 
   it(
     '2. Quotation for new customer — totals, Pending, generated id',
+    { timeout: 25_000 },
     async () => {
       const { agent } = await adminSession();
       await agent.post('/api/customers').send({
@@ -96,12 +106,12 @@ describe('Transactional scenarios (business checklist)', () => {
       const boot = await agent.get('/api/bootstrap');
       const row = boot.body.quotations.find((q) => q.id === res.body.quotationId);
       expect(row?.status).toBe('Pending');
-    },
-    25_000
+    }
   );
 
   it(
     '3. Full payment against quotation — ledger balance and receipt',
+    { timeout: 25_000 },
     async () => {
       const { agent } = await adminSession();
       const boot = await agent.get('/api/bootstrap');
@@ -146,12 +156,12 @@ describe('Transactional scenarios (business checklist)', () => {
       const receipt = after.body.receipts.find((r) => r.quotationRef === qid);
       expect(receipt).toBeTruthy();
       expect(Number(receipt.amountNgn)).toBe(total);
-    },
-    25_000
+    }
   );
 
   it(
     '4. Partial payment — outstanding balance and receipt method',
+    { timeout: 25_000 },
     async () => {
       const { agent } = await adminSession();
       const boot = await agent.get('/api/bootstrap');
@@ -193,12 +203,12 @@ describe('Transactional scenarios (business checklist)', () => {
       const snap = await agent.get('/api/bootstrap');
       const qRow = snap.body.quotations.find((q) => q.id === qid);
       expect(qRow?.totalNgn).toBe(total);
-    },
-    25_000
+    }
   );
 
   it(
     '5. Quotation approval — status Approved and coil stock reserved for production',
+    { timeout: 45_000 },
     async () => {
       const { agent } = await adminSession();
       const snap = await agent.get('/api/bootstrap');
@@ -311,12 +321,12 @@ describe('Transactional scenarios (business checklist)', () => {
       const after = await agent.get('/api/bootstrap');
       const coil = after.body.coilLots.find((c) => c.coilNo === coilNo);
       expect(coil?.qtyReserved).toBeGreaterThan(0);
-    },
-    45_000
+    }
   );
 
   it(
     '6. GRN — coil number, weight/qty, stock up, linked PO',
+    { timeout: 30_000 },
     async () => {
       const { agent } = await adminSession();
       const snap = await agent.get('/api/bootstrap');
@@ -362,12 +372,12 @@ describe('Transactional scenarios (business checklist)', () => {
       const p2 = after.body.products.find((x) => x.productID === product.productID);
       expect(p2.stockLevel).toBe(before + 3500);
       expect(after.body.coilLots.some((c) => c.coilNo === coilNo && c.poID === po.body.poID)).toBe(true);
-    },
-    30_000
+    }
   );
 
   it(
     '7. Store → production transfer — store down, WIP up',
+    { timeout: 25_000 },
     async () => {
       const { agent } = await adminSession();
       const snap = await agent.get('/api/bootstrap');
@@ -385,12 +395,12 @@ describe('Transactional scenarios (business checklist)', () => {
       expect(after.body.wipByProduct['COIL-ALU']).toBe(
         (snap.body.wipByProduct['COIL-ALU'] || 0) + 250
       );
-    },
-    25_000
+    }
   );
 
   it(
     '8. Finished goods to store — FG stock increases, WIP consumed',
+    { timeout: 25_000 },
     async () => {
       const { agent } = await adminSession();
       await agent.post('/api/inventory/transfer-to-production').send({
@@ -415,12 +425,12 @@ describe('Transactional scenarios (business checklist)', () => {
       expect(after.body.movements.some((m) => m.type === 'FINISHED_GOODS' && m.productID === 'FG-101')).toBe(
         true
       );
-    },
-    25_000
+    }
   );
 
   it(
     '9. Stock adjustment (damage) — quantity down, movement logged',
+    { timeout: 25_000 },
     async () => {
       const { agent } = await adminSession();
       const snap = await agent.get('/api/bootstrap');
@@ -441,12 +451,12 @@ describe('Transactional scenarios (business checklist)', () => {
         (m) => m.type === 'ADJUSTMENT' && m.productID === 'PRD-201' && String(m.detail).includes('Damage')
       );
       expect(mv).toBeTruthy();
-    },
-    25_000
+    }
   );
 
   it(
     '10. Customer refund — overpayment / advance reduced after treasury payout',
+    { timeout: 25_000 },
     async () => {
       const { app } = await adminSession();
       const admin = request.agent(app);
@@ -485,12 +495,12 @@ describe('Transactional scenarios (business checklist)', () => {
       expect(refund.status).toBe(201);
       const after = await finance.get('/api/customers/CUS-TX-10/summary');
       expect(after.body.advanceNgn).toBe(before.body.advanceNgn - 25_000);
-    },
-    25_000
+    }
   );
 
   it(
     '11. Cancelled order — refund matches paid quotation total',
+    { timeout: 35_000 },
     async () => {
       const { app } = await adminSession();
       const admin = request.agent(app);
@@ -563,12 +573,12 @@ describe('Transactional scenarios (business checklist)', () => {
       const row = end.body.refunds.find((r) => r.refundID === created.body.refundID);
       expect(row.status).toBe('Paid');
       expect(row.paidAmountNgn).toBe(total);
-    },
-    35_000
+    }
   );
 
   it(
     '12. New purchase order — Pending and supplier link',
+    { timeout: 25_000 },
     async () => {
       const { agent } = await adminSession();
       const sup = await agent.post('/api/suppliers').send({ name: 'PO Test Vendor', city: 'Lagos' });
@@ -595,12 +605,12 @@ describe('Transactional scenarios (business checklist)', () => {
       const row = boot.body.purchaseOrders.find((p) => p.poID === po.body.poID);
       expect(row.status).toBe('Pending');
       expect(row.supplierID).toBe(sup.body.supplierID);
-    },
-    25_000
+    }
   );
 
   it(
     '13. Supplier / AP settlement — partial payment updates payable balance',
+    { timeout: 25_000 },
     async () => {
       const { agent } = await adminSession();
       const boot = await agent.get('/api/bootstrap');
@@ -620,12 +630,12 @@ describe('Transactional scenarios (business checklist)', () => {
       const ap2 = after.body.accountsPayable.find((a) => a.apID === 'AP-2026-002');
       expect(ap2.paidNgn).toBe(ap.paidNgn + pay.body.amountApplied);
       expect(ap2.amountNgn - ap2.paidNgn).toBe(outstandingBefore - pay.body.amountApplied);
-    },
-    25_000
+    }
   );
 
   it(
     '14. Product availability — bootstrap lists stock for customer-facing checks',
+    { timeout: 15_000 },
     async () => {
       const { agent } = await adminSession();
       const res = await agent.get('/api/bootstrap');
@@ -635,12 +645,12 @@ describe('Transactional scenarios (business checklist)', () => {
       expect(fg.stockLevel).toBeGreaterThan(0);
       expect(fg).toHaveProperty('lowStockThreshold');
       expect(fg).toHaveProperty('reorderQty');
-    },
-    15_000
+    }
   );
 
   it(
     '15. Inventory report data — snapshot includes products and stock movements',
+    { timeout: 25_000 },
     async () => {
       const { agent } = await adminSession();
       await agent.post('/api/inventory/adjust').send({
@@ -657,12 +667,12 @@ describe('Transactional scenarios (business checklist)', () => {
       expect(res.body.products.length).toBeGreaterThan(0);
       expect(Array.isArray(res.body.movements)).toBe(true);
       expect(res.body.movements.some((m) => m.type === 'ADJUSTMENT')).toBe(true);
-    },
-    25_000
+    }
   );
 
   it(
     '16. Sales report data — receipts and ledger align for the period',
+    { timeout: 25_000 },
     async () => {
       const { agent } = await adminSession();
       const boot = await agent.get('/api/bootstrap');
@@ -709,12 +719,12 @@ describe('Transactional scenarios (business checklist)', () => {
       expect(sumLedger).toBe(10_000);
       const summary = await agent.get('/api/customers/CUS-TX-16/summary');
       expect(amountDueFor(summary.body, qid)).toBe(quoteTotal - 10_000);
-    },
-    25_000
+    }
   );
 
   it(
     '17. Operational expense — recorded with treasury movement',
+    { timeout: 25_000 },
     async () => {
       const { agent } = await adminSession();
       const boot = await agent.get('/api/bootstrap');
@@ -724,7 +734,7 @@ describe('Transactional scenarios (business checklist)', () => {
         expenseType: 'Rent — March',
         amountNgn: 12_500,
         date: '2026-03-29',
-        category: 'Rent',
+        category: 'Operational — rent & utilities',
         paymentMethod: 'Transfer',
         treasuryAccountId,
         reference: 'TX17-RENT',
@@ -734,12 +744,12 @@ describe('Transactional scenarios (business checklist)', () => {
       expect(after.body.expenses.some((e) => e.reference === 'TX17-RENT')).toBe(true);
       const acc = after.body.treasuryAccounts.find((a) => a.id === treasuryAccountId);
       expect(acc.balance).toBe(balBefore - 12_500);
-    },
-    25_000
+    }
   );
 
   it(
     '18. Payment to supplier — PO supplier_paid increases',
+    { timeout: 25_000 },
     async () => {
       const { agent } = await adminSession();
       const sup = await agent.post('/api/suppliers').send({ name: 'Pay Vendor TX18', city: 'Kano' });
@@ -774,12 +784,12 @@ describe('Transactional scenarios (business checklist)', () => {
       const after = await agent.get('/api/bootstrap');
       const row = after.body.purchaseOrders.find((p) => p.poID === po.body.poID);
       expect(row.supplierPaidNgn).toBe(350_000);
-    },
-    25_000
+    }
   );
 
   it(
     '19. Reorder signal — product at or below threshold after adjustment',
+    { timeout: 25_000 },
     async () => {
       const { agent } = await adminSession();
       const boot = await agent.get('/api/bootstrap');
@@ -797,12 +807,12 @@ describe('Transactional scenarios (business checklist)', () => {
       const p2 = after.body.products.find((x) => x.productID === 'PRD-201');
       expect(p2.stockLevel).toBeLessThanOrEqual(p2.lowStockThreshold);
       expect(p2.reorderQty).toBeGreaterThan(0);
-    },
-    25_000
+    }
   );
 
   it(
     '20. Role-based access — operations can adjust stock; sales cannot',
+    { timeout: 25_000 },
     async () => {
       const { app } = await adminSession();
       const sales = request.agent(app);
@@ -832,7 +842,6 @@ describe('Transactional scenarios (business checklist)', () => {
       expect(ok.status).toBe(200);
       const after = await ops.get('/api/bootstrap');
       expect(after.body.products.find((x) => x.productID === 'PRD-201').stockLevel).toBe(before - 1);
-    },
-    25_000
+    }
   );
 });

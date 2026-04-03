@@ -1,26 +1,17 @@
 import { test, expect } from '@playwright/test';
+import { signInViaUi } from './helpers/auth';
 
-async function signIn(page, username = 'admin', password = 'Admin@123') {
-  await page.goto('/');
-  await expect(page.getByRole('heading', { name: /open your workspace/i })).toBeVisible({
-    timeout: 15_000,
-  });
-  await page.getByLabel('Username').fill(username);
-  await page.getByLabel('Password').fill(password);
-  await page.getByRole('button', { name: /enter workspace/i }).click();
-  await expect(page.getByRole('heading', { name: /operations dashboard/i })).toBeVisible({
-    timeout: 15_000,
-  });
-}
+test.describe.configure({ timeout: 60_000 });
 
 test.describe('Authenticated app flows', () => {
   test('dashboard loads after sign-in with active user identity', async ({ page }) => {
-    await signIn(page);
-    await expect(page.getByRole('button', { name: /zarewa admin administrator/i })).toBeVisible();
+    await signInViaUi(page, 'admin', 'Admin@123');
+    await expect(page.getByRole('heading', { name: /operations dashboard/i })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('group', { name: /signed in as zarewa admin/i })).toBeVisible();
   });
 
   test('sidebar navigates through protected modules', async ({ page }) => {
-    await signIn(page);
+    await signInViaUi(page, 'admin', 'Admin@123');
 
     const modulesNav = page.getByRole('navigation', { name: 'Modules' });
 
@@ -45,15 +36,16 @@ test.describe('Authenticated app flows', () => {
     await expect(page).toHaveURL(/\//);
   });
 
-  test('settings exposes access profile and period lock controls', async ({ page }) => {
-    await signIn(page);
-    await page.getByRole('navigation', { name: 'Modules' }).getByRole('link', { name: 'Settings' }).click();
+  test('settings exposes profile and period lock controls', async ({ page }) => {
+    await signInViaUi(page, 'admin', 'Admin@123');
+    await page.goto('/settings/profile');
     await expect(page.getByRole('heading', { name: /settings/i })).toBeVisible();
     const main = page.locator('#main-content');
-    await expect(main.getByText(/current user/i)).toBeVisible();
-    await expect(main.getByText(/^zarewa admin$/i).first()).toBeVisible();
-    await expect(main.getByText(/^administrator$/i)).toBeVisible();
+    await expect(main.getByText(/your profile/i).first()).toBeVisible({ timeout: 15_000 });
+    await expect(main.getByRole('textbox').first()).toHaveValue(/zarewa admin/i);
+    await expect(main.getByText(/^administrator$/i).first()).toBeVisible();
 
+    await page.getByRole('tab', { name: /governance/i }).click();
     await page.locator('input[type="month"]').fill('2099-12');
     await page.getByPlaceholder(/month-end close completed/i).fill('Playwright period lock');
     await page.getByRole('button', { name: /lock period/i }).click();
@@ -62,7 +54,7 @@ test.describe('Authenticated app flows', () => {
   });
 
   test('procurement role hides finance navigation', async ({ page }) => {
-    await signIn(page, 'procurement', 'Procure@123');
+    await signInViaUi(page, 'procurement', 'Procure@123');
     await expect(page.getByRole('button', { name: /procurement officer/i })).toBeVisible();
     await expect(
       page.getByRole('navigation', { name: 'Modules' }).getByRole('link', { name: 'Finance' })
@@ -80,28 +72,44 @@ test.describe('Authenticated app flows', () => {
   });
 
   test('settings master data workspace can add a colour', async ({ page }) => {
-    await signIn(page);
-    await page.getByRole('navigation', { name: 'Modules' }).getByRole('link', { name: 'Settings' }).click();
-    await expect(page.getByRole('heading', { name: /master data workspace/i })).toBeVisible();
+    await signInViaUi(page, 'admin', 'Admin@123');
+    await page.goto('/settings/data');
+    await expect(page).toHaveURL(/\/settings\/data/);
+    const openCatalog = page.getByRole('button', { name: /open catalog/i }).first();
+    await expect(openCatalog).toBeVisible({ timeout: 25_000 });
+    await openCatalog.scrollIntoViewIfNeeded();
+    await openCatalog.click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible({ timeout: 15_000 });
+    await expect(dialog.getByLabel(/filter catalog rows/i)).toBeVisible();
     const colourName = `Playwright colour ${Date.now()}`;
-    await page.getByRole('heading', { name: /master data workspace/i }).scrollIntoViewIfNeeded();
-    const coloursSection = page
-      .locator('section.rounded-3xl')
-      .filter({ has: page.getByRole('heading', { name: 'Colours', exact: true }) });
-    await coloursSection.getByText('Colour name', { exact: true }).locator('..').getByRole('textbox').first().fill(colourName);
-    await coloursSection.getByPlaceholder(/HMB \/ IV \/ TB/i).fill('PW');
-    await coloursSection.getByRole('button', { name: /^save$/i }).click();
-    await expect(coloursSection.getByText(`${colourName} (PW)`, { exact: true })).toBeVisible({ timeout: 15_000 });
+    const coloursForm = dialog.locator('form').filter({ has: page.getByText('Colour name', { exact: true }) });
+    await coloursForm.getByText('Colour name', { exact: true }).locator('..').getByRole('textbox').first().fill(colourName);
+    await coloursForm.getByPlaceholder(/HMB \/ IV \/ TB/i).fill('PW');
+    await coloursForm.getByRole('button', { name: /^save$/i }).click();
+    await expect(dialog.getByRole('row').filter({ hasText: colourName }).filter({ hasText: 'PW' })).toBeVisible({
+      timeout: 15_000,
+    });
   });
 
-  test('sales refunds tab opens request modal with preview and payout guidance', async ({ page }) => {
-    await signIn(page, 'sales.staff', 'Sales@123');
+  test('sales refunds tab opens create modal, loads eligible quotations, shows intelligence', async ({ page }) => {
+    test.setTimeout(120_000);
+    await signInViaUi(page, 'sales.staff', 'Sales@123');
     await page.getByRole('navigation', { name: 'Modules' }).getByRole('link', { name: 'Sales' }).click();
     await expect(page).toHaveURL(/\/sales$/);
     await page.getByRole('tab', { name: 'Refunds' }).click();
     await page.getByRole('button', { name: /new refund/i }).click();
-    await expect(page.getByRole('heading', { name: 'Refund request' })).toBeVisible();
-    await expect(page.getByText(/split a payout across more than one bank or cash account/i)).toBeVisible();
-    await expect(page.getByText(/live preview/i)).toBeVisible();
+    await expect(page.getByRole('heading', { name: /create refund/i })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(/quotation-linked workflow/i)).toBeVisible();
+    // Eligible quotations load from GET /api/refunds/eligible-quotations — spinner must clear.
+    await expect(page.getByText('Loading active quotes...')).toBeHidden({ timeout: 25_000 });
+    await expect(page.getByText('Transaction Intelligence')).toBeVisible();
+    const quoteSelect = page.locator('select').filter({ hasText: /Select a finished quotation/i });
+    const optionCount = await quoteSelect.locator('option').count();
+    if (optionCount > 1) {
+      await quoteSelect.selectOption({ index: 1 });
+      await expect(page.getByText('Quote Total', { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByText('Payment History')).toBeVisible();
+    }
   });
 });

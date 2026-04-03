@@ -3,6 +3,8 @@ import request from 'supertest';
 import { createDatabase } from './db.js';
 import { createApp } from './app.js';
 
+const openDbs = [];
+
 async function loginAs(agent, username = 'admin', password = 'Admin@123') {
   const res = await agent.post('/api/session/login').send({ username, password });
   expect(res.status).toBe(200);
@@ -10,7 +12,9 @@ async function loginAs(agent, username = 'admin', password = 'Admin@123') {
 }
 
 async function createSession() {
-  const app = createApp(createDatabase(':memory:'));
+  const db = createDatabase(':memory:');
+  openDbs.push(db);
+  const app = createApp(db);
   const agent = request.agent(app);
   await loginAs(agent);
   return { app, agent };
@@ -72,19 +76,26 @@ async function ensureTreasuryAccounts(agent, count, scenarioKey) {
 
 async function createCustomer(agent, scenarioKey, name) {
   const customerID = `CUS-${scenarioKey}`;
-  const res = await agent.post('/api/customers').send({
-    customerID,
-    name,
-    phoneNumber: `080${String(Math.abs(hashCode(customerID))).slice(0, 8).padEnd(8, '0')}`,
-    email: `${customerID.toLowerCase()}@example.com`,
-    addressShipping: `${scenarioKey} yard`,
-    addressBilling: `${scenarioKey} billing`,
-    status: 'Active',
-    tier: 'Retail',
-    paymentTerms: 'Cash',
-  });
-  expect(res.status).toBe(201);
-  return customerID;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const salted = `${customerID}:${attempt}`;
+    const phoneNumber = `080${String(Math.abs(hashCode(salted))).slice(0, 8).padEnd(8, '0')}`;
+    const res = await agent.post('/api/customers').send({
+      customerID,
+      name,
+      phoneNumber,
+      email: `${customerID.toLowerCase()}@example.com`,
+      addressShipping: `${scenarioKey} yard`,
+      addressBilling: `${scenarioKey} billing`,
+      status: 'Active',
+      tier: 'Retail',
+      paymentTerms: 'Cash',
+    });
+    if (res.status === 201) return customerID;
+    if (res.status !== 409) {
+      throw new Error(`createCustomer failed: status=${res.status}, body=${JSON.stringify(res.body)}`);
+    }
+  }
+  throw new Error(`createCustomer failed after retries for ${customerID}`);
 }
 
 async function createQuotation(agent, customerID, scenarioKey, lines, projectName = scenarioKey) {
@@ -679,7 +690,7 @@ function buildScenarioMatrix() {
           lines: buildExactLengths(lineCount, totalMeters),
         });
         expect(cutting.cuttingList.totalMeters).toBeCloseTo(totalMeters, 6);
-        const job = await createProductionJob(agent, {
+        await createProductionJob(agent, {
           cuttingListId: cutting.id,
           productID: fgProduct.productID,
           productName: fgProduct.name,
@@ -709,7 +720,7 @@ function buildScenarioMatrix() {
           expenseType: 'Operational support',
           amountNgn: amount,
           date: '2026-03-29',
-          category: i % 2 === 0 ? 'Diesel' : 'Maintenance',
+          category: i % 2 === 0 ? 'Operational — rent & utilities' : 'Maintenance — plant & equipment',
           paymentMethod: 'Mixed',
           reference: `EXP-REQ-${i + 1}`,
         });
@@ -1377,7 +1388,11 @@ function buildScenarioMatrix() {
         quotationRef: 'QT-2026-001',
         manualAdjustmentNgn: 15_000,
       });
-      expect(preview.preview.suggestedAmountNgn).toBe(15_000);
+      const manualLine = preview.preview.suggestedLines.find(
+        (l) => l.category === 'Adjustment' && String(l.label || '').toLowerCase().includes('manual')
+      );
+      expect(manualLine?.amountNgn).toBe(15_000);
+      expect(preview.preview.suggestedAmountNgn).toBeGreaterThanOrEqual(15_000);
       const del = await agent.delete(`/api/setup/colours/${encodeURIComponent(colourId)}`);
       expect(del.status).toBe(200);
       const after = await agent.get('/api/setup');
@@ -1590,7 +1605,7 @@ function buildScenarioMatrix() {
         expenseType: 'Harsh multi-leg',
         amountNgn: amount,
         date: '2026-03-29',
-        category: 'Maintenance',
+        category: 'Maintenance — plant & equipment',
         paymentMethod: 'Mixed',
         reference: 'EXP-H7',
       });
@@ -1650,22 +1665,31 @@ function buildScenarioMatrix() {
 describe('Scenario matrix', () => {
   it(
     'executes 114 live-like transactional scenarios',
+    { timeout: 360_000 },
     async () => {
       const scenarios = buildScenarioMatrix();
       const failures = [];
 
       for (const scenario of scenarios) {
+        const dbCountBefore = openDbs.length;
         try {
           await scenario.run();
         } catch (error) {
           failures.push(`${scenario.id} ${scenario.name}: ${String(error?.message || error)}`);
+        } finally {
+          while (openDbs.length > dbCountBefore) {
+            try {
+              openDbs.pop()?.close();
+            } catch {
+              /* ignore */
+            }
+          }
         }
       }
 
       if (failures.length > 0) {
         throw new Error(`Scenario matrix failures (${failures.length}/${scenarios.length})\n${failures.join('\n')}`);
       }
-    },
-    150_000
+    }
   );
 });

@@ -26,6 +26,13 @@ export const ZAREWA_QUOTATION_BRANDING = {
       ],
     },
     {
+      title: 'JALINGO FACTORY',
+      lines: [
+        'Wukari Road, Jalingo, Taraba State.',
+        'Tel: +234 803 000 0001',
+      ],
+    },
+    {
       title: 'MAIDUGURI FACTORY',
       lines: [
         'Airport Road, behind Yola Electric Building, Bulunkutu, Maiduguri, Borno State.',
@@ -34,6 +41,10 @@ export const ZAREWA_QUOTATION_BRANDING = {
     },
   ],
 };
+
+/** Corporate blue for official quotation / invoice / receipt printouts */
+export const ZAREWA_DOC_BLUE = '#1e3a8a';
+export const ZAREWA_DOC_BLUE_SOFT = '#dbeafe';
 
 /**
  * Demo line items matching a typical longspan quote (amounts align to a coherent grand total).
@@ -61,4 +72,4 @@ export const DEFAULT_QUOTATION_PRINT_LINES = {
 export const QUOTATION_TERMS_FOOTER = `Prices are subject to change without prior notice. This quotation is valid for the period stated below. The customer is responsible for verifying quantities, specifications, and site measurements before confirming the order.`;
 
 export const QUOTATION_PAYMENT_NOTICE =
-  "NO CASH TRANSACTIONS. ALL PAYMENTS MUST BE MADE TO THE COMPANY'S BANK ACCOUNT AS SHOWN BELOW.";
+  "NOTE: NO CASH TRANSACTIONS. ALL PAYMENTS MUST BE MADE TO THE COMPANY'S ACCOUNT.";

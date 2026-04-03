@@ -26,6 +26,7 @@ import {
   Activity,
   Scissors,
   RotateCcw,
+  Trash2,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -41,12 +42,8 @@ import { useCustomers } from '../context/CustomersContext';
 import { useToast } from '../context/ToastContext';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { apiFetch } from '../lib/apiBase';
-import {
-  SALES_MOCK,
-  CUSTOMER_DASHBOARD_MOCK,
-  formatNgn,
-} from '../Data/mockData';
-import { loadRefunds, refundApprovedAmount, refundOutstandingAmount } from '../lib/refundsStore';
+import { formatNgn } from '../Data/mockData';
+import { refundApprovedAmount, refundOutstandingAmount } from '../lib/refundsStore';
 import {
   advanceBalanceNgn,
   amountDueOnQuotation,
@@ -56,6 +53,8 @@ import {
 } from '../lib/customerLedgerStore';
 
 const TODAY_ISO = '2026-03-28';
+
+const EMPTY_CUSTOMER_CRM = { orders: [], interactions: [], salesTrendByCustomer: {} };
 
 const NAV = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -111,6 +110,14 @@ function orderStatusClass(s) {
   return 'bg-amber-100 text-amber-800';
 }
 
+function safeIso(v) {
+  return String(v || '');
+}
+
+function safeLines(lines) {
+  return Array.isArray(lines) ? lines : [];
+}
+
 const emptyEdit = (c) => ({
   name: c?.name ?? '',
   phoneNumber: c?.phoneNumber ?? '',
@@ -131,87 +138,79 @@ const emptyEdit = (c) => ({
 const CustomerDashboard = () => {
   const { customerId } = useParams();
   const navigate = useNavigate();
-  const { customers, setCustomers } = useCustomers();
+  const { customers, setCustomers, deleteCustomer } = useCustomers();
   const { show: showToast } = useToast();
   const ws = useWorkspace();
+
+  const routeCustomerId = useMemo(() => decodeURIComponent(String(customerId || '')).trim(), [customerId]);
+  const allCustomers = useMemo(() => {
+    const snapshotCustomers = Array.isArray(ws?.snapshot?.customers) ? ws.snapshot.customers : [];
+    return customers.length > 0 ? customers : snapshotCustomers;
+  }, [customers, ws]);
 
   const crm = useMemo(
     () =>
       ws?.hasWorkspaceData
-        ? ws?.snapshot?.customerDashboard ?? { orders: [], interactions: [], salesTrendByCustomer: {} }
-        : CUSTOMER_DASHBOARD_MOCK,
+        ? ws?.snapshot?.customerDashboard ?? EMPTY_CUSTOMER_CRM
+        : EMPTY_CUSTOMER_CRM,
     [ws?.hasWorkspaceData, ws?.snapshot?.customerDashboard]
   );
 
   const customer = useMemo(
-    () => customers.find((c) => c.customerID === customerId),
-    [customers, customerId]
+    () =>
+      allCustomers.find(
+        (c) => String(c.customerID || '').trim().toLowerCase() === routeCustomerId.toLowerCase()
+      ),
+    [allCustomers, routeCustomerId]
   );
+  const customerKey = customer?.customerID || routeCustomerId;
 
   const quotationRows = useMemo(
     () =>
-      ws?.hasWorkspaceData
-        ? Array.isArray(ws?.snapshot?.quotations)
-          ? ws.snapshot.quotations
-          : []
-        : SALES_MOCK.quotations,
+      ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.quotations) ? ws.snapshot.quotations : [],
     [ws]
   );
   const receiptRows = useMemo(
-    () =>
-      ws?.hasWorkspaceData
-        ? Array.isArray(ws?.snapshot?.receipts)
-          ? ws.snapshot.receipts
-          : []
-        : SALES_MOCK.receipts,
+    () => (ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.receipts) ? ws.snapshot.receipts : []),
     [ws]
   );
   const cuttingListRows = useMemo(
     () =>
-      ws?.hasWorkspaceData
-        ? Array.isArray(ws?.snapshot?.cuttingLists)
-          ? ws.snapshot.cuttingLists
-          : []
-        : SALES_MOCK.cuttingLists,
+      ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.cuttingLists) ? ws.snapshot.cuttingLists : [],
     [ws]
   );
   const refundRows = useMemo(
-    () =>
-      ws?.hasWorkspaceData
-        ? Array.isArray(ws?.snapshot?.refunds)
-          ? ws.snapshot.refunds
-          : []
-        : loadRefunds(),
+    () => (ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.refunds) ? ws.snapshot.refunds : []),
     [ws]
   );
 
   const quotations = useMemo(
-    () => quotationRows.filter((q) => q.customerID === customerId),
-    [customerId, quotationRows]
+    () => quotationRows.filter((q) => String(q.customerID || '').trim() === customerKey),
+    [customerKey, quotationRows]
   );
   const receipts = useMemo(
-    () => receiptRows.filter((r) => r.customerID === customerId),
-    [customerId, receiptRows]
+    () => receiptRows.filter((r) => String(r.customerID || '').trim() === customerKey),
+    [customerKey, receiptRows]
   );
   const cuttingLists = useMemo(
-    () => cuttingListRows.filter((cl) => cl.customerID === customerId),
-    [customerId, cuttingListRows]
+    () => cuttingListRows.filter((cl) => String(cl.customerID || '').trim() === customerKey),
+    [customerKey, cuttingListRows]
   );
   const refundsForCustomer = useMemo(
-    () => refundRows.filter((r) => r.customerID === customerId),
-    [customerId, refundRows]
+    () => refundRows.filter((r) => String(r.customerID || '').trim() === customerKey),
+    [customerKey, refundRows]
   );
 
   const orders = useMemo(
-    () => (crm.orders || []).filter((o) => o.customerID === customerId),
-    [customerId, crm.orders]
+    () => (crm.orders || []).filter((o) => String(o.customerID || '').trim() === customerKey),
+    [customerKey, crm.orders]
   );
   const interactions = useMemo(
-    () => (crm.interactions || []).filter((i) => i.customerID === customerId),
-    [customerId, crm.interactions]
+    () => (crm.interactions || []).filter((i) => String(i.customerID || '').trim() === customerKey),
+    [customerKey, crm.interactions]
   );
 
-  const [payWindow, setPayWindow] = useState('30');
+  const [payWindow, setPayWindow] = useState('all');
   const [showEdit, setShowEdit] = useState(false);
   const [editForm, setEditForm] = useState(() => emptyEdit(customer));
   const [detail, setDetail] = useState(null);
@@ -230,14 +229,14 @@ const CustomerDashboard = () => {
   }, [customer]);
 
   useEffect(() => {
-    if (!customerId) return;
+    if (!customerKey) return;
     if (!ws?.hasWorkspaceData) {
       setStaffNotes([]);
       return undefined;
     }
     if (!ws?.canMutate) {
       const fromCrm = (crm.interactions || [])
-        .filter((i) => i.customerID === customerId)
+        .filter((i) => String(i.customerID || '').trim() === customerKey)
         .map((i) => ({
           id: i.id,
           text: i.detail,
@@ -252,7 +251,7 @@ const CustomerDashboard = () => {
     let cancelled = false;
     (async () => {
       const { ok, data } = await apiFetch(
-        `/api/customers/${encodeURIComponent(customerId)}/interactions`
+        `/api/customers/${encodeURIComponent(customerKey)}/interactions`
       );
       if (!ok || cancelled) return;
       const rows = (data?.interactions || []).map((i) => ({
@@ -268,7 +267,7 @@ const CustomerDashboard = () => {
     return () => {
       cancelled = true;
     };
-  }, [customerId, ws?.hasWorkspaceData, ws?.canMutate, crm.interactions]);
+  }, [customerKey, ws?.hasWorkspaceData, ws?.canMutate, crm.interactions]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const addNote = async (e) => {
@@ -280,7 +279,7 @@ const CustomerDashboard = () => {
       return;
     }
     const { ok, data } = await apiFetch(
-      `/api/customers/${encodeURIComponent(customerId)}/interactions`,
+      `/api/customers/${encodeURIComponent(customerKey)}/interactions`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -360,13 +359,11 @@ const CustomerDashboard = () => {
       ),
     [quotations]
   );
-  const lastQuotations = sortedQuotations.slice(0, 5);
 
   const sortedOrders = useMemo(
-    () => [...orders].sort((a, b) => b.dateISO.localeCompare(a.dateISO)),
+    () => [...orders].sort((a, b) => safeIso(b.dateISO).localeCompare(safeIso(a.dateISO))),
     [orders]
   );
-  const lastOrders = sortedOrders.slice(0, 5);
 
   const outstandingNgn = useMemo(
     () => quotations.reduce((s, q) => s + amountDueOnQuotation(q), 0),
@@ -376,27 +373,27 @@ const CustomerDashboard = () => {
   const advanceBalNgn = useMemo(
     () => {
       void ledgerViewNonce;
-      return advanceBalanceNgn(customerId);
+      return advanceBalanceNgn(customerKey);
     },
-    [customerId, ledgerViewNonce]
+    [customerKey, ledgerViewNonce]
   );
 
   const totalPaidReceiptsNgn = useMemo(
     () => {
       void ledgerViewNonce;
-      return receipts.reduce((s, r) => s + (r.amountNgn || 0), 0) + ledgerReceiptTotalNgn(customerId);
+      return receipts.reduce((s, r) => s + (r.amountNgn || 0), 0) + ledgerReceiptTotalNgn(customerKey);
     },
-    [receipts, customerId, ledgerViewNonce]
+    [receipts, customerKey, ledgerViewNonce]
   );
 
   const ledgerLines = useMemo(
     () => {
       void ledgerViewNonce;
-      return [...entriesForCustomer(customerId)].sort((a, b) =>
+      return [...entriesForCustomer(customerKey)].sort((a, b) =>
         (b.atISO || '').localeCompare(a.atISO || '')
       );
     },
-    [customerId, ledgerViewNonce]
+    [customerKey, ledgerViewNonce]
   );
 
   const totalInvoicedNgn = useMemo(
@@ -450,7 +447,7 @@ const CustomerDashboard = () => {
 
   const trendData = useMemo(() => {
     const series =
-      crm.salesTrendByCustomer?.[customerId] ||
+      crm.salesTrendByCustomer?.[customerKey] ||
       [
         { month: 'Oct', amountNgn: 0 },
         { month: 'Nov', amountNgn: 0 },
@@ -463,7 +460,7 @@ const CustomerDashboard = () => {
       ...row,
       amountM: Math.round(row.amountNgn / 100_000) / 10,
     }));
-  }, [customerId, crm.salesTrendByCustomer]);
+  }, [customerKey, crm.salesTrendByCustomer]);
 
   const mergedTimeline = useMemo(() => {
     const qSorted = [...quotations].sort((a, b) =>
@@ -475,6 +472,8 @@ const CustomerDashboard = () => {
       title: `Quotation ${q.id}`,
       detail: `${q.total} · ${q.paymentStatus} · Owner: ${q.handledBy || '—'}`,
       source: 'tx',
+      txType: 'quotation',
+      txId: q.id,
     }));
     const rcSorted = [...receipts].sort((a, b) =>
       (b.dateISO || '').localeCompare(a.dateISO || '')
@@ -485,6 +484,8 @@ const CustomerDashboard = () => {
       title: `Receipt ${r.id}`,
       detail: `${r.amount} · ${r.method || '—'} · Recorded by: ${r.handledBy || '—'}`,
       source: 'tx',
+      txType: 'receipt',
+      txId: r.id,
     }));
     const clSorted = [...cuttingLists].sort((a, b) =>
       (b.dateISO || '').localeCompare(a.dateISO || '')
@@ -505,6 +506,8 @@ const CustomerDashboard = () => {
       title: `Refund ${r.refundID} (${r.status})`,
       detail: `${formatNgn(r.amountNgn)} · ${r.reasonCategory || r.reason} · Requested by: ${r.requestedBy || '—'}`,
       source: 'tx',
+      txType: 'refund',
+      txId: r.refundID,
     }));
     const fromInteractions = interactions.map((i) => ({
       sort: i.dateISO,
@@ -527,24 +530,24 @@ const CustomerDashboard = () => {
       ...fromRefunds,
       ...fromInteractions,
       ...fromNotes,
-    ].sort((a, b) => b.sort.localeCompare(a.sort));
+    ].sort((a, b) => safeIso(b.sort).localeCompare(safeIso(a.sort)));
   }, [quotations, receipts, cuttingLists, refundsForCustomer, interactions, staffNotes]);
 
   const goSalesQuotation = (id) => {
     navigate('/sales', {
-      state: { globalSearchQuery: id, focusSalesTab: 'quotations' },
+      state: { focusSalesTab: 'quotations', openSalesRecord: { type: 'quotation', id } },
     });
   };
 
   const goSalesReceipt = (id) => {
     navigate('/sales', {
-      state: { globalSearchQuery: id, focusSalesTab: 'receipts' },
+      state: { focusSalesTab: 'receipts', openSalesRecord: { type: 'receipt', id } },
     });
   };
 
   const goSalesRefund = (id) => {
     navigate('/sales', {
-      state: { globalSearchQuery: id, focusSalesTab: 'refund' },
+      state: { focusSalesTab: 'refund', openSalesRecord: { type: 'refund', id } },
     });
   };
 
@@ -555,7 +558,7 @@ const CustomerDashboard = () => {
       return;
     }
     if (ws?.canMutate) {
-      const { ok, data } = await apiFetch(`/api/customers/${encodeURIComponent(customerId)}`, {
+      const { ok, data } = await apiFetch(`/api/customers/${encodeURIComponent(customerKey)}`, {
         method: 'PATCH',
         body: JSON.stringify({
           name: editForm.name.trim(),
@@ -588,7 +591,7 @@ const CustomerDashboard = () => {
     }
     setCustomers((prev) =>
       prev.map((c) =>
-        c.customerID === customerId
+        c.customerID === customerKey
           ? {
               ...c,
               name: editForm.name.trim(),
@@ -621,10 +624,32 @@ const CustomerDashboard = () => {
     showToast('Customer profile updated.');
   };
 
+  const handleDeleteCustomerProfile = async () => {
+    if (
+      !window.confirm(
+        `Permanently delete ${customer.name} (${customerKey})? This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+    try {
+      await deleteCustomer(customerKey);
+      showToast('Customer removed.');
+      navigate('/sales', { state: { focusSalesTab: 'customers' } });
+    } catch (e) {
+      const blockers = e?.blockers;
+      let msg = e?.message || 'Could not delete customer.';
+      if (Array.isArray(blockers) && blockers.length) {
+        msg += ` — ${blockers.map((b) => `${b.count} in ${b.table}`).join('; ')}`;
+      }
+      showToast(msg, { variant: 'error' });
+    }
+  };
+
   const downloadReport = (kind) => {
     const lines = [];
     lines.push(`Zarewa — Customer report (${kind})`);
-    lines.push(`Customer: ${customer?.name} (${customerId})`);
+    lines.push(`Customer: ${customer?.name} (${customerKey})`);
     lines.push(`Period: ${reportFrom} → ${reportTo}`);
     lines.push('');
     if (kind === 'sales') {
@@ -656,7 +681,7 @@ const CustomerDashboard = () => {
     const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `zarewa-${customerId}-${kind}-${reportFrom}.txt`;
+    a.download = `zarewa-${customerKey}-${kind}-${reportFrom}.txt`;
     a.click();
     URL.revokeObjectURL(a.href);
     showToast('Report file generated.');
@@ -666,12 +691,12 @@ const CustomerDashboard = () => {
   if (!customer) {
     return (
       <PageShell>
-        <PageHeader title="Customer" subtitle="Dashboard" />
+        <PageHeader eyebrow="Sales" title="Customer" subtitle="Dashboard" />
         <MainPanel>
           <div className="z-empty-state max-w-md mx-auto">
             <p className="text-sm font-bold text-[#134e4a] mb-2">Customer not found</p>
             <p className="text-xs text-gray-500 mb-4">
-              No profile matches <span className="font-mono">{customerId}</span>.
+              No profile matches <span className="font-mono">{routeCustomerId}</span>.
             </p>
             <Link
               to="/sales"
@@ -696,6 +721,7 @@ const CustomerDashboard = () => {
   return (
     <PageShell blurred={showEdit || !!detail || showReports}>
       <PageHeader
+        eyebrow="Sales"
         title={customer.name}
         subtitle={`${customer.customerID} · ${customer.tier} · ${customer.paymentTerms}`}
         actions={
@@ -725,17 +751,20 @@ const CustomerDashboard = () => {
           <p className="text-[10px] font-black uppercase tracking-widest text-gray-400 px-3 mb-2">
             On this page
           </p>
-          {NAV.map(({ id, label, icon }) => (
+          {NAV.map((item) => {
+            const NavIcon = item.icon;
+            return (
             <button
-              key={id}
+              key={item.id}
               type="button"
-              onClick={() => scrollToId(id)}
+              onClick={() => scrollToId(item.id)}
               className="w-full flex items-center gap-2 rounded-xl px-3 py-2.5 text-left text-xs font-bold text-[#134e4a] hover:bg-white hover:shadow-sm border border-transparent hover:border-gray-100 transition-all"
             >
-              {icon}
-              {label}
+              <NavIcon size={14} />
+              {item.label}
             </button>
-          ))}
+            );
+          })}
         </aside>
 
         <MainPanel className="flex-1 min-w-0 !pt-0">
@@ -859,6 +888,29 @@ const CustomerDashboard = () => {
                   {customer.crmProfileNotes}
                 </p>
               ) : null}
+            </section>
+          ) : null}
+
+          {ws?.hasPermission?.('sales.manage') && ws?.canMutate ? (
+            <section
+              className="mb-8 rounded-2xl border border-red-100 bg-red-50/50 px-4 py-4"
+              aria-label="Delete customer"
+            >
+              <p className="text-[10px] font-black uppercase tracking-widest text-red-800 mb-1">
+                Danger zone
+              </p>
+              <p className="text-xs text-red-900/85 mb-3 max-w-xl">
+                Remove this customer only when they have no quotations, receipts, ledger entries, or other
+                linked records. The server will list any blockers if delete is not allowed.
+              </p>
+              <button
+                type="button"
+                onClick={handleDeleteCustomerProfile}
+                className="inline-flex items-center gap-2 rounded-xl border border-red-200 bg-white px-4 py-2 text-xs font-bold text-red-800 hover:bg-red-100/80"
+              >
+                <Trash2 size={16} />
+                Delete customer
+              </button>
             </section>
           ) : null}
 
@@ -995,7 +1047,7 @@ const CustomerDashboard = () => {
             <div className="flex items-center justify-between gap-4 mb-4">
               <h2 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest flex items-center gap-2">
                 <FileText size={16} />
-                Recent quotations
+                Quotation history
               </h2>
               <button
                 type="button"
@@ -1012,18 +1064,18 @@ const CustomerDashboard = () => {
                 <div className="col-span-3 text-right">Total</div>
                 <div className="col-span-4">Status</div>
               </div>
-              {lastQuotations.length === 0 ? (
+              {sortedQuotations.length === 0 ? (
                 <p className="p-8 text-center text-xs text-gray-400 font-bold uppercase tracking-widest">
                   No quotations yet
                 </p>
               ) : (
-                lastQuotations.map((q) => {
+                sortedQuotations.map((q) => {
                   const st = quotationUiStatus(q);
                   return (
                     <button
                       key={q.id}
                       type="button"
-                      onClick={() => setDetail({ type: 'quotation', row: q })}
+                      onClick={() => goSalesQuotation(q.id)}
                       className="grid grid-cols-12 gap-2 w-full px-4 py-3 text-left border-t border-gray-50 hover:bg-teal-50/30 transition-colors items-center"
                     >
                       <div className="col-span-3 text-xs font-bold text-[#134e4a]">{q.id}</div>
@@ -1108,7 +1160,7 @@ const CustomerDashboard = () => {
           <section id="cd-orders" className="mb-10 scroll-mt-28">
             <h2 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest mb-4 flex items-center gap-2">
               <Package size={16} />
-              Recent orders
+              Order history
             </h2>
             <div className="rounded-zarewa border border-gray-100 overflow-hidden bg-white shadow-sm">
               <div className="grid grid-cols-12 gap-2 px-4 py-2 bg-gray-50 text-[10px] font-bold text-gray-400 uppercase tracking-widest">
@@ -1118,14 +1170,15 @@ const CustomerDashboard = () => {
                 <div className="col-span-2 text-right">Total</div>
                 <div className="col-span-2">Status</div>
               </div>
-              {lastOrders.length === 0 ? (
+              {sortedOrders.length === 0 ? (
                 <p className="p-8 text-center text-xs text-gray-400 font-bold uppercase tracking-widest">
                   No orders on file
                 </p>
               ) : (
-                lastOrders.map((o) => {
-                  const qtySum = o.lines.reduce((s, l) => s + l.qty, 0);
-                  const prodSummary = o.lines.map((l) => l.product).join('; ');
+                sortedOrders.map((o) => {
+                  const lines = safeLines(o.lines);
+                  const qtySum = lines.reduce((s, l) => s + (Number(l?.qty) || 0), 0);
+                  const prodSummary = lines.map((l) => l?.product).filter(Boolean).join('; ');
                   return (
                     <button
                       key={o.id}
@@ -1171,9 +1224,9 @@ const CustomerDashboard = () => {
                     onChange={(e) => setPayWindow(e.target.value)}
                     className="text-[10px] font-bold uppercase border border-gray-100 rounded-lg py-1.5 px-2 bg-gray-50"
                   >
+                    <option value="all">All (full history)</option>
                     <option value="30">Last 30 days</option>
                     <option value="60">Last 60 days</option>
-                    <option value="all">All</option>
                   </select>
                 </div>
                 <ul className="space-y-2 max-h-64 overflow-y-auto">
@@ -1184,7 +1237,7 @@ const CustomerDashboard = () => {
                       <li key={r.id}>
                         <button
                           type="button"
-                          onClick={() => setDetail({ type: 'receipt', row: r })}
+                          onClick={() => goSalesReceipt(r.id)}
                           className="w-full flex items-center justify-between gap-2 rounded-xl border border-gray-50 bg-gray-50/50 px-3 py-2 text-left hover:border-teal-100 hover:bg-white transition-all"
                         >
                           <div>
@@ -1284,7 +1337,7 @@ const CustomerDashboard = () => {
                   <li key={r.refundID}>
                     <button
                       type="button"
-                      onClick={() => setDetail({ type: 'refund', row: r })}
+                      onClick={() => goSalesRefund(r.refundID)}
                       className="w-full flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-100 bg-white px-4 py-3 text-left hover:border-rose-100 hover:bg-rose-50/20 transition-all"
                     >
                       <div>
@@ -1326,12 +1379,32 @@ const CustomerDashboard = () => {
                     mergedTimeline.map((item, idx) => (
                       <li key={`${item.sort}-${item.source}-${idx}`} className="relative">
                         <span className="absolute -left-[21px] top-1 h-2.5 w-2.5 rounded-full bg-[#134e4a] ring-4 ring-white" />
-                        <p className="text-[10px] font-bold text-gray-400 uppercase">
-                          {item.sort.slice(0, 10)} · {item.kind}
-                          {item.source === 'tx' ? ' · record' : ''}
-                        </p>
-                        <p className="text-sm font-bold text-[#134e4a]">{item.title}</p>
-                        <p className="text-xs text-gray-600 mt-0.5">{item.detail}</p>
+                        {item.source === 'tx' && item.txType && item.txId ? (
+                          <button
+                            type="button"
+                            className="w-full text-left rounded-lg px-2 py-1.5 -mx-2 hover:bg-teal-50/60"
+                            onClick={() => {
+                              if (item.txType === 'quotation') goSalesQuotation(item.txId);
+                              if (item.txType === 'receipt') goSalesReceipt(item.txId);
+                              if (item.txType === 'refund') goSalesRefund(item.txId);
+                            }}
+                          >
+                            <p className="text-[10px] font-bold text-gray-400 uppercase">
+                              {safeIso(item.sort).slice(0, 10) || '—'} · {item.kind} · record
+                            </p>
+                            <p className="text-sm font-bold text-[#134e4a]">{item.title}</p>
+                            <p className="text-xs text-gray-600 mt-0.5">{item.detail}</p>
+                          </button>
+                        ) : (
+                          <>
+                            <p className="text-[10px] font-bold text-gray-400 uppercase">
+                              {safeIso(item.sort).slice(0, 10) || '—'} · {item.kind}
+                              {item.source === 'tx' ? ' · record' : ''}
+                            </p>
+                            <p className="text-sm font-bold text-[#134e4a]">{item.title}</p>
+                            <p className="text-xs text-gray-600 mt-0.5">{item.detail}</p>
+                          </>
+                        )}
                       </li>
                     ))
                   )}
@@ -1645,7 +1718,7 @@ const CustomerDashboard = () => {
               <p className="font-mono font-bold text-[#134e4a]">{detail.row.id}</p>
               <p className="text-xs text-gray-500">{detail.row.date}</p>
               <ul className="border border-gray-100 rounded-xl divide-y divide-gray-50">
-                {detail.row.lines.map((l, i) => (
+                {safeLines(detail.row.lines).map((l, i) => (
                   <li key={i} className="px-3 py-2 flex justify-between gap-2">
                     <span className="text-gray-700">{l.product}</span>
                     <span className="font-bold text-[#134e4a] shrink-0">

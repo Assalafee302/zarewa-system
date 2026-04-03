@@ -1,7 +1,7 @@
 import React from 'react';
 
 const tabBtn =
-  'px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-[0.12em] transition-all flex items-center gap-2 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/25 focus-visible:ring-offset-2 focus-visible:ring-offset-white';
+  'px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-[0.1em] transition-all flex items-center gap-2 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/25 focus-visible:ring-offset-2 focus-visible:ring-offset-white';
 
 /**
  * Segmented control used across module pages for consistent UX.

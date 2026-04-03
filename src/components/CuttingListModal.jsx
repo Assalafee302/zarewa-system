@@ -1,6 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { X, Plus, Trash2, Scissors, Calendar, Cog, ChevronDown, Printer, Info, Factory } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import {
+  X,
+  Plus,
+  Trash2,
+  Scissors,
+  Calendar,
+  Cog,
+  ChevronDown,
+  Printer,
+  Info,
+  Factory,
+  Search,
+  AlertTriangle,
+} from 'lucide-react';
 import { ModalFrame } from './layout/ModalFrame';
 import { useToast } from '../context/ToastContext';
 import { useWorkspace } from '../context/WorkspaceContext';
@@ -53,12 +67,13 @@ function nextDraftCuttingListId(cuttingLists) {
   return max > 0 ? `CL-2026-${String(max + 1).padStart(3, '0')}` : 'CL-2026-001';
 }
 
-/** At least 50% of quotation total recorded as paid. */
+/** At least 70% of quotation total recorded as paid, or explicitly approved by manager. */
 function meetsCuttingListPayThreshold(q) {
-  const total = Number(q.totalNgn) || 0;
-  const paid = Number(q.paidNgn) || 0;
+  if (q.manager_production_approved_at_iso || q.managerProductionApprovedAtISO) return true;
+  const total = Number(q.totalNgn ?? q.total_ngn) || 0;
+  const paid = Number(q.paidNgn ?? q.paid_ngn) || 0;
   if (total <= 0) return false;
-  return paid >= total * 0.5;
+  return paid >= total * 0.7;
 }
 
 /** Resolve colour / gauge / profile from API or mock quotation objects. */
@@ -175,6 +190,7 @@ const CuttingListModal = ({
 }) => {
   const { show: showToast } = useToast();
   const ws = useWorkspace();
+  const navigate = useNavigate();
   const productionLocked = Boolean(editData?.productionRegistered);
   const readOnly = accessMode === 'view' || productionLocked;
   const [quotationRef, setQuotationRef] = useState('');
@@ -186,6 +202,8 @@ const CuttingListModal = ({
   const [showPrintPreview, setShowPrintPreview] = useState(false);
   const [holdForProductionApproval, setHoldForProductionApproval] = useState(false);
   const [clearingHold, setClearingHold] = useState(false);
+  const [quoteSearch, setQuoteSearch] = useState('');
+  const [showQuotePicker, setShowQuotePicker] = useState(false);
 
   const canRegisterProduction =
     ws?.hasPermission?.('sales.manage') ||
@@ -199,17 +217,38 @@ const CuttingListModal = ({
     const takenByAnother = (quoteId) =>
       cuttingLists.some((cl) => cl.quotationRef === quoteId && cl.id !== editingId);
 
-    const base = quotations.filter(
-      (q) => meetsCuttingListPayThreshold(q) && !takenByAnother(q.id)
-    );
+    const base = quotations.filter((q) => {
+      if (!q?.id || takenByAnother(q.id)) return false;
+      const total = Number(q.totalNgn ?? q.total_ngn) || 0;
+      return total > 0;
+    });
+    const sorted = [...base].sort((a, b) => {
+      const aOk = meetsCuttingListPayThreshold(a) ? 0 : 1;
+      const bOk = meetsCuttingListPayThreshold(b) ? 0 : 1;
+      if (aOk !== bOk) return aOk - bOk;
+      return a.id.localeCompare(b.id);
+    });
     if (editData?.quotationRef) {
       const current = quotations.find((x) => x.id === editData.quotationRef);
-      if (current && !base.some((x) => x.id === current.id)) {
-        return [current, ...base].sort((a, b) => a.id.localeCompare(b.id));
+      if (current && !sorted.some((x) => x.id === current.id)) {
+        return [current, ...sorted.filter((x) => x.id !== current.id)];
       }
     }
-    return [...base].sort((a, b) => a.id.localeCompare(b.id));
-  }, [quotations, cuttingLists, editData?.id, editData?.quotationRef]);
+    return sorted;
+  }, [quotations, cuttingLists, editData]);
+
+  const filteredQuotePicker = useMemo(() => {
+    const s = quoteSearch.trim().toLowerCase();
+    if (!s) return selectableQuotations.slice(0, 14);
+    return selectableQuotations
+      .filter((q) => {
+        const id = String(q.id).toLowerCase();
+        const cust = String(q.customer ?? q.customer_name ?? '').toLowerCase();
+        const cid = String(q.customerID ?? q.customer_id ?? '').toLowerCase();
+        return id.includes(s) || cust.includes(s) || cid.includes(s);
+      })
+      .slice(0, 20);
+  }, [selectableQuotations, quoteSearch]);
 
   const selectedQuotation = useMemo(
     () => quotations.find((q) => q.id === quotationRef) ?? null,
@@ -220,12 +259,13 @@ const CuttingListModal = ({
 
   const draftCuttingListId = useMemo(
     () => (editData?.id ? editData.id : nextDraftCuttingListId(cuttingLists)),
-    [editData?.id, cuttingLists]
+    [editData, cuttingLists]
   );
 
   const paidOnQuote = selectedQuotation ? Number(selectedQuotation.paidNgn) || 0 : 0;
   const totalQuoteNgn = selectedQuotation ? Number(selectedQuotation.totalNgn) || 0 : 0;
   const balanceQuote = Math.max(0, totalQuoteNgn - paidOnQuote);
+  const payPercentOnQuote = totalQuoteNgn > 0 ? Math.round((paidOnQuote / totalQuoteNgn) * 100) : 0;
 
   const quoteReceipts = useMemo(() => {
     if (!quotationRef) return [];
@@ -303,10 +343,12 @@ const CuttingListModal = ({
   useEffect(() => {
     if (!isOpen) {
       setShowPrintPreview(false);
+      setShowQuotePicker(false);
       return;
     }
     if (!editData?.id && quotationRef && !selectableQuotations.some((q) => q.id === quotationRef)) {
       setQuotationRef('');
+      setQuoteSearch('');
     }
   }, [isOpen, editData?.id, selectableQuotations, quotationRef]);
 
@@ -329,18 +371,24 @@ const CuttingListModal = ({
         next[type] = buckets[type].length ? buckets[type] : [blankRow()];
       }
       setLinesByCat(next);
-      setQuotationRef(editData.quotationRef ?? '');
+      const qref = editData.quotationRef ?? '';
+      setQuotationRef(qref);
+      const eq = quotations.find((x) => x.id === qref);
+      setQuoteSearch(
+        qref && eq ? `${eq.id} · ${eq.customer ?? eq.customer_name ?? ''}`.trim() : qref
+      );
       setDateISO(editData.dateISO ?? new Date().toISOString().slice(0, 10));
       setMachineName(editData.machineName ?? 'Machine 01 (Longspan)');
     } else {
       setQuotationRef('');
+      setQuoteSearch('');
       setDateISO(new Date().toISOString().slice(0, 10));
       setMachineName('Machine 01 (Longspan)');
       setLinesByCat(emptyLinesByCat());
     }
     setSaving(false);
     if (!editData?.id) setHoldForProductionApproval(false);
-  }, [editData, isOpen]);
+  }, [editData, isOpen, quotations]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const updateLine = useCallback((cat, id, patch) => {
@@ -390,6 +438,13 @@ const CuttingListModal = ({
     }));
     if (normalizedLines.length === 0) {
       showToast('Add at least one valid line (length and quantity) in any section.', { variant: 'error' });
+      return;
+    }
+    if (isCreate && selectedQuotation && !meetsCuttingListPayThreshold(selectedQuotation)) {
+      showToast(
+        'Under 70% paid: a manager must approve production on the Manager dashboard before you can save this cutting list.',
+        { variant: 'error' }
+      );
       return;
     }
     setSaving(true);
@@ -540,35 +595,109 @@ const CuttingListModal = ({
             <div className="rounded-xl border border-slate-200/90 p-4 mb-5 bg-slate-50/50">
               <p className="text-[9px] font-semibold text-slate-500 uppercase tracking-widest mb-3">Job header</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="relative md:col-span-2">
-                  <label className={label}>Link quotation</label>
-                  <select
-                    value={quotationRef}
-                    onChange={(e) => setQuotationRef(e.target.value)}
-                    className={`${field} appearance-none pr-8`}
-                    disabled={productionLocked}
-                  >
-                    <option value="">Select order…</option>
-                    {selectableQuotations.map((q) => (
-                      <option key={q.id} value={q.id}>
-                        {q.id}
-                      </option>
-                    ))}
-                  </select>
-                  <ChevronDown size={12} className="absolute right-2 bottom-2.5 text-slate-300 pointer-events-none" />
+                <div className="md:col-span-2 space-y-2 relative z-20">
+                  <label className={label}>Quotation</label>
+                  <p className="text-[9px] text-slate-500 leading-snug -mt-1 mb-1">
+                    Search by quotation ID, customer, or customer code, then click a row to link. If payment is under{' '}
+                    <span className="font-semibold text-slate-700">70%</span>, a manager must use{' '}
+                    <span className="font-semibold text-slate-700">Manager dashboard</span> → Transaction Intel →{' '}
+                    <span className="font-semibold text-slate-700">Override</span> before you can save a cutting list here.
+                  </p>
+                  {productionLocked ? (
+                    <div className={`${field} bg-slate-50 text-slate-700`}>{quotationRef || '—'}</div>
+                  ) : (
+                    <div className="relative">
+                      <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={quoteSearch}
+                        onChange={(e) => {
+                          setQuoteSearch(e.target.value);
+                          setShowQuotePicker(true);
+                        }}
+                        onFocus={() => setShowQuotePicker(true)}
+                        placeholder="Search quotations…"
+                        className={`${field} pl-9 pr-10`}
+                        autoComplete="off"
+                      />
+                      {quoteSearch ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setQuoteSearch('');
+                            setQuotationRef('');
+                            setShowQuotePicker(false);
+                          }}
+                          className="absolute right-8 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600"
+                          aria-label="Clear quotation"
+                        >
+                          <X size={14} />
+                        </button>
+                      ) : null}
+                      <ChevronDown size={12} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" />
+                      {showQuotePicker ? (
+                        <button
+                          type="button"
+                          className="fixed inset-0 z-[5] cursor-default bg-black/10"
+                          aria-label="Close quotation list"
+                          onClick={() => setShowQuotePicker(false)}
+                        />
+                      ) : null}
+                      {showQuotePicker ? (
+                        <div className="absolute z-[25] left-0 right-0 mt-1 max-h-[240px] overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-xl custom-scrollbar p-1">
+                          {filteredQuotePicker.length === 0 ? (
+                            <div className="p-3 text-center text-[10px] font-semibold text-slate-400 uppercase">
+                              No matching quotations
+                            </div>
+                          ) : (
+                            filteredQuotePicker.map((q) => {
+                              const cust = q.customer ?? q.customer_name ?? '';
+                              const okPay = meetsCuttingListPayThreshold(q);
+                              return (
+                                <button
+                                  key={q.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setQuotationRef(q.id);
+                                    setQuoteSearch(`${q.id}${cust ? ` · ${cust}` : ''}`);
+                                    setShowQuotePicker(false);
+                                  }}
+                                  className={`flex w-full flex-col p-2.5 text-left transition-colors rounded-md border border-transparent hover:border-orange-100 hover:bg-orange-50/80 ${
+                                    quotationRef === q.id ? 'bg-orange-50 border-orange-100' : ''
+                                  }`}
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-xs font-bold text-[#134e4a]">{q.id}</span>
+                                    <span
+                                      className={`text-[8px] font-bold uppercase tracking-tight shrink-0 px-1.5 py-0.5 rounded ${
+                                        okPay ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                                      }`}
+                                    >
+                                      {okPay ? '≥70% / ok' : 'Under 70%'}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-2 mt-0.5">
+                                    <span className="text-[11px] font-semibold text-slate-800 truncate">{cust || '—'}</span>
+                                    <span className="text-[10px] font-bold text-orange-700 tabular-nums shrink-0">
+                                      {formatNgn(Number(q.paidNgn ?? q.paid_ngn) || 0)} /{' '}
+                                      {formatNgn(Number(q.totalNgn ?? q.total_ngn) || 0)}
+                                    </span>
+                                  </div>
+                                </button>
+                              );
+                            })
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+                  {isCreate && selectableQuotations.length === 0 ? (
+                    <p className="text-[10px] font-medium text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                      No open quotations in workspace. Create a quotation with a line total, or ensure an existing order has no cutting list
+                      yet.
+                    </p>
+                  ) : null}
                 </div>
-                {isCreate ? (
-                  <p className="md:col-span-2 text-[9px] text-slate-500 leading-snug">
-                    Only quotations with <span className="font-semibold text-slate-700">at least 50% paid</span> and{' '}
-                    <span className="font-semibold text-slate-700">no existing cutting list</span> are listed.
-                  </p>
-                ) : null}
-                {isCreate && selectableQuotations.length === 0 ? (
-                  <p className="md:col-span-2 text-[10px] font-medium text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
-                    No quotations qualify yet. Take payment to 50% on a quote, or finish any cutting list tied to a quote
-                    you need to reuse.
-                  </p>
-                ) : null}
 
                 <div className="relative">
                   <label className={label}>Cutting date</label>
@@ -594,6 +723,30 @@ const CuttingListModal = ({
                   </select>
                   <Cog size={12} className="absolute right-2 bottom-2.5 text-slate-300 pointer-events-none" />
                 </div>
+                {isCreate && quotationRef && selectedQuotation && !meetsCuttingListPayThreshold(selectedQuotation) && (
+                  <div className="md:col-span-2 p-4 rounded-xl border border-amber-200 bg-amber-50 space-y-3">
+                    <div className="flex items-start gap-3">
+                      <AlertTriangle className="text-amber-600 shrink-0 mt-0.5" size={20} />
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-amber-900">Low payment ({payPercentOnQuote}%)</p>
+                        <p className="text-[10px] text-amber-800 leading-snug">
+                          You cannot save this cutting list until a manager approves production for this quotation on the Manager dashboard
+                          (Transaction Intel → Override). After approval, refresh and try again.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        navigate(`/manager?quoteRef=${encodeURIComponent(quotationRef)}`);
+                      }}
+                      className="w-full sm:w-auto px-4 py-2.5 rounded-lg bg-[#134e4a] text-white text-[9px] font-bold uppercase tracking-wider hover:bg-[#0f3d39] transition-colors"
+                    >
+                      Open Manager dashboard for this quotation
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
 

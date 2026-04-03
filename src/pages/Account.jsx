@@ -1,60 +1,49 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Landmark,
   Plus,
   ShieldCheck,
-  Banknote,
   CheckCircle2,
   X,
   Edit3,
   Activity,
   ArrowDownLeft,
-  ChevronRight,
   Search,
   CreditCard,
-  Receipt,
   ClipboardList,
   ArrowRightLeft,
   Truck,
   BookOpen,
   AlertCircle,
   RotateCcw,
+  Printer,
+  Paperclip,
 } from 'lucide-react';
 
 import { MainPanel, PageHeader, PageShell, PageTabs, ModalFrame } from '../components/layout';
-import {
-  EXPENSES_MOCK,
-  PAYMENT_REQUESTS_MOCK,
-  ACCOUNTS_PAYABLE_MOCK,
-  BANK_RECONCILIATION_MOCK,
-  formatNgn,
-} from '../Data/mockData';
+import { formatNgn } from '../Data/mockData';
 import { useToast } from '../context/ToastContext';
 import { useInventory } from '../context/InventoryContext';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { apiFetch } from '../lib/apiBase';
-import { loadTreasuryAccounts, saveTreasuryAccounts } from '../lib/treasuryAccountsStore';
 import {
-  loadRefunds,
-  saveRefunds,
   normalizeRefund,
   approvedRefundsAwaitingPayment,
   refundApprovedAmount,
   refundOutstandingAmount,
 } from '../lib/refundsStore';
 import { liveReceivablesNgn, openAuditQueue } from '../lib/liveAnalytics';
+import { printExpenseRequestRecord } from '../lib/expenseRequestPrint';
+import { EXPENSE_CATEGORY_OPTIONS } from '../../shared/expenseCategories.js';
 
 const TAB_LABELS = {
   treasury: 'Treasury',
   payables: 'Payables',
   movements: 'Fund movements',
-  expenses: 'Expenses',
-  requests: 'Payment requests',
+  disbursements: 'Expenses & requests',
   audit: 'Audit & reconciliation',
 };
-
-const TODAY_ISO = '2026-03-28';
 
 const nextExpenseId = (list) => {
   const nums = list
@@ -64,20 +53,23 @@ const nextExpenseId = (list) => {
   return `EXP-2026-${String(n).padStart(3, '0')}`;
 };
 
-const nextRequestId = (list) => {
-  const nums = list
-    .map((r) => parseInt(r.requestID.replace(/\D/g, ''), 10))
-    .filter((n) => !Number.isNaN(n));
-  const n = nums.length ? Math.max(...nums) + 1 : 1;
-  return `PREQ-2026-${String(n).padStart(3, '0')}`;
-};
-
 const normalizePaymentRequest = (row) => ({
   ...row,
   paidAmountNgn: Number(row?.paidAmountNgn) || 0,
   paidAtISO: row?.paidAtISO || '',
   paidBy: row?.paidBy || '',
   paymentNote: row?.paymentNote || '',
+  branchId: row?.branchId || '',
+  expenseCategory: row?.expenseCategory || '',
+  isStaffLoan: Boolean(row?.isStaffLoan),
+  hrRequestId: row?.hrRequestId || '',
+  staffUserId: row?.staffUserId || '',
+  staffDisplayName: row?.staffDisplayName || '',
+  requestReference: row?.requestReference || '',
+  lineItems: Array.isArray(row?.lineItems) ? row.lineItems : [],
+  attachmentName: row?.attachmentName || '',
+  attachmentMime: row?.attachmentMime || '',
+  attachmentPresent: Boolean(row?.attachmentPresent),
 });
 
 const createRequestPayLine = (defaultAccountId = '', amount = '') => ({
@@ -86,6 +78,44 @@ const createRequestPayLine = (defaultAccountId = '', amount = '') => ({
   amount: amount === '' ? '' : String(amount),
   reference: '',
 });
+
+const createExpenseRequestLineItem = () => ({
+  id: `li-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+  item: '',
+  unit: '',
+  unitPriceNgn: '',
+});
+
+function expenseRequestLineTotal(row) {
+  const u = Number(row.unit);
+  const p = Number(row.unitPriceNgn);
+  if (!u || Number.isNaN(p)) return 0;
+  return Math.round(u * p);
+}
+
+const TREASURY_STATEMENT_TYPE_LABEL = {
+  RECEIPT_IN: 'Customer receipt',
+  ADVANCE_IN: 'Advance deposit',
+  INTERNAL_TRANSFER_IN: 'Transfer in',
+  INTERNAL_TRANSFER_OUT: 'Transfer out',
+  EXPENSE: 'Expense',
+  AP_PAYMENT: 'Accounts payable payment',
+  SUPPLIER_PAYMENT: 'Supplier payment',
+  PO_SUPPLIER_PAYMENT: 'Supplier payment',
+  REFUND_PAYOUT: 'Customer refund payout',
+  ADVANCE_REFUND_OUT: 'Advance refund',
+  PAYMENT_REQUEST_OUT: 'Payment request payout',
+  TRANSPORT_PAYMENT: 'Transport / haulage',
+};
+
+function treasuryMovementStatementLabel(m) {
+  const kind = TREASURY_STATEMENT_TYPE_LABEL[m.type] || m.type || 'Treasury movement';
+  const bits = [kind];
+  if (m.counterpartyName) bits.push(m.counterpartyName);
+  if (m.reference) bits.push(`Ref ${m.reference}`);
+  if (m.note) bits.push(m.note);
+  return bits.join(' · ');
+}
 
 const Account = () => {
   const location = useLocation();
@@ -103,6 +133,8 @@ const Account = () => {
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [showApPaymentModal, setShowApPaymentModal] = useState(false);
   const [showRefundPayModal, setShowRefundPayModal] = useState(false);
+  const [showBankReconModal, setShowBankReconModal] = useState(false);
+  const [statementAccount, setStatementAccount] = useState(null);
   const [selectedPayment, setSelectedPayment] = useState(null);
   const [selectedAp, setSelectedAp] = useState(null);
   const [refundPayTarget, setRefundPayTarget] = useState(null);
@@ -111,9 +143,9 @@ const Account = () => {
   const [refundPaymentNote, setRefundPaymentNote] = useState('');
   const [requestPayLines, setRequestPayLines] = useState([]);
   const [requestPayNote, setRequestPayNote] = useState('');
-  const [customerRefunds, setCustomerRefunds] = useState(() => loadRefunds());
+  const [customerRefunds, setCustomerRefunds] = useState([]);
 
-  const [bankAccounts, setBankAccounts] = useState(() => loadTreasuryAccounts());
+  const [bankAccounts, setBankAccounts] = useState([]);
 
   const [newBank, setNewBank] = useState({
     name: '',
@@ -123,19 +155,7 @@ const Account = () => {
     balance: '',
   });
 
-  useEffect(() => {
-    saveTreasuryAccounts(bankAccounts);
-  }, [bankAccounts]);
-
-  /* eslint-disable react-hooks/set-state-in-effect */
-  useEffect(() => {
-    setCustomerRefunds(loadRefunds());
-  }, [location.key, activeTab]);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  const [payables, setPayables] = useState(() =>
-    ACCOUNTS_PAYABLE_MOCK.map((r) => ({ ...r }))
-  );
+  const [payables, setPayables] = useState([]);
   const [fundMovements, setFundMovements] = useState([]);
   const [transferForm, setTransferForm] = useState({
     fromId: '',
@@ -149,30 +169,54 @@ const Account = () => {
     debitAccountId: '',
   });
 
-  const [expenses, setExpenses] = useState(() => [...EXPENSES_MOCK]);
-  const [payRequests, setPayRequests] = useState(() => PAYMENT_REQUESTS_MOCK.map(normalizePaymentRequest));
-  const [bankReconciliation, setBankReconciliation] = useState(() =>
-    BANK_RECONCILIATION_MOCK.map((r) => ({ ...r }))
-  );
+  const [expenses, setExpenses] = useState([]);
+  const [payRequests, setPayRequests] = useState([]);
+  const [bankReconciliation, setBankReconciliation] = useState([]);
+  const [bankReconForm, setBankReconForm] = useState({
+    bankDateISO: '',
+    description: '',
+    amountNgn: '',
+    systemMatch: '',
+    branchId: '',
+  });
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    const s = ws?.snapshot;
-    if (!ws?.hasWorkspaceData || !s) return;
-    if (Array.isArray(s.treasuryAccounts) && s.treasuryAccounts.length > 0) {
+    if (!ws?.hasWorkspaceData || !ws?.snapshot) {
+      setBankAccounts([]);
+      setCustomerRefunds([]);
+      setExpenses([]);
+      setPayRequests([]);
+      setPayables([]);
+      setFundMovements([]);
+      setBankReconciliation([]);
+      return;
+    }
+    const s = ws.snapshot;
+    if (Array.isArray(s.treasuryAccounts)) {
       setBankAccounts(s.treasuryAccounts.map((a) => ({ ...a })));
+    } else {
+      setBankAccounts([]);
     }
     if (Array.isArray(s.refunds)) {
       setCustomerRefunds(s.refunds.map((r) => normalizeRefund(r)));
+    } else {
+      setCustomerRefunds([]);
     }
     if (Array.isArray(s.expenses)) {
       setExpenses(s.expenses.map((x) => ({ ...x })));
+    } else {
+      setExpenses([]);
     }
     if (Array.isArray(s.paymentRequests)) {
       setPayRequests(s.paymentRequests.map((x) => normalizePaymentRequest(x)));
+    } else {
+      setPayRequests([]);
     }
     if (Array.isArray(s.accountsPayable)) {
       setPayables(s.accountsPayable.map((x) => ({ ...x })));
+    } else {
+      setPayables([]);
     }
     if (Array.isArray(s.treasuryMovements)) {
       setFundMovements(
@@ -195,9 +239,13 @@ const Account = () => {
             };
           })
       );
+    } else {
+      setFundMovements([]);
     }
     if (Array.isArray(s.bankReconciliation)) {
       setBankReconciliation(s.bankReconciliation.map((x) => ({ ...x })));
+    } else {
+      setBankReconciliation([]);
     }
   }, [ws?.snapshot, ws?.hasWorkspaceData]);
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -213,17 +261,38 @@ const Account = () => {
   });
 
   const [requestForm, setRequestForm] = useState({
-    expenseID: '',
-    amountRequestedNgn: '',
+    lines: [createExpenseRequestLineItem()],
     requestDate: '',
+    requestReference: '',
+    expenseCategory: '',
     description: '',
+    attachment: null,
   });
+  const payRequestFileRef = useRef(null);
   const activeActorLabel = ws?.session?.user?.displayName ?? 'Finance';
   const canApproveRequests = ws?.hasPermission?.('finance.approve');
   const canPayRequests = ws?.hasPermission?.('finance.pay');
   const canReconcileBank = ws?.hasPermission?.('finance.post');
 
   const [reconDrafts, setReconDrafts] = useState({});
+  const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const branchOptions = useMemo(
+    () => ws?.snapshot?.workspaceBranches ?? ws?.session?.branches ?? [],
+    [ws?.snapshot?.workspaceBranches, ws?.session?.branches]
+  );
+  const branchNameById = useMemo(
+    () =>
+      Object.fromEntries(
+        branchOptions.map((b) => [String(b.id || '').trim(), b.name || b.code || b.id || 'Unknown branch'])
+      ),
+    [branchOptions]
+  );
+  const branchScopeLabel = useMemo(() => {
+    if (ws?.viewAllBranches) return 'All branches (HQ roll-up)';
+    const id = String(ws?.branchScope || ws?.session?.currentBranchId || '').trim();
+    if (!id) return 'Current branch';
+    return branchNameById[id] ? `Branch: ${branchNameById[id]}` : `Branch: ${id}`;
+  }, [branchNameById, ws?.branchScope, ws?.session?.currentBranchId, ws?.viewAllBranches]);
 
   const totals = useMemo(() => {
     const cash = bankAccounts.reduce((acc, curr) => acc + curr.balance, 0);
@@ -278,7 +347,16 @@ const Account = () => {
     () =>
       liveTreasuryMovements
         .filter((m) =>
-          ['EXPENSE', 'AP_PAYMENT', 'SUPPLIER_PAYMENT', 'REFUND_PAYOUT', 'ADVANCE_REFUND_OUT'].includes(m.type)
+          [
+            'EXPENSE',
+            'AP_PAYMENT',
+            'SUPPLIER_PAYMENT',
+            'PO_SUPPLIER_PAYMENT',
+            'REFUND_PAYOUT',
+            'ADVANCE_REFUND_OUT',
+            'PAYMENT_REQUEST_OUT',
+            'TRANSPORT_PAYMENT',
+          ].includes(m.type)
         )
         .reduce((sum, m) => sum + Math.abs(Math.min(0, m.amountNgn || 0)), 0),
     [liveTreasuryMovements]
@@ -308,12 +386,6 @@ const Account = () => {
     [bankReconciliation]
   );
 
-  const expenseCategorySuggestions = useMemo(() => {
-    const rows = ws?.snapshot?.masterData?.expenseCategories;
-    if (!Array.isArray(rows)) return [];
-    return rows.filter((r) => r.active).map((r) => r.name).filter(Boolean);
-  }, [ws?.snapshot?.masterData?.expenseCategories]);
-
   const isAnyModalOpen =
     showPaymentEntry ||
     showAddBank ||
@@ -321,7 +393,23 @@ const Account = () => {
     showPayRequestModal ||
     showTransferModal ||
     showApPaymentModal ||
-    showRefundPayModal;
+    showRefundPayModal ||
+    showBankReconModal ||
+    statementAccount != null;
+
+  const accountStatementLines = useMemo(() => {
+    if (!statementAccount) return [];
+    const id = Number(statementAccount.id);
+    return liveTreasuryMovements
+      .filter((m) => Number(m.treasuryAccountId) === id)
+      .slice()
+      .sort((a, b) => {
+        const ta = String(a.postedAtISO || '');
+        const tb = String(b.postedAtISO || '');
+        if (ta !== tb) return tb.localeCompare(ta);
+        return String(b.id || '').localeCompare(String(a.id || ''));
+      });
+  }, [statementAccount, liveTreasuryMovements]);
 
   const refundsAwaitingPay = useMemo(
     () => approvedRefundsAwaitingPayment(customerRefunds),
@@ -407,43 +495,13 @@ const Account = () => {
       }
       await ws.refresh();
     } else {
-      const paidAtISO = new Date().toISOString();
-      const next = customerRefunds.map((r) =>
-        r.refundID === rid
-          ? normalizeRefund({
-              ...r,
-              status:
-                (Number(r.paidAmountNgn) || 0) + refundPayTotalNgn >= refundApprovedAmount(r)
-                  ? 'Paid'
-                  : 'Approved',
-              paidAtISO,
-              paidBy,
-              paidAmountNgn: (Number(r.paidAmountNgn) || 0) + refundPayTotalNgn,
-              paymentNote: refundPaymentNote.trim(),
-              payoutHistory: [
-                ...(Array.isArray(r.payoutHistory) ? r.payoutHistory : []),
-                ...validLines.map((line, idx) => ({
-                  id: `${rid}-${Date.now()}-${idx}`,
-                  postedAtISO: paidAtISO,
-                  treasuryAccountId: line.treasuryAccountId,
-                  accountName: bankAccounts.find((account) => account.id === line.treasuryAccountId)?.name || '',
-                  amountNgn: line.amountNgn,
-                  reference: line.reference,
-                  note: refundPaymentNote.trim(),
-                })),
-              ],
-            })
-          : r
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to record refund payouts — workspace is read-only.'
+          : 'Connect to the API to record refund payouts.',
+        { variant: 'info' }
       );
-      const nextBanks = bankAccounts.map((a) => {
-        const applied = validLines
-          .filter((line) => line.treasuryAccountId === a.id)
-          .reduce((sum, line) => sum + line.amountNgn, 0);
-        return applied > 0 ? { ...a, balance: a.balance - applied } : a;
-      });
-      saveRefunds(next);
-      setCustomerRefunds(next);
-      setBankAccounts(nextBanks);
+      return;
     }
     setShowRefundPayModal(false);
     setRefundPayTarget(null);
@@ -487,6 +545,10 @@ const Account = () => {
     }
     if (outstanding <= 0) {
       showToast('This payment request is already fully paid.', { variant: 'info' });
+      return;
+    }
+    if (!ws?.viewAllBranches && req?.branchId && ws?.branchScope && req.branchId !== ws.branchScope) {
+      showToast(`This request belongs to ${req.branchId}. Switch branch before payout.`, { variant: 'error' });
       return;
     }
     setSelectedPayment({
@@ -552,28 +614,13 @@ const Account = () => {
       }
       await ws.refresh();
     } else {
-      const paidAtISO = new Date().toISOString().slice(0, 10);
-      setPayRequests((prev) =>
-        prev.map((row) =>
-          row.requestID === selectedPayment.id
-            ? normalizePaymentRequest({
-                ...row,
-                paidAmountNgn: (Number(row.paidAmountNgn) || 0) + requestPayTotalNgn,
-                paidAtISO,
-                paidBy: activeActorLabel,
-                paymentNote: requestPayNote.trim(),
-              })
-            : row
-        )
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to record payouts — workspace is read-only.'
+          : 'Connect to the API to record payment request payouts.',
+        { variant: 'info' }
       );
-      setBankAccounts((prev) =>
-        prev.map((account) => {
-          const applied = validLines
-            .filter((line) => line.treasuryAccountId === account.id)
-            .reduce((sum, line) => sum + line.amountNgn, 0);
-          return applied > 0 ? { ...account, balance: account.balance - applied } : account;
-        })
-      );
+      return;
     }
 
     const fullyPaid = requestPayTotalNgn >= outstanding;
@@ -593,8 +640,7 @@ const Account = () => {
       { id: 'treasury', icon: <Landmark size={16} />, label: 'Treasury' },
       { id: 'payables', icon: <Truck size={16} />, label: 'Payables' },
       { id: 'movements', icon: <ArrowRightLeft size={16} />, label: 'Movements' },
-      { id: 'expenses', icon: <Receipt size={16} />, label: 'Expenses' },
-      { id: 'requests', icon: <ClipboardList size={16} />, label: 'Requests' },
+      { id: 'disbursements', icon: <ClipboardList size={16} />, label: 'Expenses & requests' },
       { id: 'audit', icon: <ShieldCheck size={16} />, label: 'Audit' },
     ],
     []
@@ -626,14 +672,6 @@ const Account = () => {
       });
       setShowTransferModal(true);
     }
-    if (activeTab === 'expenses') {
-      setExpenseForm((f) => ({
-        ...f,
-        debitAccountId: String(bankAccounts[0]?.id ?? ''),
-      }));
-      setShowExpenseModal(true);
-    }
-    if (activeTab === 'requests') setShowPayRequestModal(true);
   };
 
   const newRecordLabel =
@@ -643,20 +681,58 @@ const Account = () => {
         ? 'Pay supplier'
         : activeTab === 'movements'
           ? 'New transfer'
-          : activeTab === 'expenses'
-            ? 'New expense'
-            : activeTab === 'requests'
-              ? 'New payment request'
-              : null;
+          : null;
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     const tab = location.state?.accountsTab;
     if (tab !== 'requests' && tab !== 'payments') return;
-    setActiveTab('requests');
+    setActiveTab('disbursements');
     navigate(location.pathname, { replace: true, state: {} });
   }, [location.state, location.pathname, navigate]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  const reconSuggestionsById = useMemo(() => {
+    const rows = ws?.hasWorkspaceData ? liveTreasuryMovements : [];
+    const toIso = (value) => String(value || '').slice(0, 10);
+    const toEpoch = (iso) => {
+      if (!iso) return Number.NaN;
+      const t = Date.parse(iso);
+      return Number.isNaN(t) ? Number.NaN : t;
+    };
+    const out = {};
+    for (const line of bankReconciliation) {
+      const lineAmt = Math.abs(Number(line.amountNgn) || 0);
+      const lineDate = toIso(line.bankDateISO);
+      const lineTs = toEpoch(lineDate);
+      let best = null;
+      for (const m of rows) {
+        const mAmt = Math.abs(Number(m.amountNgn) || 0);
+        if (Math.abs(mAmt - lineAmt) > 1) continue;
+        const mDate = toIso(m.postedAtISO);
+        const mTs = toEpoch(mDate);
+        const dayDiff =
+          Number.isFinite(lineTs) && Number.isFinite(mTs)
+            ? Math.round(Math.abs(mTs - lineTs) / (1000 * 60 * 60 * 24))
+            : 999;
+        if (dayDiff > 3) continue;
+        const score = dayDiff;
+        if (!best || score < best.score) {
+          best = {
+            score,
+            text: [m.reference, m.counterpartyName, m.note, m.sourceId].filter(Boolean).join(' · ') || m.type || '',
+          };
+        }
+      }
+      if (best?.text) {
+        out[line.id] = {
+          text: best.text,
+          confidence: best.score === 0 ? 'High' : best.score === 1 ? 'Medium' : 'Low',
+        };
+      }
+    }
+    return out;
+  }, [bankReconciliation, liveTreasuryMovements, ws?.hasWorkspaceData]);
 
   const saveExpense = async (e) => {
     e.preventDefault();
@@ -697,12 +773,13 @@ const Account = () => {
       }
       await ws.refresh();
     } else {
-      const next = [row, ...expenses];
-      const nextBanks = bankAccounts.map((a) =>
-        a.id === debitId ? { ...a, balance: a.balance - amount } : a
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to save expenses — workspace is read-only.'
+          : 'Connect to the API to record expenses.',
+        { variant: 'info' }
       );
-      setExpenses(next);
-      setBankAccounts(nextBanks);
+      return;
     }
     setExpenseForm({
       expenseType: 'COGS — materials & stock',
@@ -714,30 +791,49 @@ const Account = () => {
       reference: '',
     });
     setShowExpenseModal(false);
-    showToast(ws?.canMutate ? 'Expense recorded and synced.' : 'Expense recorded (this browser only).');
+    showToast('Expense recorded and synced.');
   };
 
   const savePayRequest = async (e) => {
     e.preventDefault();
-    const amount = Number(requestForm.amountRequestedNgn);
-    if (!requestForm.expenseID || Number.isNaN(amount) || amount <= 0) return;
-    const row = {
-      requestID: nextRequestId(payRequests),
-      expenseID: requestForm.expenseID,
-      amountRequestedNgn: amount,
-      requestDate: requestForm.requestDate || new Date().toISOString().slice(0, 10),
-      approvalStatus: 'Pending',
-      description: requestForm.description.trim() || '—',
+    const expenseCategory = requestForm.expenseCategory.trim();
+    if (!expenseCategory) {
+      showToast('Select an expense category from the list.', { variant: 'error' });
+      return;
+    }
+    const lineItems = requestForm.lines
+      .map((row) => {
+        const item = String(row.item || '').trim();
+        const unit = Number.parseFloat(String(row.unit ?? '').replace(/,/g, ''));
+        const unitPriceNgn = Number(row.unitPriceNgn);
+        return { item, unit, unitPriceNgn };
+      })
+      .filter((r) => r.item && r.unit > 0 && Number.isFinite(r.unitPriceNgn) && r.unitPriceNgn >= 0);
+    if (lineItems.length < 1) {
+      showToast('Add at least one line with description, quantity, and unit price.', { variant: 'error' });
+      return;
+    }
+    const requestDate = requestForm.requestDate || new Date().toISOString().slice(0, 10);
+    const description = requestForm.description.trim() || '—';
+    const requestReference = requestForm.requestReference.trim();
+    const body = {
+      requestDate,
+      description,
+      requestReference,
+      expenseCategory,
+      lineItems,
     };
+    if (requestForm.attachment?.dataBase64) {
+      body.attachment = {
+        name: requestForm.attachment.name,
+        mime: requestForm.attachment.mime,
+        dataBase64: requestForm.attachment.dataBase64,
+      };
+    }
     if (ws?.canMutate) {
       const { ok, data } = await apiFetch('/api/payment-requests', {
         method: 'POST',
-        body: JSON.stringify({
-          expenseID: row.expenseID,
-          amountRequestedNgn: row.amountRequestedNgn,
-          requestDate: row.requestDate,
-          description: row.description,
-        }),
+        body: JSON.stringify(body),
       });
       if (!ok || !data?.ok) {
         showToast(data?.error || 'Could not save request on server.', { variant: 'error' });
@@ -745,16 +841,25 @@ const Account = () => {
       }
       await ws.refresh();
     } else {
-      setPayRequests((prev) => [normalizePaymentRequest(row), ...prev]);
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to submit payment requests — workspace is read-only.'
+          : 'Connect to the API to submit payment requests.',
+        { variant: 'info' }
+      );
+      return;
     }
     setRequestForm({
-      expenseID: '',
-      amountRequestedNgn: '',
+      lines: [createExpenseRequestLineItem()],
       requestDate: '',
+      requestReference: '',
+      expenseCategory: '',
       description: '',
+      attachment: null,
     });
+    if (payRequestFileRef.current) payRequestFileRef.current.value = '';
     setShowPayRequestModal(false);
-    showToast('Payment request submitted for approval.');
+    showToast('Expense request submitted for approval.');
   };
 
   const addBank = async (e) => {
@@ -762,18 +867,6 @@ const Account = () => {
     const bal = Number(newBank.balance || 0);
     const accName = newBank.name.trim();
     if (!accName) return;
-    const nextId = bankAccounts.length ? Math.max(...bankAccounts.map((b) => b.id)) + 1 : 1;
-    const next = [
-      ...bankAccounts,
-      {
-        id: nextId,
-        name: accName,
-        bankName: newBank.bankName.trim(),
-        type: newBank.type,
-        accNo: newBank.accNo.trim() || 'N/A',
-        balance: Number.isNaN(bal) ? 0 : bal,
-      },
-    ];
     if (ws?.canMutate) {
       const { ok, data } = await apiFetch('/api/treasury/accounts', {
         method: 'POST',
@@ -791,7 +884,13 @@ const Account = () => {
       }
       await ws.refresh();
     } else {
-      setBankAccounts(next);
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to add treasury accounts — workspace is read-only.'
+          : 'Connect to the API to add treasury accounts.',
+        { variant: 'info' }
+      );
+      return;
     }
     setNewBank({ name: '', bankName: '', type: 'Bank', accNo: '', balance: '' });
     setShowAddBank(false);
@@ -833,25 +932,13 @@ const Account = () => {
       }
       await ws.refresh();
     } else {
-      const nextBanks = bankAccounts.map((a) => {
-        if (a.id === fromId) return { ...a, balance: a.balance - amount };
-        if (a.id === toId) return { ...a, balance: a.balance + amount };
-        return a;
-      });
-      setBankAccounts(nextBanks);
-      const fromName = bankAccounts.find((a) => a.id === fromId)?.name ?? '';
-      const toName = bankAccounts.find((a) => a.id === toId)?.name ?? '';
-      setFundMovements((prev) => [
-        {
-          id: `FM-${String(prev.length + 1).padStart(3, '0')}`,
-          at: new Date().toISOString().slice(0, 10),
-          fromName,
-          toName,
-          amountNgn: amount,
-          reference: transferForm.reference.trim() || '—',
-        },
-        ...prev,
-      ]);
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to post transfers — workspace is read-only.'
+          : 'Connect to the API to post treasury transfers.',
+        { variant: 'info' }
+      );
+      return;
     }
     setTransferForm({ fromId: '', toId: '', amountNgn: '', reference: '' });
     setShowTransferModal(false);
@@ -908,18 +995,13 @@ const Account = () => {
       }
       await ws.refresh();
     } else {
-      const nextPayables = payables.map((p) =>
-        p.apID === selectedAp.apID ? { ...p, paidNgn: p.paidNgn + apply } : p
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to record supplier payments — workspace is read-only.'
+          : 'Connect to the API to record accounts payable payments.',
+        { variant: 'info' }
       );
-      const nextBanks = bankAccounts.map((a) =>
-        a.id === debitId ? { ...a, balance: a.balance - apply } : a
-      );
-      setPayables(nextPayables);
-      setBankAccounts(nextBanks);
-      if (shouldAdvancePo) {
-        const st = await setPurchaseOrderStatus(poRef, 'In Transit');
-        if (st.ok) procurementNote = ` ${poRef} → In Transit (await GRN in Operations).`;
-      }
+      return;
     }
     setShowApPaymentModal(false);
     setSelectedAp(null);
@@ -947,20 +1029,13 @@ const Account = () => {
       }
       await ws.refresh();
     } else {
-      setPayRequests((prev) =>
-        prev.map((req) =>
-          req.requestID === requestID
-            ? {
-                ...req,
-                approvalStatus: status,
-                approvedBy: activeActorLabel,
-                approvedAtISO: new Date().toISOString().slice(0, 10),
-                approvalNote:
-                  status === 'Approved' ? 'Approved for treasury action.' : 'Rejected during finance review.',
-              }
-            : req
-        )
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to review payment requests — workspace is read-only.'
+          : 'Connect to the API to approve or reject payment requests.',
+        { variant: 'info' }
       );
+      return;
     }
     showToast(`Payment request ${requestID} marked ${status}.`);
   };
@@ -975,6 +1050,32 @@ const Account = () => {
       return blob.includes(qq);
     });
   }, [expenses, searchQuery]);
+
+  const filteredPayRequests = useMemo(() => {
+    const qq = searchQuery.trim().toLowerCase();
+    if (!qq) return payRequests;
+    return payRequests.filter((req) => {
+      const lineBlob = (req.lineItems || [])
+        .map((x) => [x.item, x.lineTotalNgn, x.unitPriceNgn].filter(Boolean).join(' '))
+        .join(' ');
+      const blob = [
+        req.requestID,
+        req.expenseID,
+        req.description,
+        req.requestReference,
+        req.expenseCategory,
+        lineBlob,
+        req.approvalStatus,
+        req.approvedBy,
+        req.paidBy,
+        req.requestDate,
+        req.attachmentName,
+      ]
+        .join(' ')
+        .toLowerCase();
+      return blob.includes(qq);
+    });
+  }, [payRequests, searchQuery]);
 
   const filteredPayables = useMemo(() => {
     const qq = searchQuery.trim().toLowerCase();
@@ -1025,15 +1126,78 @@ const Account = () => {
     await ws.refresh();
   };
 
+  const openBankReconModal = () => {
+    const scoped = String(ws?.branchScope || ws?.session?.currentBranchId || '').trim();
+    const firstBranch = String(branchOptions[0]?.id ?? '').trim();
+    setBankReconForm({
+      bankDateISO: todayIso,
+      description: '',
+      amountNgn: '',
+      systemMatch: '',
+      branchId: ws?.viewAllBranches ? scoped || firstBranch : scoped,
+    });
+    setShowBankReconModal(true);
+  };
+
+  const saveBankReconLineCreate = async (e) => {
+    e.preventDefault();
+    if (!ws?.canMutate) {
+      showToast('Connect to the API server to add bank statement lines.', { variant: 'info' });
+      return;
+    }
+    const description = String(bankReconForm.description ?? '').trim();
+    const rawAmt = Number(String(bankReconForm.amountNgn ?? '').replace(/,/g, ''));
+    const amountNgn = Number.isFinite(rawAmt) ? Math.round(rawAmt) : Number.NaN;
+    const bankDateISO = String(bankReconForm.bankDateISO ?? '').trim();
+    if (!bankDateISO) {
+      showToast('Statement date is required.', { variant: 'error' });
+      return;
+    }
+    if (!description) {
+      showToast('Bank description is required.', { variant: 'error' });
+      return;
+    }
+    if (!Number.isFinite(amountNgn) || amountNgn === 0) {
+      showToast('Enter a non-zero amount (negative for debits, positive for credits).', { variant: 'error' });
+      return;
+    }
+    const body = {
+      bankDateISO,
+      description,
+      amountNgn,
+      systemMatch: String(bankReconForm.systemMatch ?? '').trim() || undefined,
+      status: 'Review',
+    };
+    if (ws?.viewAllBranches && String(bankReconForm.branchId ?? '').trim()) {
+      body.branchId = String(bankReconForm.branchId).trim();
+    }
+    const { ok, data } = await apiFetch('/api/bank-reconciliation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!ok || !data?.ok) {
+      showToast(data?.error || 'Could not add statement line.', { variant: 'error' });
+      return;
+    }
+    showToast('Statement line added — in review.');
+    setShowBankReconModal(false);
+    await ws.refresh();
+  };
+
   return (
     <PageShell blurred={isAnyModalOpen}>
       <PageHeader
+        eyebrow="Finance"
         title="Finance & accounts"
         subtitle="Receivables, payables, treasury, approvals, and reconciliation from live records"
         actions={
           <PageTabs tabs={accountTabs} value={activeTab} onChange={setActiveTab} />
         }
       />
+      <div className="mb-4 inline-flex items-center rounded-full border border-teal-100 bg-teal-50 px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-teal-800">
+        {branchScopeLabel}
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
         <div className="lg:col-span-1 space-y-6">
@@ -1076,6 +1240,51 @@ const Account = () => {
               Supplier invoices · Payables tab
             </p>
           </button>
+
+          {activeTab === 'disbursements' ? (
+            <div className="rounded-zarewa border border-teal-100/80 bg-gradient-to-br from-teal-50/50 to-white p-4 shadow-sm space-y-3">
+              <h3 className="z-section-title flex items-center gap-2">
+                <ClipboardList size={14} />
+                Expenses & requests
+              </h3>
+              <p className="text-[10px] text-gray-500 leading-snug">
+                Raise a payment request for approval, or post a completed expense to treasury.
+              </p>
+              <div className="flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRequestForm({
+                      lines: [createExpenseRequestLineItem()],
+                      requestDate: todayIso,
+                      requestReference: '',
+                      expenseCategory: '',
+                      description: '',
+                      attachment: null,
+                    });
+                    if (payRequestFileRef.current) payRequestFileRef.current.value = '';
+                    setShowPayRequestModal(true);
+                  }}
+                  className="z-btn-primary w-full justify-center gap-2 !text-[11px]"
+                >
+                  <Plus size={16} /> New expense request
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExpenseForm((f) => ({
+                      ...f,
+                      debitAccountId: String(bankAccounts[0]?.id ?? ''),
+                    }));
+                    setShowExpenseModal(true);
+                  }}
+                  className="z-btn-secondary w-full justify-center gap-2 !text-[11px]"
+                >
+                  <Plus size={16} /> New expense
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           <div className="z-card-muted">
             <h3 className="z-section-title flex items-center gap-2">
@@ -1142,21 +1351,21 @@ const Account = () => {
             {activeTab === 'treasury' && (
               <div className="space-y-6 animate-in fade-in duration-300">
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div className="rounded-2xl border border-gray-100 bg-gray-50/80 px-4 py-3">
-                    <p className="text-[9px] font-bold text-gray-400 uppercase">Cash inflows</p>
-                    <p className="text-sm font-black text-emerald-700">
+                  <div className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md shadow-sm px-3 py-2.5">
+                    <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Cash inflows</p>
+                    <p className="text-sm font-black text-emerald-700 tabular-nums">
                       {formatNgn(ws?.hasWorkspaceData ? treasuryInflowsNgn : liveReceipts.reduce((s, r) => s + (r.amountNgn || 0), 0))}
                     </p>
-                    <p className="text-[9px] text-gray-400 mt-1">Receipts and advance deposits</p>
+                    <p className="text-[8px] text-slate-500 mt-0.5 leading-snug">Receipts and advance deposits</p>
                   </div>
-                  <div className="rounded-2xl border border-gray-100 bg-gray-50/80 px-4 py-3">
-                    <p className="text-[9px] font-bold text-gray-400 uppercase">Cash outflows</p>
-                    <p className="text-sm font-black text-[#134e4a]">
+                  <div className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md shadow-sm px-3 py-2.5">
+                    <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Cash outflows</p>
+                    <p className="text-sm font-black text-[#134e4a] tabular-nums">
                       {formatNgn(ws?.hasWorkspaceData ? treasuryOutflowsNgn : expenses.reduce((s, e) => s + e.amountNgn, 0))}
                     </p>
-                    <p className="text-[9px] text-gray-400 mt-1">Expenses, refunds, and supplier payouts</p>
+                    <p className="text-[8px] text-slate-500 mt-0.5 leading-snug">Expenses, refunds, and supplier payouts</p>
                   </div>
-                  <div className="rounded-2xl border border-amber-100 bg-amber-50/60 px-4 py-3">
+                  <div className="rounded-lg border border-amber-200/80 bg-amber-50/50 backdrop-blur-md shadow-sm px-3 py-2.5">
                     <p className="text-[9px] font-bold text-amber-800 uppercase">Reconciliation</p>
                     <p className="text-sm font-black text-amber-900">
                       {reconciliationFlags} item{reconciliationFlags !== 1 ? 's' : ''} to review
@@ -1186,69 +1395,83 @@ const Account = () => {
                       Sales submits refund requests with a breakdown; managers approve. Record bank/cash
                       payment here once funds leave the business.
                     </p>
-                    <ul className="space-y-2">
-                      {refundsAwaitingPay.map((r) => (
-                        <li
-                          key={r.refundID}
-                          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white bg-white/90 px-4 py-3 text-xs"
-                        >
-                          <div className="min-w-0">
-                            <p className="font-mono font-bold text-[#134e4a]">{r.refundID}</p>
-                            <p className="text-gray-600 truncate">{r.customer}</p>
-                            <p className="text-[10px] text-gray-400 mt-0.5">
-                              {r.quotationRef ? `Quote ${r.quotationRef}` : 'No quote ref'}
-                              {r.approvedBy ? ` · Approved by ${r.approvedBy}` : ''}
-                            </p>
-                            <p className="text-[10px] text-gray-500 mt-1 tabular-nums">
-                              Approved {formatNgn(refundApprovedAmount(r))} · Paid {formatNgn(Number(r.paidAmountNgn) || 0)}
-                            </p>
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                            <span className="text-sm font-black text-[#134e4a] tabular-nums">
-                              {formatNgn(refundOutstandingAmount(r))}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => openRefundPay(r)}
-                              className="z-btn-primary text-[9px] py-2 px-3"
-                            >
-                              Record payment
-                            </button>
-                          </div>
-                        </li>
-                      ))}
+                    <ul className="space-y-1.5">
+                      {refundsAwaitingPay.map((r) => {
+                        const meta2 = [
+                          r.quotationRef ? `Quote ${r.quotationRef}` : 'No quote ref',
+                          r.approvedBy ? `Approved by ${r.approvedBy}` : null,
+                          `Aprv ${formatNgn(refundApprovedAmount(r))} · Paid ${formatNgn(Number(r.paidAmountNgn) || 0)}`,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ');
+                        return (
+                          <li
+                            key={r.refundID}
+                            className="rounded-lg border border-rose-200/50 bg-white/40 backdrop-blur-md py-1.5 px-2.5 shadow-sm"
+                          >
+                            <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
+                              <div className="min-w-0 leading-tight flex-1">
+                                <p className="text-[11px] font-bold text-[#134e4a] truncate">
+                                  <span className="font-mono">{r.refundID}</span>
+                                  <span className="font-medium text-slate-600"> · {r.customer}</span>
+                                </p>
+                                <p className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2" title={meta2}>
+                                  {meta2}
+                                </p>
+                              </div>
+                              <div className="flex flex-col items-end gap-1 shrink-0">
+                                <span className="text-[11px] font-black text-[#134e4a] tabular-nums">
+                                  {formatNgn(refundOutstandingAmount(r))}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => openRefundPay(r)}
+                                  className="text-[8px] font-semibold uppercase tracking-wide text-sky-800 bg-sky-100 hover:bg-sky-200 px-2 py-1 rounded-md"
+                                >
+                                  Record pay
+                                </button>
+                              </div>
+                            </div>
+                          </li>
+                        );
+                      })}
                     </ul>
                   </div>
                 ) : null}
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                   {filteredBankAccounts.length === 0 ? (
-                    <div className="md:col-span-2 z-empty-state py-12">
+                    <div className="sm:col-span-2 lg:col-span-3 z-empty-state py-12">
                       <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">
                         No accounts match your search
                       </p>
                     </div>
                   ) : (
                     filteredBankAccounts.map((acc) => (
-                      <div
+                      <button
                         key={acc.id}
-                        className="p-6 rounded-zarewa border border-gray-100 bg-gray-50/50 hover:bg-white hover:shadow-xl hover:border-teal-100 transition-all group"
+                        type="button"
+                        onClick={() => setStatementAccount(acc)}
+                        className="text-left p-4 rounded-zarewa border border-gray-100 bg-gray-50/50 hover:bg-white hover:shadow-lg hover:border-teal-100 transition-all group cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/30"
                       >
-                        <div className="flex justify-between items-start mb-6">
-                          <div className="p-3 bg-white rounded-xl shadow-sm text-[#134e4a]">
-                            {acc.type === 'Bank' ? <Landmark size={20} /> : <CreditCard size={20} />}
+                        <div className="flex justify-between items-start mb-3">
+                          <div className="p-2 bg-white rounded-lg shadow-sm text-[#134e4a]">
+                            {acc.type === 'Bank' ? <Landmark size={18} /> : <CreditCard size={18} />}
                           </div>
-                          <span className="text-[10px] font-bold text-gray-400 uppercase tracking-tighter">
+                          <span className="text-[9px] font-bold text-gray-400 uppercase tracking-tighter">
                             {acc.accNo}
                           </span>
                         </div>
-                        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">
+                        <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-0.5">
                           {acc.name}
                         </p>
-                        <h4 className="text-2xl font-black text-[#134e4a] italic tracking-tighter">
+                        <h4 className="text-lg font-black text-[#134e4a] italic tracking-tighter">
                           ₦{acc.balance.toLocaleString()}
                         </h4>
-                      </div>
+                        <p className="text-[9px] text-teal-700/80 font-bold mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                          View statement
+                        </p>
+                      </button>
                     ))
                   )}
                 </div>
@@ -1268,65 +1491,69 @@ const Account = () => {
                     </p>
                   </div>
                 ) : (
-                  filteredPayables.map((p) => {
-                    const due = p.dueDateISO < TODAY_ISO;
-                    const open = p.paidNgn < p.amountNgn;
-                    return (
-                      <div
-                        key={p.apID}
-                        className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 p-6 bg-gray-50/50 border border-transparent rounded-2xl hover:border-teal-100 hover:bg-white transition-all"
-                      >
-                        <div className="min-w-0">
-                          <p className="text-xs font-bold text-[#134e4a] uppercase">{p.apID}</p>
-                          <p className="text-sm font-bold text-gray-800 mt-1">{p.supplierName}</p>
-                          <p className="text-[10px] text-gray-500 mt-1">
-                            PO {p.poRef} · Invoice {p.invoiceRef}
-                          </p>
-                          <div className="flex flex-wrap gap-2 mt-2">
-                            {open ? (
-                              <span className="text-[9px] font-bold uppercase px-2 py-0.5 rounded-full bg-amber-100 text-amber-900">
-                                Outstanding {formatNgn(p.amountNgn - p.paidNgn)}
+                  <ul className="space-y-1.5">
+                    {filteredPayables.map((p) => {
+                      const due = p.dueDateISO < todayIso;
+                      const open = p.paidNgn < p.amountNgn;
+                      const meta2 = [
+                        `PO ${p.poRef}`,
+                        `Inv ${p.invoiceRef}`,
+                        `Due ${p.dueDateISO}`,
+                        p.branchId ? branchNameById[p.branchId] || p.branchId : null,
+                        open ? `Out ${formatNgn(p.amountNgn - p.paidNgn)}` : 'Paid',
+                        due && open ? 'Past due' : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ');
+                      return (
+                        <li
+                          key={p.apID}
+                          className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md py-1.5 px-2.5 shadow-sm hover:bg-white/70 transition-colors"
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
+                            <div className="min-w-0 leading-tight flex-1">
+                              <p className="text-[11px] font-bold text-[#134e4a] truncate uppercase">
+                                {p.apID}
+                                <span className="font-medium text-slate-600 normal-case"> · {p.supplierName}</span>
+                              </p>
+                              <p
+                                className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2"
+                                title={meta2}
+                              >
+                                {meta2}
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <span className="text-[11px] font-black text-[#134e4a] tabular-nums">
+                                {formatNgn(p.amountNgn)}
                               </span>
-                            ) : (
-                              <span className="text-[9px] font-bold uppercase px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
-                                Paid
-                              </span>
-                            )}
-                            {due && open ? (
-                              <span className="text-[9px] font-bold uppercase px-2 py-0.5 rounded-full bg-red-100 text-red-800">
-                                Past due
-                              </span>
-                            ) : null}
+                              {open ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedAp(p);
+                                    setApPayForm({
+                                      amountNgn: String(p.amountNgn - p.paidNgn),
+                                      paymentMethod: 'Bank Transfer',
+                                      debitAccountId: String(bankAccounts[0]?.id ?? ''),
+                                    });
+                                    setShowApPaymentModal(true);
+                                  }}
+                                  className="text-[8px] font-semibold uppercase tracking-wide text-sky-800 bg-sky-100 hover:bg-sky-200 px-2 py-1 rounded-md"
+                                >
+                                  Pay
+                                </button>
+                              ) : (
+                                <span className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-emerald-200 bg-emerald-50 text-emerald-800">
+                                  Paid
+                                </span>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                        <div className="flex items-center gap-3 shrink-0">
-                          <div className="text-right">
-                            <p className="text-sm font-black text-[#134e4a]">
-                              {formatNgn(p.amountNgn)}
-                            </p>
-                            <p className="text-[10px] text-gray-400">Due {p.dueDateISO}</p>
-                          </div>
-                          {open ? (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedAp(p);
-                                setApPayForm({
-                                  amountNgn: String(p.amountNgn - p.paidNgn),
-                                  paymentMethod: 'Bank Transfer',
-                                  debitAccountId: String(bankAccounts[0]?.id ?? ''),
-                                });
-                                setShowApPaymentModal(true);
-                              }}
-                              className="z-btn-primary py-2.5 px-4 text-[10px]"
-                            >
-                              Pay
-                            </button>
-                          ) : null}
-                        </div>
-                      </div>
-                    );
-                  })
+                        </li>
+                      );
+                    })}
+                  </ul>
                 )}
               </div>
             )}
@@ -1363,18 +1590,25 @@ const Account = () => {
                     </p>
                   </div>
                 ) : (
-                  <ul className="space-y-2">
+                  <ul className="space-y-1.5">
                     {movementRows.map((m) => (
                       <li
                         key={m.id}
-                        className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-gray-100 bg-white px-4 py-3 text-xs"
+                        className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md py-1.5 px-2.5 shadow-sm"
                       >
-                        <span className="font-bold text-[#134e4a]">{m.id}</span>
-                        <span className="text-gray-600">
-                          {m.fromName} → {m.toName}
-                        </span>
-                        <span className="font-black text-[#134e4a]">{formatNgn(m.amountNgn)}</span>
-                        <span className="text-[10px] text-gray-400">{m.at}</span>
+                        <div className="flex items-center justify-between gap-2 min-w-0">
+                          <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
+                            <span className="font-mono">{m.id}</span>
+                            <span className="font-medium text-slate-600">
+                              {' '}
+                              · {m.fromName} → {m.toName}
+                            </span>
+                          </p>
+                          <span className="text-[11px] font-black text-[#134e4a] tabular-nums shrink-0">
+                            {formatNgn(m.amountNgn)}
+                          </span>
+                        </div>
+                        <p className="text-[8px] text-slate-500 mt-0.5 tabular-nums">{m.at}</p>
                       </li>
                     ))}
                   </ul>
@@ -1382,41 +1616,19 @@ const Account = () => {
               </div>
             )}
 
-            {activeTab === 'expenses' && (
-              <div className="space-y-4 animate-in slide-in-from-right-5">
-                {filteredExpenses.map((ex) => (
-                  <div
-                    key={ex.expenseID}
-                    className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-6 bg-gray-50/50 border border-transparent rounded-2xl hover:border-teal-100 hover:bg-white transition-all"
-                  >
-                    <div className="flex items-center gap-4 min-w-0">
-                      <div className="bg-white p-3 rounded-xl text-gray-400 text-[#134e4a] shadow-sm shrink-0">
-                        <Receipt size={18} />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-xs font-bold text-gray-700 uppercase">{ex.expenseID}</p>
-                        <p className="text-[10px] text-gray-500 mt-1">
-                          {ex.expenseType} · {ex.category}
-                        </p>
-                        <p className="text-[10px] text-gray-400 mt-1">
-                          {ex.paymentMethod} · Ref {ex.reference}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="text-left sm:text-right shrink-0">
-                      <p className="text-sm font-black text-[#134e4a]">
-                        {formatNgn(ex.amountNgn)}
-                      </p>
-                      <p className="text-[10px] font-bold text-gray-400 uppercase">{ex.date}</p>
-                    </div>
+            {activeTab === 'disbursements' && (
+              <div className="space-y-8 animate-in slide-in-from-right-5">
+                <section className="space-y-4">
+                  <div>
+                    <h3 className="text-xs font-bold uppercase tracking-widest text-[#134e4a]">
+                      1) Payment requests (approval queue)
+                    </h3>
+                    <p className="text-[11px] text-gray-500 mt-1">
+                      Raise and approve disbursement requests before treasury payout.
+                    </p>
                   </div>
-                ))}
-              </div>
-            )}
-
-            {activeTab === 'requests' && (
-              <div className="space-y-4 animate-in slide-in-from-right-5">
-                {payRequests.map((req) => {
+                <div className="space-y-1.5">
+                {filteredPayRequests.map((req) => {
                   const paidAmountNgn = Number(req.paidAmountNgn) || 0;
                   const outstandingNgn = Math.max(0, (Number(req.amountRequestedNgn) || 0) - paidAmountNgn);
                   const payoutState =
@@ -1428,116 +1640,172 @@ const Account = () => {
                           ? 'Part paid'
                           : 'Awaiting payout';
 
+                  const meta2 = [
+                    `Linked ${req.expenseID}`,
+                    req.expenseCategory ? req.expenseCategory : null,
+                    req.requestReference ? `Ref ${req.requestReference}` : null,
+                    req.description,
+                    req.lineItems?.length ? `${req.lineItems.length} line item(s)` : null,
+                    req.attachmentPresent ? `Attachment: ${req.attachmentName || 'file'}` : null,
+                    req.branchId ? branchNameById[req.branchId] || req.branchId : null,
+                    req.isStaffLoan ? 'Staff loan' : null,
+                    req.approvalStatus,
+                    payoutState,
+                    req.requestDate,
+                    `Rem ${formatNgn(outstandingNgn)}`,
+                    req.approvedBy
+                      ? `${req.approvedBy}${req.approvedAtISO ? ` · ${req.approvedAtISO}` : ''}`
+                      : null,
+                    req.paidBy || paidAmountNgn > 0
+                      ? `Paid ${formatNgn(paidAmountNgn)}${req.paidBy ? ` · ${req.paidBy}` : ''}${req.paidAtISO ? ` · ${req.paidAtISO}` : ''}`
+                      : null,
+                    req.approvalNote,
+                    req.paymentNote,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ');
+
                   return (
                     <div
                       key={req.requestID}
-                      className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 p-6 bg-gray-50/50 border border-transparent rounded-2xl hover:border-teal-100 hover:bg-white transition-all group"
+                      className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md py-1.5 px-2.5 shadow-sm hover:bg-white/70 transition-colors"
                     >
-                      <div className="flex items-center gap-4 min-w-0">
-                        <div className="bg-white p-3 rounded-xl text-gray-400 group-hover:text-[#134e4a] shadow-sm shrink-0">
-                          <Banknote size={18} />
-                        </div>
-                        <div className="min-w-0">
-                          <p className="text-xs font-bold text-gray-700 uppercase">{req.requestID}</p>
-                          <p className="text-[10px] text-gray-400 mt-1">
-                            Linked {req.expenseID} · {req.description}
-                          </p>
-                          {req.approvedBy ? (
-                            <p className="text-[10px] text-gray-400 mt-1">
-                              {req.approvedBy}
-                              {req.approvedAtISO ? ` · ${req.approvedAtISO}` : ''}
+                      <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
+                        <div className="min-w-0 leading-tight flex-1">
+                          <div className="flex items-center justify-between gap-2 min-w-0">
+                            <p className="text-[11px] font-bold text-[#134e4a] truncate uppercase">
+                              {req.requestID}
                             </p>
-                          ) : null}
-                          {(req.paidBy || paidAmountNgn > 0) ? (
-                            <p className="text-[10px] text-gray-400 mt-1">
-                              Paid {formatNgn(paidAmountNgn)}
-                              {req.paidBy ? ` · ${req.paidBy}` : ''}
-                              {req.paidAtISO ? ` · ${req.paidAtISO}` : ''}
-                            </p>
-                          ) : null}
-                          <div className="mt-2 flex flex-wrap items-center gap-2">
-                            <span
-                              className={`inline-flex px-3 py-1 rounded-full text-[9px] font-bold uppercase ${
-                                req.approvalStatus === 'Approved'
-                                  ? 'bg-emerald-100 text-emerald-800'
-                                  : req.approvalStatus === 'Rejected'
-                                    ? 'bg-rose-100 text-rose-800'
-                                    : 'bg-amber-100 text-amber-900'
-                              }`}
-                            >
-                              {req.approvalStatus}
-                            </span>
-                            <span
-                              className={`inline-flex px-3 py-1 rounded-full text-[9px] font-bold uppercase ${
-                                payoutState === 'Paid'
-                                  ? 'bg-emerald-100 text-emerald-800'
-                                  : payoutState === 'Part paid'
-                                    ? 'bg-sky-100 text-sky-800'
-                                    : payoutState === 'Awaiting payout'
-                                      ? 'bg-teal-100 text-teal-800'
-                                      : 'bg-slate-100 text-slate-700'
-                              }`}
-                            >
-                              {payoutState}
-                            </span>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <span
+                                className={`text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border ${
+                                  req.approvalStatus === 'Approved'
+                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                                    : req.approvalStatus === 'Rejected'
+                                      ? 'border-rose-200 bg-rose-50 text-rose-800'
+                                      : 'border-amber-200 bg-amber-50 text-amber-900'
+                                }`}
+                              >
+                                {req.approvalStatus}
+                              </span>
+                              <span
+                                className={`text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border ${
+                                  payoutState === 'Paid'
+                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                                    : payoutState === 'Part paid'
+                                      ? 'border-sky-200 bg-sky-50 text-sky-800'
+                                      : payoutState === 'Awaiting payout'
+                                        ? 'border-teal-200 bg-teal-50 text-teal-800'
+                                        : 'border-slate-200 bg-slate-50 text-slate-700'
+                                }`}
+                              >
+                                {payoutState}
+                              </span>
+                            </div>
                           </div>
-                          {req.approvalNote ? (
-                            <p className="text-[10px] text-gray-500 mt-2">{req.approvalNote}</p>
-                          ) : null}
-                          {req.paymentNote ? (
-                            <p className="text-[10px] text-gray-500 mt-1">{req.paymentNote}</p>
-                          ) : null}
+                          <p
+                            className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2"
+                            title={meta2}
+                          >
+                            {meta2}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <div className="text-right leading-tight">
+                            <p className="text-[11px] font-black text-[#134e4a] tabular-nums">
+                              {formatNgn(req.amountRequestedNgn)}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => printExpenseRequestRecord(req, formatNgn)}
+                            className="text-[8px] font-semibold uppercase tracking-wide text-slate-700 bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded-md inline-flex items-center gap-1"
+                            title="Print filing copy"
+                          >
+                            <Printer size={12} /> Print
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openRequestPayment(req)}
+                            className="text-[8px] font-semibold uppercase tracking-wide text-sky-800 bg-sky-100 hover:bg-sky-200 px-2 py-1 rounded-md"
+                            title="Record treasury payout"
+                          >
+                            Payout
+                          </button>
                         </div>
                       </div>
-                      <div className="flex items-center gap-6 shrink-0">
-                        {canApproveRequests && req.approvalStatus === 'Pending' ? (
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => reviewPaymentRequest(req.requestID, 'Approved')}
-                              className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-[10px] font-black uppercase tracking-wide text-emerald-800 transition hover:bg-emerald-100"
-                            >
-                              Approve
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => reviewPaymentRequest(req.requestID, 'Rejected')}
-                              className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[10px] font-black uppercase tracking-wide text-rose-800 transition hover:bg-rose-100"
-                            >
-                              Reject
-                            </button>
-                          </div>
-                        ) : null}
-                        <div className="text-right">
-                          <p className="text-sm font-black text-[#134e4a]">
-                            {formatNgn(req.amountRequestedNgn)}
-                          </p>
-                          <p className="text-[10px] font-bold text-gray-400 uppercase">
-                            Remaining {formatNgn(outstandingNgn)}
-                          </p>
-                          <p className="text-[10px] font-bold text-gray-300 uppercase mt-1">
-                            {req.requestDate}
-                          </p>
+                      {canApproveRequests && req.approvalStatus === 'Pending' ? (
+                        <div className="flex flex-wrap gap-1.5 pt-1.5 mt-1 border-t border-dashed border-slate-200">
+                          <button
+                            type="button"
+                            onClick={() => reviewPaymentRequest(req.requestID, 'Approved')}
+                            className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100"
+                          >
+                            Approve
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => reviewPaymentRequest(req.requestID, 'Rejected')}
+                            className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-rose-200 bg-rose-50 text-rose-900 hover:bg-rose-100"
+                          >
+                            Reject
+                          </button>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => openRequestPayment(req)}
-                          className="p-2 bg-white rounded-lg text-gray-300 hover:text-[#134e4a] border border-gray-100 shadow-sm transition-all"
-                          title="Record treasury payout"
-                        >
-                          <ChevronRight size={16} />
-                        </button>
-                      </div>
+                      ) : null}
                     </div>
                   );
                 })}
+                </div>
+                </section>
+
+                <section className="space-y-4 border-t border-slate-100 pt-6">
+                  <div>
+                    <h3 className="text-xs font-bold uppercase tracking-widest text-[#134e4a]">
+                      2) Expenses (posted records)
+                    </h3>
+                    <p className="text-[11px] text-gray-500 mt-1">
+                      Record completed spending entries after request approval/payout.
+                    </p>
+                  </div>
+                <ul className="space-y-1.5">
+                {filteredExpenses.map((ex) => {
+                  const meta2 = [
+                    ex.expenseType,
+                    ex.category,
+                    ex.branchId ? branchNameById[ex.branchId] || ex.branchId : null,
+                    `${ex.paymentMethod} · Ref ${ex.reference}`,
+                    ex.date,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ');
+                  return (
+                  <li
+                    key={ex.expenseID}
+                    className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md py-1.5 px-2.5 shadow-sm hover:bg-white/70 transition-colors"
+                  >
+                    <div className="flex items-start justify-between gap-2 min-w-0">
+                      <div className="min-w-0 leading-tight flex-1">
+                        <p className="text-[11px] font-bold text-[#134e4a] truncate uppercase">{ex.expenseID}</p>
+                        <p className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2" title={meta2}>
+                          {meta2}
+                        </p>
+                      </div>
+                      <p className="text-[11px] font-black text-[#134e4a] tabular-nums shrink-0">
+                        {formatNgn(ex.amountNgn)}
+                      </p>
+                    </div>
+                  </li>
+                  );
+                })}
+                </ul>
+                </section>
               </div>
             )}
 
             {activeTab === 'audit' && (
               <div className="space-y-8 animate-in slide-in-from-left-5">
                 {reconciliationFlags > 0 ? (
-                  <div className="flex items-start gap-3 rounded-2xl border border-red-100 bg-red-50/80 px-4 py-3 text-sm text-red-900">
+                  <div className="flex items-start gap-3 rounded-lg border border-red-200/80 bg-red-50/80 px-3 py-2.5 text-sm text-red-900">
                     <AlertCircle className="shrink-0 mt-0.5" size={18} />
                     <div>
                       <p className="font-bold">Bank reconciliation exceptions</p>
@@ -1574,7 +1842,7 @@ const Account = () => {
                     ].map((row) => (
                       <div
                         key={row.title}
-                        className="rounded-2xl border border-gray-100 bg-gray-50/50 p-4 flex gap-3"
+                        className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md p-3 flex gap-3 shadow-sm"
                       >
                         <CheckCircle2 className="shrink-0 text-emerald-500" size={18} />
                         <div>
@@ -1587,48 +1855,63 @@ const Account = () => {
                 </div>
 
                 <div>
-                  <h3 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest mb-3 flex items-center gap-2">
-                    <Landmark size={14} />
-                    Bank reconciliation
-                  </h3>
-                  <div className="rounded-zarewa border border-gray-100 overflow-hidden bg-white">
-                    <div className="grid grid-cols-12 gap-2 px-4 py-2 bg-gray-50 text-[10px] font-bold text-gray-400 uppercase tracking-widest">
-                      <div className="col-span-2">Date</div>
-                      <div className="col-span-4">Bank description</div>
-                      <div className="col-span-2 text-right">Amount</div>
-                      <div className="col-span-3">System match</div>
-                      <div className="col-span-1"> </div>
-                    </div>
-                    {filteredReconciliation.map((line) => (
-                      <React.Fragment key={line.id}>
-                        <div className="grid grid-cols-12 gap-2 px-4 py-3 border-t border-gray-50 items-center text-xs">
-                          <div className="col-span-2 text-gray-500">{line.bankDateISO}</div>
-                          <div className="col-span-4 text-gray-700 font-medium">{line.description}</div>
-                          <div
-                            className={`col-span-2 text-right font-black ${line.amountNgn < 0 ? 'text-red-700' : 'text-emerald-700'}`}
-                          >
-                            {formatNgn(Math.abs(line.amountNgn))}
-                            {line.amountNgn < 0 ? ' DR' : ' CR'}
-                          </div>
-                          <div className="col-span-3 text-[10px] text-gray-500">
-                            {line.systemMatch ?? '—'}
-                          </div>
-                          <div className="col-span-1">
-                            <span
-                              className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded-full ${
-                                line.status === 'Matched'
-                                  ? 'bg-emerald-100 text-emerald-800'
-                                  : line.status === 'Excluded'
-                                    ? 'bg-gray-100 text-gray-600'
-                                    : 'bg-amber-100 text-amber-900'
-                              }`}
-                            >
-                              {line.status}
-                            </span>
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                    <h3 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest flex items-center gap-2">
+                      <Landmark size={14} />
+                      Bank reconciliation
+                    </h3>
+                    {canReconcileBank && ws?.canMutate ? (
+                      <button type="button" onClick={openBankReconModal} className="z-btn-secondary !text-[10px] gap-1.5">
+                        <Plus size={14} /> Add statement line
+                      </button>
+                    ) : null}
+                  </div>
+                  <ul className="space-y-1.5">
+                    {filteredReconciliation.map((line) => {
+                      const amtLabel = `${formatNgn(Math.abs(line.amountNgn))}${line.amountNgn < 0 ? ' DR' : ' CR'}`;
+                      const matchText =
+                        line.systemMatch ?? reconSuggestionsById[line.id]?.text ?? '—';
+                      const meta2 = [
+                        matchText,
+                        line.branchId ? branchNameById[line.branchId] || line.branchId : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ');
+                      const statusChip =
+                        line.status === 'Matched'
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                          : line.status === 'Excluded'
+                            ? 'border-slate-200 bg-slate-100 text-slate-600'
+                            : 'border-amber-200 bg-amber-50 text-amber-900';
+                      return (
+                      <li key={line.id} className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md py-1.5 px-2.5 shadow-sm">
+                        <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
+                          <div className="min-w-0 leading-tight flex-1">
+                            <div className="flex items-center justify-between gap-2 min-w-0">
+                              <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
+                                <span className="tabular-nums text-slate-600 font-semibold">{line.bankDateISO}</span>
+                                <span className="font-medium text-slate-600"> · {line.description}</span>
+                              </p>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <span
+                                  className={`text-[11px] font-black tabular-nums ${line.amountNgn < 0 ? 'text-red-700' : 'text-emerald-700'}`}
+                                >
+                                  {amtLabel}
+                                </span>
+                                <span
+                                  className={`text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border ${statusChip}`}
+                                >
+                                  {line.status}
+                                </span>
+                              </div>
+                            </div>
+                            <p className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2" title={meta2}>
+                              {meta2}
+                            </p>
                           </div>
                         </div>
                         {line.status === 'Review' && canReconcileBank && ws?.canMutate ? (
-                          <div className="px-4 pb-3 pt-0 border-t border-dashed border-gray-100 bg-gray-50/40 flex flex-col sm:flex-row sm:items-center gap-2">
+                          <div className="pt-1.5 mt-1 border-t border-dashed border-slate-200 flex flex-col sm:flex-row sm:items-center gap-2">
                             <input
                               type="text"
                               value={reconDrafts[line.id] ?? line.systemMatch ?? ''}
@@ -1638,6 +1921,20 @@ const Account = () => {
                               placeholder="System match e.g. receipt id, treasury ref, GL batch…"
                               className="flex-1 min-w-0 rounded-lg border border-gray-200 bg-white px-3 py-2 text-[11px] outline-none focus:ring-2 focus:ring-[#134e4a]/15"
                             />
+                            {reconSuggestionsById[line.id] ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setReconDrafts((d) => ({
+                                    ...d,
+                                    [line.id]: reconSuggestionsById[line.id].text,
+                                  }))
+                                }
+                                className="rounded-lg border border-teal-200 bg-teal-50 text-teal-800 px-3 py-2 text-[10px] font-bold uppercase tracking-wide"
+                              >
+                                Use suggestion ({reconSuggestionsById[line.id].confidence})
+                              </button>
+                            ) : null}
                             <div className="flex flex-wrap gap-2 shrink-0">
                               <button
                                 type="button"
@@ -1656,66 +1953,64 @@ const Account = () => {
                             </div>
                           </div>
                         ) : null}
-                      </React.Fragment>
-                    ))}
-                  </div>
+                      </li>
+                    );
+                    })}
+                  </ul>
                 </div>
 
                 <div>
                   <h3 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest mb-3">
                     Exception queue (misc receipts)
                   </h3>
-                  <div className="space-y-4">
-                    {auditQueue.map((item) => (
-                      <div
+                  <ul className="space-y-1.5">
+                    {auditQueue.map((item) => {
+                      const meta2 = [`via ${item.bank}`, item.date, item.desc].filter(Boolean).join(' · ');
+                      return (
+                      <li
                         key={item.id}
-                        className="p-6 rounded-2xl border border-gray-100 bg-gray-50/50 hover:bg-white transition-all"
+                        className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md py-1.5 px-2.5 shadow-sm hover:bg-white/70 transition-colors"
                       >
-                        <div className="flex items-center justify-between gap-4 flex-wrap">
-                          <div className="flex items-center gap-4">
-                            <div className="bg-emerald-100 p-3 rounded-xl text-emerald-600">
-                              <ArrowDownLeft size={18} />
-                            </div>
-                            <div>
-                              <p className="text-sm font-bold text-gray-700 uppercase">{item.customer}</p>
-                              <p className="text-[10px] text-gray-400 italic">
-                                via {item.bank} · {item.date}
-                              </p>
-                              <p className="text-[10px] text-gray-500 mt-1">{item.desc}</p>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-6">
-                            <p className="text-lg font-black text-[#134e4a]">
-                              ₦{item.amount.toLocaleString()}
+                        <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
+                          <div className="min-w-0 leading-tight flex-1">
+                            <p className="text-[11px] font-bold text-[#134e4a] truncate uppercase">{item.customer}</p>
+                            <p className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2" title={meta2}>
+                              {meta2}
                             </p>
-                            <div className="flex gap-2">
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  showToast('Attach supporting document workflow is not yet connected.', { variant: 'info' })
-                                }
-                                className="p-2 bg-white text-gray-300 hover:text-[#134e4a] rounded-lg border border-gray-100 transition-all"
-                              >
-                                <Edit3 size={16} />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  showToast('Marked cleared in the audit review queue.', { variant: 'success' })
-                                }
-                                className="p-2 bg-[#134e4a] text-white rounded-lg shadow-md"
-                              >
-                                <CheckCircle2 size={16} />
-                              </button>
-                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <span className="text-[11px] font-black text-[#134e4a] tabular-nums">
+                              ₦{item.amount.toLocaleString()}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                showToast('Attach supporting document workflow is not yet connected.', { variant: 'info' })
+                              }
+                              className="p-1.5 bg-white text-slate-400 hover:text-[#134e4a] rounded-md border border-slate-200 transition-all"
+                              title="Edit"
+                            >
+                              <Edit3 size={14} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                showToast('Marked cleared in the audit review queue.', { variant: 'success' })
+                              }
+                              className="p-1.5 bg-[#134e4a] text-white rounded-md shadow-sm"
+                              title="Clear"
+                            >
+                              <CheckCircle2 size={14} />
+                            </button>
                           </div>
                         </div>
-                      </div>
-                    ))}
-                  </div>
+                      </li>
+                      );
+                    })}
+                  </ul>
                 </div>
 
-                <div className="rounded-2xl border border-gray-100 bg-[#134e4a]/[0.03] p-5 text-xs text-gray-600 leading-relaxed">
+                <div className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md p-4 text-xs text-gray-600 leading-relaxed shadow-sm">
                   <p className="font-black text-[#134e4a] uppercase tracking-wider text-[10px] mb-2">
                     Accounting basis
                   </p>
@@ -1818,6 +2113,74 @@ const Account = () => {
               Post transfer
             </button>
           </form>
+        </div>
+      </ModalFrame>
+
+      <ModalFrame isOpen={statementAccount != null} onClose={() => setStatementAccount(null)}>
+        <div className="z-modal-panel max-w-lg w-full max-h-[min(85vh,640px)] p-6 sm:p-8 overflow-hidden flex flex-col">
+          <div className="flex justify-between items-start gap-3 mb-4 shrink-0">
+            <div className="min-w-0">
+              <h3 className="text-lg sm:text-xl font-bold text-[#134e4a]">Account statement</h3>
+              {statementAccount ? (
+                <p className="text-xs text-gray-600 mt-1 font-semibold truncate" title={statementAccount.name}>
+                  {statementAccount.name}
+                  {statementAccount.bankName ? ` · ${statementAccount.bankName}` : ''}
+                </p>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              onClick={() => setStatementAccount(null)}
+              className="p-2 text-gray-400 hover:text-red-500 rounded-xl shrink-0"
+              aria-label="Close statement"
+            >
+              <X size={22} />
+            </button>
+          </div>
+          {!ws?.hasWorkspaceData ? (
+            <p className="text-xs text-gray-600 leading-relaxed">
+              Connect to the live workspace to load treasury movements. Statements are built from posted receipts,
+              expenses, transfers, and payouts on the server.
+            </p>
+          ) : accountStatementLines.length === 0 ? (
+            <p className="text-xs text-gray-500">No movements recorded for this account yet.</p>
+          ) : (
+            <div className="overflow-y-auto flex-1 min-h-0 -mx-1 px-1 border border-slate-200/60 rounded-lg bg-white/40 backdrop-blur-md">
+              <ul className="p-2 space-y-1.5">
+                {accountStatementLines.map((m) => {
+                  const raw = Number(m.amountNgn) || 0;
+                  const isIn = raw > 0;
+                  const isOut = raw < 0;
+                  const abs = Math.abs(raw);
+                  const dateStr = String(m.postedAtISO || '').slice(0, 10) || '—';
+                  const detail = treasuryMovementStatementLabel(m);
+                  const amtStr = `${isIn ? '+' : isOut ? '−' : ''}${formatNgn(abs)}`;
+                  return (
+                    <li
+                      key={m.id}
+                      className="rounded-lg border border-slate-200/60 bg-white/50 py-1.5 px-2.5 shadow-sm"
+                    >
+                      <div className="flex items-center justify-between gap-2 min-w-0">
+                        <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
+                          <span className="tabular-nums text-slate-600 font-semibold">{dateStr}</span>
+                        </p>
+                        <span
+                          className={`text-[11px] font-black tabular-nums shrink-0 ${
+                            isIn ? 'text-emerald-600' : isOut ? 'text-red-600' : 'text-slate-500'
+                          }`}
+                        >
+                          {amtStr}
+                        </span>
+                      </div>
+                      <p className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2 break-words" title={detail}>
+                        {detail}
+                      </p>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
         </div>
       </ModalFrame>
 
@@ -1986,16 +2349,16 @@ const Account = () => {
                   <Plus size={14} /> Add line
                 </button>
               </div>
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 {refundPayLines.map((line) => (
                   <div
                     key={line.id}
-                    className="grid grid-cols-12 gap-2 items-center rounded-2xl border border-gray-100 bg-gray-50 px-3 py-3"
+                    className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md py-2 px-2.5 shadow-sm flex flex-col gap-2"
                   >
                     <select
                       value={line.treasuryAccountId}
                       onChange={(e) => updateRefundPayLine(line.id, { treasuryAccountId: e.target.value })}
-                      className="col-span-12 sm:col-span-5 rounded-xl border border-gray-200 bg-white py-3 px-3 text-sm font-semibold"
+                      className="w-full rounded-lg border border-slate-200 bg-white py-2 px-2 text-[11px] font-semibold"
                     >
                       <option value="">Select account…</option>
                       {bankAccounts.map((a) => (
@@ -2004,30 +2367,32 @@ const Account = () => {
                         </option>
                       ))}
                     </select>
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
                     <input
                       type="number"
                       min="0"
                       step="1"
                       value={line.amount}
                       onChange={(e) => updateRefundPayLine(line.id, { amount: e.target.value })}
-                      className="col-span-5 sm:col-span-3 rounded-xl border border-gray-200 bg-white py-3 px-3 text-sm font-bold text-[#134e4a]"
+                      className="sm:col-span-5 rounded-lg border border-slate-200 bg-white py-2 px-2 text-[11px] font-bold text-[#134e4a]"
                       placeholder="Amount ₦"
                     />
                     <input
                       type="text"
                       value={line.reference}
                       onChange={(e) => updateRefundPayLine(line.id, { reference: e.target.value })}
-                      className="col-span-5 sm:col-span-3 rounded-xl border border-gray-200 bg-white py-3 px-3 text-sm"
+                      className="sm:col-span-5 rounded-lg border border-slate-200 bg-white py-2 px-2 text-[11px]"
                       placeholder="Reference"
                     />
                     <button
                       type="button"
                       onClick={() => removeRefundPayLine(line.id)}
-                      className="col-span-2 sm:col-span-1 inline-flex h-11 items-center justify-center rounded-xl border border-gray-200 bg-white text-gray-300 hover:text-rose-500"
+                      className="sm:col-span-2 inline-flex h-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-400 hover:text-rose-500"
                       title="Remove line"
                     >
                       <X size={16} />
                     </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -2042,7 +2407,7 @@ const Account = () => {
                   className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm outline-none"
                 />
               </div>
-              <div className="rounded-2xl border border-gray-100 bg-gray-50 px-4 py-4">
+              <div className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md px-3 py-3 shadow-sm">
                 <div className="flex items-center justify-between gap-4 text-sm">
                   <span className="font-bold text-gray-500 uppercase text-[10px] tracking-wide">This payout</span>
                   <span className="font-black text-[#134e4a]">{formatNgn(refundPayTotalNgn)}</span>
@@ -2125,16 +2490,16 @@ const Account = () => {
                   <Plus size={14} /> Add line
                 </button>
               </div>
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 {requestPayLines.map((line) => (
                   <div
                     key={line.id}
-                    className="grid grid-cols-12 gap-2 items-center rounded-2xl border border-gray-100 bg-gray-50 px-3 py-3"
+                    className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md py-2 px-2.5 shadow-sm flex flex-col gap-2"
                   >
                     <select
                       value={line.treasuryAccountId}
                       onChange={(e) => updateRequestPayLine(line.id, { treasuryAccountId: e.target.value })}
-                      className="col-span-12 sm:col-span-5 rounded-xl border border-gray-200 bg-white py-3 px-3 text-sm font-semibold"
+                      className="w-full rounded-lg border border-slate-200 bg-white py-2 px-2 text-[11px] font-semibold"
                     >
                       <option value="">Select account…</option>
                       {bankAccounts.map((a) => (
@@ -2143,30 +2508,32 @@ const Account = () => {
                         </option>
                       ))}
                     </select>
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
                     <input
                       type="number"
                       min="0"
                       step="1"
                       value={line.amount}
                       onChange={(e) => updateRequestPayLine(line.id, { amount: e.target.value })}
-                      className="col-span-5 sm:col-span-3 rounded-xl border border-gray-200 bg-white py-3 px-3 text-sm font-bold text-[#134e4a]"
+                      className="sm:col-span-5 rounded-lg border border-slate-200 bg-white py-2 px-2 text-[11px] font-bold text-[#134e4a]"
                       placeholder="Amount ₦"
                     />
                     <input
                       type="text"
                       value={line.reference}
                       onChange={(e) => updateRequestPayLine(line.id, { reference: e.target.value })}
-                      className="col-span-5 sm:col-span-3 rounded-xl border border-gray-200 bg-white py-3 px-3 text-sm"
+                      className="sm:col-span-5 rounded-lg border border-slate-200 bg-white py-2 px-2 text-[11px]"
                       placeholder="Reference"
                     />
                     <button
                       type="button"
                       onClick={() => removeRequestPayLine(line.id)}
-                      className="col-span-2 sm:col-span-1 inline-flex h-11 items-center justify-center rounded-xl border border-gray-200 bg-white text-gray-300 hover:text-rose-500"
+                      className="sm:col-span-2 inline-flex h-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-400 hover:text-rose-500"
                       title="Remove line"
                     >
                       <X size={16} />
                     </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -2179,7 +2546,7 @@ const Account = () => {
                   placeholder="Example: Cash 300,000 and GT transfer 200,000"
                 />
               </div>
-              <div className="rounded-2xl border border-gray-100 bg-gray-50 px-4 py-4">
+              <div className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md px-3 py-3 shadow-sm">
                 <div className="flex items-center justify-between gap-4 text-sm">
                   <span className="font-bold text-gray-500 uppercase text-[10px] tracking-wide">This payout</span>
                   <span className="font-black text-[#134e4a]">{formatNgn(requestPayTotalNgn)}</span>
@@ -2289,6 +2656,96 @@ const Account = () => {
         </div>
       </ModalFrame>
 
+      <ModalFrame isOpen={showBankReconModal} onClose={() => setShowBankReconModal(false)}>
+        <div className="z-modal-panel max-w-lg p-8 overflow-y-auto">
+          <div className="flex justify-between items-center mb-6">
+            <h3 className="text-xl font-bold text-[#134e4a]">Add bank statement line</h3>
+            <button
+              type="button"
+              onClick={() => setShowBankReconModal(false)}
+              className="p-2 text-gray-400 hover:text-red-500 rounded-xl"
+            >
+              <X size={22} />
+            </button>
+          </div>
+          <form className="space-y-4" onSubmit={saveBankReconLineCreate}>
+            <p className="text-[10px] text-gray-500 leading-relaxed">
+              Enter one row from the bank statement. It starts in <span className="font-semibold">Review</span>; match
+              it to a receipt or treasury reference on the Audit tab. Marking <span className="font-semibold">Matched</span>{' '}
+              with an <span className="font-semibold">RC-…</span> id checks that the receipt exists.
+            </p>
+            {ws?.viewAllBranches && branchOptions.length > 0 ? (
+              <div>
+                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">Branch</label>
+                <select
+                  value={bankReconForm.branchId}
+                  onChange={(e) => setBankReconForm((f) => ({ ...f, branchId: e.target.value }))}
+                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
+                  required
+                >
+                  <option value="">Select branch…</option>
+                  {branchOptions.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name || b.code || b.id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+            <div>
+              <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">Statement date</label>
+              <input
+                type="date"
+                required
+                value={bankReconForm.bankDateISO}
+                onChange={(e) => setBankReconForm((f) => ({ ...f, bankDateISO: e.target.value }))}
+                className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
+                Description (as on statement)
+              </label>
+              <input
+                required
+                value={bankReconForm.description}
+                onChange={(e) => setBankReconForm((f) => ({ ...f, description: e.target.value }))}
+                placeholder="e.g. NIP inflow — payer name"
+                className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
+                Amount (₦)
+              </label>
+              <input
+                required
+                type="number"
+                step="1"
+                value={bankReconForm.amountNgn}
+                onChange={(e) => setBankReconForm((f) => ({ ...f, amountNgn: e.target.value }))}
+                placeholder="Negative for bank debits / charges"
+                className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
+                System match (optional)
+              </label>
+              <input
+                value={bankReconForm.systemMatch}
+                onChange={(e) => setBankReconForm((f) => ({ ...f, systemMatch: e.target.value }))}
+                placeholder="e.g. RC-2026-014 — can add after save"
+                className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
+              />
+            </div>
+            <button type="submit" className="z-btn-primary w-full justify-center py-3">
+              Save statement line
+            </button>
+          </form>
+        </div>
+      </ModalFrame>
+
       <ModalFrame isOpen={showExpenseModal} onClose={() => setShowExpenseModal(false)}>
         <div className="z-modal-panel max-w-lg p-8 overflow-y-auto">
             <div className="flex justify-between items-center mb-6">
@@ -2354,21 +2811,21 @@ const Account = () => {
                 <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
                   Category
                 </label>
-                <input
+                <select
                   required
-                  list="z-expense-category-options"
                   value={expenseForm.category}
                   onChange={(e) =>
                     setExpenseForm((f) => ({ ...f, category: e.target.value }))
                   }
-                  placeholder="Type or pick from list (Settings → master data)"
                   className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                />
-                <datalist id="z-expense-category-options">
-                  {expenseCategorySuggestions.map((name) => (
-                    <option key={name} value={name} />
+                >
+                  <option value="">Select category…</option>
+                  {EXPENSE_CATEGORY_OPTIONS.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
                   ))}
-                </datalist>
+                </select>
               </div>
               <div>
                 <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
@@ -2428,92 +2885,256 @@ const Account = () => {
         </div>
       </ModalFrame>
 
-      <ModalFrame isOpen={showPayRequestModal} onClose={() => setShowPayRequestModal(false)}>
-        <div className="z-modal-panel max-w-lg p-8 overflow-y-auto">
-            <div className="flex justify-between items-center mb-6">
-              <h3 className="text-xl font-bold text-[#134e4a]">Payment request</h3>
-              <button
-                type="button"
-                onClick={() => setShowPayRequestModal(false)}
-                className="p-2 text-gray-400 hover:text-red-500 rounded-xl"
-              >
-                <X size={22} />
-              </button>
-            </div>
-            <form className="space-y-4" onSubmit={savePayRequest}>
+      <ModalFrame
+        isOpen={showPayRequestModal}
+        onClose={() => {
+          setShowPayRequestModal(false);
+        }}
+      >
+        <div className="z-modal-panel max-w-2xl p-6 sm:p-8 overflow-y-auto max-h-[90vh]">
+          <div className="flex justify-between items-center mb-5">
+            <h3 className="text-xl font-bold text-[#134e4a]">Expense request</h3>
+            <button
+              type="button"
+              onClick={() => setShowPayRequestModal(false)}
+              className="p-2 text-gray-400 hover:text-red-500 rounded-xl"
+            >
+              <X size={22} />
+            </button>
+          </div>
+          <form className="space-y-4" onSubmit={savePayRequest}>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                  Expense ID (linked)
+                  Request date
                 </label>
-                <select
+                <input
+                  type="date"
                   required
-                  value={requestForm.expenseID}
-                  onChange={(e) =>
-                    setRequestForm((f) => ({ ...f, expenseID: e.target.value }))
-                  }
+                  value={requestForm.requestDate}
+                  onChange={(e) => setRequestForm((f) => ({ ...f, requestDate: e.target.value }))}
                   className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                >
-                  <option value="">Select expense…</option>
-                  {expenses.map((ex) => (
-                    <option key={ex.expenseID} value={ex.expenseID}>
-                      {ex.expenseID} — {formatNgn(ex.amountNgn)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                    Amount requested (₦)
-                  </label>
-                  <input
-                    required
-                    type="number"
-                    min="1"
-                    value={requestForm.amountRequestedNgn}
-                    onChange={(e) =>
-                      setRequestForm((f) => ({
-                        ...f,
-                        amountRequestedNgn: e.target.value,
-                      }))
-                    }
-                    className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                    Request date
-                  </label>
-                  <input
-                    type="date"
-                    value={requestForm.requestDate}
-                    onChange={(e) =>
-                      setRequestForm((f) => ({ ...f, requestDate: e.target.value }))
-                    }
-                    className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                  Description
-                </label>
-                <textarea
-                  rows={3}
-                  value={requestForm.description}
-                  onChange={(e) =>
-                    setRequestForm((f) => ({ ...f, description: e.target.value }))
-                  }
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-medium outline-none resize-none"
                 />
               </div>
-              <p className="text-[10px] text-gray-400">
-                Request ID is generated on save. Approval defaults to Pending.
+              <div>
+                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
+                  Reference
+                </label>
+                <input
+                  value={requestForm.requestReference}
+                  onChange={(e) => setRequestForm((f) => ({ ...f, requestReference: e.target.value }))}
+                  placeholder="Invoice / PO / internal ref"
+                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
+                Description
+              </label>
+              <textarea
+                rows={4}
+                value={requestForm.description}
+                onChange={(e) => setRequestForm((f) => ({ ...f, description: e.target.value }))}
+                placeholder="Purpose, vendor, cost centre, or other context for approvers."
+                className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-medium outline-none resize-y min-h-[96px]"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
+                Expense category
+              </label>
+              <select
+                required
+                value={requestForm.expenseCategory}
+                onChange={(e) => setRequestForm((f) => ({ ...f, expenseCategory: e.target.value }))}
+                className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
+              >
+                <option value="" disabled>
+                  Select category…
+                </option>
+                {EXPENSE_CATEGORY_OPTIONS.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[10px] text-gray-400 mt-1 ml-1">
+                Standard chart — same list as posted expenses for consistent month-end reporting.
               </p>
-              <button type="submit" className="z-btn-primary w-full justify-center py-3">
-                Submit request
-              </button>
-            </form>
+            </div>
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1">
+                  Line items
+                </label>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setRequestForm((f) => ({ ...f, lines: [...f.lines, createExpenseRequestLineItem()] }))
+                  }
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-[#134e4a] inline-flex items-center gap-1"
+                >
+                  <Plus size={12} /> Add item
+                </button>
+              </div>
+              <div className="rounded-xl border border-slate-200/80 overflow-hidden">
+                <div className="hidden sm:grid grid-cols-[1fr_72px_100px_96px_40px] gap-2 px-3 py-2 bg-slate-50 text-[9px] font-black uppercase tracking-wide text-slate-500">
+                  <span>Item</span>
+                  <span className="text-center">Unit</span>
+                  <span className="text-right">Unit price</span>
+                  <span className="text-right">Total</span>
+                  <span />
+                </div>
+                <ul className="divide-y divide-slate-100">
+                  {requestForm.lines.map((row) => (
+                    <li
+                      key={row.id}
+                      className="p-3 sm:grid sm:grid-cols-[1fr_72px_100px_96px_40px] sm:items-center sm:gap-2 space-y-2 sm:space-y-0 bg-white/60"
+                    >
+                      <input
+                        value={row.item}
+                        onChange={(e) =>
+                          setRequestForm((f) => ({
+                            ...f,
+                            lines: f.lines.map((x) =>
+                              x.id === row.id ? { ...x, item: e.target.value } : x
+                            ),
+                          }))
+                        }
+                        placeholder="Description of item or service"
+                        className="w-full bg-white border border-slate-200 rounded-lg py-2 px-2 text-[11px] font-semibold outline-none"
+                      />
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.001"
+                        value={row.unit}
+                        onChange={(e) =>
+                          setRequestForm((f) => ({
+                            ...f,
+                            lines: f.lines.map((x) =>
+                              x.id === row.id ? { ...x, unit: e.target.value } : x
+                            ),
+                          }))
+                        }
+                        placeholder="Qty"
+                        className="w-full bg-white border border-slate-200 rounded-lg py-2 px-2 text-[11px] font-bold outline-none text-center"
+                      />
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={row.unitPriceNgn}
+                        onChange={(e) =>
+                          setRequestForm((f) => ({
+                            ...f,
+                            lines: f.lines.map((x) =>
+                              x.id === row.id ? { ...x, unitPriceNgn: e.target.value } : x
+                            ),
+                          }))
+                        }
+                        placeholder="₦"
+                        className="w-full bg-white border border-slate-200 rounded-lg py-2 px-2 text-[11px] font-bold outline-none text-right tabular-nums"
+                      />
+                      <p className="text-[11px] font-black text-[#134e4a] tabular-nums text-right py-2 sm:py-0">
+                        {formatNgn(expenseRequestLineTotal(row))}
+                      </p>
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          disabled={requestForm.lines.length <= 1}
+                          onClick={() =>
+                            setRequestForm((f) => ({
+                              ...f,
+                              lines: f.lines.length <= 1 ? f.lines : f.lines.filter((x) => x.id !== row.id),
+                            }))
+                          }
+                          className="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 disabled:opacity-35"
+                          title="Remove line (keep at least one)"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <p className="text-[10px] text-slate-500 mt-2">
+                Total requested:{' '}
+                <span className="font-black text-[#134e4a] tabular-nums">
+                  {formatNgn(
+                    requestForm.lines.reduce((s, row) => s + expenseRequestLineTotal(row), 0)
+                  )}
+                </span>
+              </p>
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
+                <span className="inline-flex items-center gap-1">
+                  <Paperclip size={12} className="opacity-60" />
+                  Attachment (invoice / receipt)
+                </span>
+              </label>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  ref={payRequestFileRef}
+                  type="file"
+                  accept="image/*,application/pdf"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (!f) return;
+                    if (f.size > 2.5 * 1024 * 1024) {
+                      showToast('File too large (max 2.5 MB).', { variant: 'error' });
+                      e.target.value = '';
+                      return;
+                    }
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                      const res = String(reader.result || '');
+                      const m = res.match(/^data:([^;]+);base64,(.+)$/);
+                      if (!m) {
+                        showToast('Could not read file.', { variant: 'error' });
+                        return;
+                      }
+                      setRequestForm((prev) => ({
+                        ...prev,
+                        attachment: { name: f.name, mime: m[1], dataBase64: m[2] },
+                      }));
+                    };
+                    reader.readAsDataURL(f);
+                  }}
+                  className="block w-full text-[11px] text-slate-600 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-[10px] file:font-bold file:bg-teal-50 file:text-[#134e4a]"
+                />
+                {requestForm.attachment ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRequestForm((f) => ({ ...f, attachment: null }));
+                      if (payRequestFileRef.current) payRequestFileRef.current.value = '';
+                    }}
+                    className="text-[10px] font-bold uppercase text-rose-700 bg-rose-50 px-3 py-2 rounded-lg"
+                  >
+                    Remove file
+                  </button>
+                ) : null}
+              </div>
+              {requestForm.attachment ? (
+                <p className="text-[10px] text-slate-500 mt-1 truncate" title={requestForm.attachment.name}>
+                  Selected: {requestForm.attachment.name}
+                </p>
+              ) : (
+                <p className="text-[10px] text-gray-400 mt-1">PDF or image. Optional but recommended.</p>
+              )}
+            </div>
+            <p className="text-[10px] text-gray-400">
+              Extra rows can be left blank — only completed lines are sent. Request ID is assigned on save. Use Print on
+              the list row for a filing copy.
+            </p>
+            <button type="submit" className="z-btn-primary w-full justify-center py-3">
+              Submit for approval
+            </button>
+          </form>
         </div>
       </ModalFrame>
     </PageShell>

@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { ModalFrame } from './layout/ModalFrame';
 import { useCustomers } from '../context/CustomersContext';
-import { bankAccountsForCustomerPayment, loadTreasuryAccounts } from '../lib/treasuryAccountsStore';
+import { bankAccountsForCustomerPayment, treasuryAccountsFromSnapshot } from '../lib/treasuryAccountsStore';
 import { ZAREWA_COMPANY_ACCOUNT_NAME } from '../Data/companyQuotation';
 import { formatNgn } from '../Data/mockData';
 import { useToast } from '../context/ToastContext';
@@ -325,9 +325,15 @@ const QuotationModal = ({
   const [quoteDate, setQuoteDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [projectName, setProjectName] = useState('');
   const [showPrint, setShowPrint] = useState(false);
+  const [printDocumentKind, setPrintDocumentKind] = useState('quotation');
   const [applyAdvanceAmount, setApplyAdvanceAmount] = useState('');
   const [saving, setSaving] = useState(false);
   const liveMasterData = ws?.snapshot?.masterData ?? null;
+
+  const treasuryPayAccountsLive = useMemo(
+    () => bankAccountsForCustomerPayment(treasuryAccountsFromSnapshot(ws?.snapshot)),
+    [ws?.snapshot]
+  );
 
   /** Master data rows first; defaults only fill names not already in setup (offline / partial setup). */
   const profileOptions = useMemo(() => {
@@ -463,7 +469,7 @@ const QuotationModal = ({
     setCustomerQuery(match ? `${match.name} · ${match.phoneNumber}` : '');
     setCustomerListOpen(false);
     setQuotationEditType('');
-    const list = bankAccountsForCustomerPayment(loadTreasuryAccounts());
+    const list = treasuryPayAccountsLive;
     setTreasuryPayAccounts(list);
     setPaymentAccountId((prev) => {
       const ok = list.some((a) => String(a.id) === String(prev));
@@ -498,6 +504,7 @@ const QuotationModal = ({
     editData?.materialDesign,
     editData?.projectName,
     editData?.quotationLines,
+    treasuryPayAccountsLive,
   ]);
 
   useEffect(() => {
@@ -614,6 +621,14 @@ const QuotationModal = ({
     () => sumRowsNgn(productRows) + sumRowsNgn(accessoryRows) + sumRowsNgn(serviceRows),
     [productRows, accessoryRows, serviceRows]
   );
+
+  const quotationPaidNgn = Math.round(Number(editData?.paidNgn) || 0);
+  const quotationBalanceAfterPaidNgn = Math.max(0, grandTotalNgn - quotationPaidNgn);
+
+  const openPrintPreview = (kind) => {
+    setPrintDocumentKind(kind);
+    setShowPrint(true);
+  };
 
   const printLinePayload = useMemo(
     () => ({
@@ -1100,7 +1115,7 @@ const QuotationModal = ({
             <p className="text-[9px] font-semibold text-white/50 uppercase tracking-widest mb-0.5">Total</p>
             <p className="text-2xl font-bold text-white tabular-nums">{formatNgn(grandTotalNgn)}</p>
           </div>
-          <div className="flex gap-2 flex-wrap">
+          <div className="flex gap-2 flex-wrap justify-end">
             <button
               type="button"
               disabled={readOnly || saving}
@@ -1111,10 +1126,24 @@ const QuotationModal = ({
             </button>
             <button
               type="button"
-              onClick={() => setShowPrint(true)}
-              className="bg-white text-[#134e4a] px-4 py-2.5 rounded-lg text-[9px] font-semibold uppercase tracking-wide shadow-sm flex items-center gap-1.5"
+              onClick={() => openPrintPreview('quotation')}
+              className="bg-white text-[#134e4a] px-3 py-2.5 rounded-lg text-[9px] font-semibold uppercase tracking-wide shadow-sm inline-flex items-center gap-1.5"
             >
-              <Printer size={14} /> Print
+              <Printer size={14} /> Quote
+            </button>
+            <button
+              type="button"
+              onClick={() => openPrintPreview('invoice')}
+              className="bg-white text-[#134e4a] px-3 py-2.5 rounded-lg text-[9px] font-semibold uppercase tracking-wide shadow-sm inline-flex items-center gap-1.5"
+            >
+              <Printer size={14} /> Invoice
+            </button>
+            <button
+              type="button"
+              onClick={() => openPrintPreview('receipt')}
+              className="bg-white text-[#134e4a] px-3 py-2.5 rounded-lg text-[9px] font-semibold uppercase tracking-wide shadow-sm inline-flex items-center gap-1.5"
+            >
+              <Printer size={14} /> Receipt
             </button>
           </div>
         </div>
@@ -1134,6 +1163,7 @@ const QuotationModal = ({
               <div className="pointer-events-auto mx-auto max-w-[210mm] pb-16">
                 <div className="quotation-print-root overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl print:rounded-none print:border-0 print:shadow-none">
                   <QuotationPrintView
+                    documentKind={printDocumentKind}
                     quotationId={editData?.id ?? 'Draft'}
                     dateStr={formatDisplayDate(quoteDate)}
                     customerName={selectedCustomer?.name ?? '—'}
@@ -1146,6 +1176,8 @@ const QuotationModal = ({
                     lines={printLinePayload}
                     salesperson={preparedByLabel}
                     projectName={projectName.trim() || '—'}
+                    amountPaidNgn={quotationPaidNgn}
+                    balanceDueNgn={quotationBalanceAfterPaidNgn}
                   />
                 </div>
                 <div className="mt-4 flex flex-wrap justify-center gap-2">

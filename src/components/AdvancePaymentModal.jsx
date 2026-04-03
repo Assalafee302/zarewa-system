@@ -4,10 +4,11 @@ import { X, Wallet, Save, Printer } from 'lucide-react';
 import { ModalFrame } from './layout/ModalFrame';
 import { useCustomers } from '../context/CustomersContext';
 import { useToast } from '../context/ToastContext';
+import { useWorkspace } from '../context/WorkspaceContext';
 import { recordAdvancePayment } from '../lib/customerLedgerStore';
 import { formatNgn } from '../Data/mockData';
 import { apiFetch } from '../lib/apiBase';
-import { loadTreasuryAccounts } from '../lib/treasuryAccountsStore';
+import { treasuryAccountsFromSnapshot } from '../lib/treasuryAccountsStore';
 import { AdvancePaymentPrintView } from './receipt/ReceiptPrintViews';
 
 /**
@@ -23,6 +24,7 @@ const AdvancePaymentModal = ({
 }) => {
   const { customers } = useCustomers();
   const { show: showToast } = useToast();
+  const ws = useWorkspace();
   const [customerID, setCustomerID] = useState('');
   const [amount, setAmount] = useState('');
   const [treasuryAccountId, setTreasuryAccountId] = useState('');
@@ -31,21 +33,20 @@ const AdvancePaymentModal = ({
   const [purpose, setPurpose] = useState('');
   const [showPrint, setShowPrint] = useState(false);
 
-  const treasuryList = useMemo(() => loadTreasuryAccounts(), []);
+  const treasuryList = useMemo(() => treasuryAccountsFromSnapshot(ws?.snapshot), [ws?.snapshot]);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!isOpen) return;
-    const list = loadTreasuryAccounts();
     setCustomerID(defaultCustomerID || '');
     setAmount('');
-    const first = list[0];
+    const first = treasuryList[0];
     setTreasuryAccountId(first ? String(first.id) : '');
     setDateISO(new Date().toISOString().slice(0, 10));
     setReference('');
     setPurpose('');
     setShowPrint(false);
-  }, [isOpen, defaultCustomerID]);
+  }, [isOpen, defaultCustomerID, treasuryList]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const customerName = useMemo(

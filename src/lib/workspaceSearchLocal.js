@@ -110,6 +110,21 @@ export function searchWorkspaceSnapshot(snapshot, rawQuery, hasPermission, limit
         });
       }
     }
+    for (const lot of snapshot.coilLots || []) {
+      if (results.length >= limit) break;
+      const blob = `${lot.coilNo || ''} ${lot.productID || ''} ${lot.poID || ''} ${lot.supplierName || ''} ${
+        lot.colour || ''
+      } ${lot.gaugeLabel || ''}`.toLowerCase();
+      if (blob.includes(q)) {
+        push({
+          kind: 'coil',
+          id: lot.coilNo,
+          label: lot.coilNo,
+          sublabel: `${lot.colour || '—'} · ${lot.gaugeLabel || '—'} · ${lot.productID || ''}`,
+          path: `/operations/coils/${encodeURIComponent(lot.coilNo)}`,
+        });
+      }
+    }
   }
 
   return results;

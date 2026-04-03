@@ -59,7 +59,7 @@ function RowMenu({ rowKey, openKey, setOpenKey, onView, onLink }) {
   );
 }
 
-/** Column 1: receipt list (merged ledger + sample), same height as siblings */
+/** Column 1: receipt list (merged ledger + imported), same height as siblings */
 export function ReceiptsTransactionsPanel({
   receipts = [],
   onOpenReceipt,
@@ -128,7 +128,7 @@ export function ReceiptsTransactionsPanel({
                     r.source === 'ledger' ? 'bg-emerald-200 text-emerald-900' : 'bg-slate-200 text-slate-600'
                   }`}
                 >
-                  {r.source === 'ledger' ? 'Ledger' : 'Sample'}
+                  {r.source === 'ledger' ? 'Ledger' : 'Imported'}
                 </span>
                 <span className="text-[10px] font-black text-emerald-700 tabular-nums">{r.amount}</span>
               </div>
