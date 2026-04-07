@@ -8,6 +8,7 @@ import {
   Receipt as ReceiptIcon,
   MoreVertical,
   RotateCcw,
+  RefreshCw,
   Banknote,
   Wallet,
   Pencil,
@@ -20,9 +21,11 @@ import {
   AlertTriangle,
   UserCircle,
   Printer,
+  Bell,
 } from 'lucide-react';
 
 import SalesCustomersTab from '../components/sales/SalesCustomersTab';
+import SalesCuttingListMaterialPanel from '../components/sales/SalesCuttingListMaterialPanel';
 import {
   ReceiptsTransactionsPanel,
   ReceiptsAdvancesPanel,
@@ -44,6 +47,13 @@ import { useInventory } from '../context/InventoryContext';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { spotPricesRowsFromMasterData } from '../lib/spotPricesFromMasterData';
 import { apiFetch } from '../lib/apiBase';
+import { computeCuttingListMaterialReadiness } from '../lib/salesCuttingListMaterialReadiness';
+import {
+  QUOTATION_FOLLOWUP_START_DAY,
+  QUOTATION_VALIDITY_DAYS,
+  isQuotationArchivedRow,
+  quotationNeedsFollowUpAlert,
+} from '../lib/quotationLifecycleUi';
 import {
   SALES_ROLE_LABELS,
   loadSalesWorkspaceRole,
@@ -75,6 +85,11 @@ const CARD_ROW =
 const CHIP =
   'inline-flex items-center text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border shrink-0';
 
+/** Lift row above following siblings so overflow action menus paint on top (stacking order). */
+function salesListItemClass(rowKey, openKey) {
+  return openKey === rowKey ? `${CARD_ROW} relative z-50` : CARD_ROW;
+}
+
 function quotePayChipBorder(ps) {
   if (ps === 'Paid') return 'border-emerald-200 bg-emerald-50 text-emerald-800';
   if (ps === 'Partial') return 'border-amber-200 bg-amber-50 text-amber-800';
@@ -83,6 +98,8 @@ function quotePayChipBorder(ps) {
 
 function quoteApprovalChipBorder(st) {
   if (st === 'Approved') return 'border-emerald-200 bg-emerald-50 text-emerald-800';
+  if (st === 'Expired') return 'border-slate-300 bg-slate-100 text-slate-700';
+  if (st === 'Void') return 'border-rose-200 bg-rose-50 text-rose-800';
   return 'border-amber-200 bg-amber-50 text-amber-800';
 }
 
@@ -235,32 +252,46 @@ const Sales = () => {
   const [showAdvanceModal, setShowAdvanceModal] = useState(false);
   const [linkAdvanceEntry, setLinkAdvanceEntry] = useState(null);
   const [advanceViewEntry, setAdvanceViewEntry] = useState(null);
+  const [workspaceReloading, setWorkspaceReloading] = useState(false);
   const [advancePrintEntry, setAdvancePrintEntry] = useState(null);
   const [ledgerNonce, setLedgerNonce] = useState(0);
   const [showCount, setShowCount] = useState(20);
+  const [showArchivedQuotations, setShowArchivedQuotations] = useState(false);
   const salesRole = loadSalesWorkspaceRole(ws?.session?.user?.roleKey);
   const salesRoleLabel = ws?.session?.user?.roleLabel ?? SALES_ROLE_LABELS[salesRole] ?? salesRole;
   const canApproveRefunds = ws?.hasPermission?.('refunds.approve') || ws?.hasPermission?.('finance.approve');
 
   const bumpLedger = useCallback(() => setLedgerNonce((n) => n + 1), []);
 
+  const reloadWorkspaceFromServer = useCallback(async () => {
+    if (!ws?.refresh || workspaceReloading) return;
+    setWorkspaceReloading(true);
+    try {
+      const data = await ws.refresh();
+      if (data) showToast('Workspace reloaded from the database.');
+      else showToast('Could not reload workspace. Try signing in again or check the API.', { variant: 'error' });
+    } finally {
+      setWorkspaceReloading(false);
+    }
+  }, [ws, workspaceReloading, showToast]);
+
   const quotations = useMemo(
     () =>
       ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.quotations) ? ws.snapshot.quotations : [],
-    [ws]
+    [ws?.hasWorkspaceData, ws?.snapshot?.quotations]
   );
   const importedReceipts = useMemo(
     () => (ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.receipts) ? ws.snapshot.receipts : []),
-    [ws]
+    [ws?.hasWorkspaceData, ws?.snapshot?.receipts]
   );
   const cuttingLists = useMemo(
     () =>
       ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.cuttingLists) ? ws.snapshot.cuttingLists : [],
-    [ws]
+    [ws?.hasWorkspaceData, ws?.snapshot?.cuttingLists]
   );
   const yardRegister = useMemo(
     () => (Array.isArray(ws?.snapshot?.yardCoilRegister) ? ws.snapshot.yardCoilRegister : []),
-    [ws]
+    [ws?.snapshot?.yardCoilRegister]
   );
 
   const spotPrices = useMemo(
@@ -273,7 +304,7 @@ const Sales = () => {
       ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.refunds)
         ? ws.snapshot.refunds.map((r) => normalizeRefund(r))
         : [],
-    [ws]
+    [ws?.hasWorkspaceData, ws?.snapshot?.refunds]
   );
 
   const ledgerSyncKey = ledgerNonce + (ws?.refreshEpoch ?? 0);
@@ -385,6 +416,17 @@ const Sales = () => {
     return rows;
   }, [coilLots, invProducts, yardRegister]);
 
+  const cuttingListMaterialReadiness = useMemo(
+    () => computeCuttingListMaterialReadiness(cuttingLists, quotations, coilInventoryRows),
+    [cuttingLists, quotations, coilInventoryRows]
+  );
+
+  const openCuttingListFromMaterialAlert = useCallback((cl) => {
+    setSelectedItem(cl);
+    setCuttingAccessMode('view');
+    setShowCuttingModal(true);
+  }, []);
+
   const [stockMatType, setStockMatType] = useState('');
   const [stockGaugeFilter, setStockGaugeFilter] = useState('');
   const [stockColourFilter, setStockColourFilter] = useState('');
@@ -454,21 +496,42 @@ const Sales = () => {
     return { kind: 'ok', title: 'Available', detail: summary };
   }, [stockSearchActive, stockSearchMatches]);
 
-  const filteredQuotations = useMemo(() => {
+  const quotationsSearchFiltered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    const filtered = quotations.filter((row) => {
+    return quotations.filter((row) => {
       if (!q) return true;
       const blob = [
-        row.id, row.customer, row.customerID, row.date, row.total, row.status, row.paymentStatus, row.paidNgn, row.totalNgn,
+        row.id,
+        row.customer,
+        row.customerID,
+        row.date,
+        row.total,
+        row.status,
+        row.paymentStatus,
+        row.paidNgn,
+        row.totalNgn,
+        row.lifecycleNote,
       ]
         .join(' ')
         .toLowerCase();
       return blob.includes(q);
     });
-    return filtered
+  }, [quotations, searchQuery]);
+
+  const quotationFollowUpRows = useMemo(
+    () =>
+      quotationsSearchFiltered.filter((row) => !isQuotationArchivedRow(row) && quotationNeedsFollowUpAlert(row)),
+    [quotationsSearchFiltered]
+  );
+
+  const filteredQuotations = useMemo(() => {
+    const visible = quotationsSearchFiltered.filter(
+      (row) => showArchivedQuotations || !isQuotationArchivedRow(row)
+    );
+    return visible
       .sort((a, b) => (b.dateISO || b.date || '').localeCompare(a.dateISO || a.date || ''))
       .slice(0, showCount);
-  }, [quotations, searchQuery, showCount]);
+  }, [quotationsSearchFiltered, showArchivedQuotations, showCount]);
 
   const mergedReceiptRows = useMemo(
     () => mergeReceiptRowsForSales(importedReceipts, quotations, ledgerSyncKey),
@@ -552,7 +615,9 @@ const Sales = () => {
     () => ({
       quotations: {
         shown: filteredQuotations.length,
-        pendingApproval: filteredQuotations.filter((x) => x.status !== 'Approved').length,
+        pendingApproval: filteredQuotations.filter(
+          (x) => x.status !== 'Approved' && !isQuotationArchivedRow(x)
+        ).length,
       },
       receipts: { shown: filteredMergedReceipts.length },
       cuttinglist: { shown: filteredCuttingLists.length },
@@ -578,13 +643,13 @@ const Sales = () => {
     setSearchQuery('');
     setCustomerAddOpen(false);
     setShowCount(20);
+    setShowArchivedQuotations(false);
   };
 
   /**
    * Command center (Dashboard) sends `navigate('/sales', { state: { openSalesAction } })`.
    * Consume once, then clear router state so back/refresh does not reopen modals.
    */
-  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     const st = location.state ?? {};
     const action = st.openSalesAction;
@@ -669,7 +734,6 @@ const Sales = () => {
 
     navigate(location.pathname, { replace: true, state: {} });
   }, [location.state, location.pathname, navigate, showToast]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
     if (!actionMenuKey) return;
@@ -818,96 +882,87 @@ const Sales = () => {
   return (
     <PageShell blurred={isAnyModalOpen}>
       <PageHeader
-        eyebrow="Sales"
         title="Sales"
         subtitle="Quotations, receipts, cutting lists, refunds & customers — yard pricing matches the dashboard spot list; stock check is in the sidebar."
-        actions={
-          <div className="flex flex-col gap-3 items-stretch w-full lg:max-w-none xl:max-w-5xl">
+        tabs={<PageTabs tabs={salesTabs} value={activeTab} onChange={handleTabChange} />}
+        toolbar={
+          <div className="flex flex-col gap-3 w-full">
             <div className="flex flex-wrap items-center justify-end gap-2">
               <span className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-[10px] font-semibold text-[#134e4a]">
                 {salesRoleLabel}
               </span>
-              <span
-                className={`inline-flex items-center rounded-full px-2.5 py-1 text-[9px] font-bold uppercase tracking-wide ${
-                  ws?.apiOnline
-                    ? 'bg-emerald-100 text-emerald-800'
-                    : ws?.usingCachedData
-                      ? 'bg-sky-100 text-sky-900'
-                      : 'bg-amber-100 text-amber-900'
-                }`}
+              <button
+                type="button"
+                onClick={() => void reloadWorkspaceFromServer()}
+                disabled={!ws?.refresh || workspaceReloading || ws?.authRequired}
+                title="After a database import or external change, reload lists from the server"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-[#134e4a] shadow-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/25"
               >
-                {ws?.apiOnline
-                  ? 'Live database'
-                  : ws?.usingCachedData
-                    ? 'Cached — read-only'
-                    : 'Demo data'}
-              </span>
+                <RefreshCw size={14} strokeWidth={2} className={workspaceReloading ? 'animate-spin' : ''} />
+                Reload data
+              </button>
             </div>
-            <div className="flex flex-wrap items-center gap-2 justify-end sm:justify-start lg:justify-end">
-              <PageTabs tabs={salesTabs} value={activeTab} onChange={handleTabChange} />
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="flex flex-wrap items-center gap-2">
+                {activeTab === 'quotations' && (
+                  <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
+                    <Plus size={16} strokeWidth={2} /> New quotation
+                  </button>
+                )}
+                {activeTab === 'receipts' && (
+                  <>
+                    <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
+                      <Plus size={16} strokeWidth={2} /> New receipt
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowAdvanceModal(true)}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-amber-200 bg-amber-50 text-amber-950 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider shadow-sm hover:bg-amber-100 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/40 focus-visible:ring-offset-2 shrink-0"
+                      title="Payment before quotation — customer deposit / liability"
+                    >
+                      <Wallet size={16} strokeWidth={2} /> Advance payment
+                    </button>
+                  </>
+                )}
+                {activeTab === 'cuttinglist' && (
+                  <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
+                    <Plus size={16} strokeWidth={2} /> New cutting list
+                  </button>
+                )}
+                {activeTab === 'refund' && (
+                  <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
+                    <Plus size={16} strokeWidth={2} /> New refund
+                  </button>
+                )}
+                {activeTab === 'customers' && (
+                  <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
+                    <Plus size={16} strokeWidth={2} /> Add customer
+                  </button>
+                )}
+              </div>
+              <div className="relative flex-1 max-w-md min-w-[200px] w-full sm:w-auto">
+                <Search
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
+                  size={16}
+                  strokeWidth={2}
+                />
+                <input
+                  type="search"
+                  placeholder={
+                    activeTab === 'customers'
+                      ? 'Search name, phone, ID, tier…'
+                      : 'Search ID, customer, date…'
+                  }
+                  className="w-full bg-white border border-slate-200 rounded-lg py-2.5 pl-10 pr-4 text-[11px] font-semibold text-slate-800 outline-none transition-all placeholder:text-slate-400 focus:border-[#134e4a]/35 focus:ring-2 focus:ring-[#134e4a]/10 shadow-sm"
+                  autoComplete="off"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+              </div>
             </div>
           </div>
         }
       />
-
-      <div className="flex flex-wrap items-center justify-between gap-4 mb-6 -mt-2">
-        <div className="flex flex-wrap items-center gap-2">
-          {activeTab === 'quotations' && (
-            <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
-              <Plus size={16} strokeWidth={2} /> New quotation
-            </button>
-          )}
-          {activeTab === 'receipts' && (
-            <>
-              <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
-                <Plus size={16} strokeWidth={2} /> New receipt
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowAdvanceModal(true)}
-                className="inline-flex items-center justify-center gap-2 rounded-lg border border-amber-200 bg-amber-50 text-amber-950 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider shadow-sm hover:bg-amber-100 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/40 focus-visible:ring-offset-2 shrink-0"
-                title="Payment before quotation — customer deposit / liability"
-              >
-                <Wallet size={16} strokeWidth={2} /> Advance payment
-              </button>
-            </>
-          )}
-          {activeTab === 'cuttinglist' && (
-            <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
-              <Plus size={16} strokeWidth={2} /> New cutting list
-            </button>
-          )}
-          {activeTab === 'refund' && (
-            <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
-              <Plus size={16} strokeWidth={2} /> New refund
-            </button>
-          )}
-          {activeTab === 'customers' && (
-            <button type="button" onClick={openNewModal} className={primaryActionBtnClass}>
-              <Plus size={16} strokeWidth={2} /> Add customer
-            </button>
-          )}
-        </div>
-        <div className="relative flex-1 max-w-md min-w-[200px]">
-          <Search
-            className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
-            size={16}
-            strokeWidth={2}
-          />
-          <input
-            type="search"
-            placeholder={
-              activeTab === 'customers'
-                ? 'Search name, phone, ID, tier…'
-                : 'Search ID, customer, date…'
-            }
-            className="w-full bg-white border border-slate-200 rounded-lg py-2.5 pl-10 pr-4 text-[11px] font-semibold text-slate-800 outline-none transition-all placeholder:text-slate-400 focus:border-[#134e4a]/35 focus:ring-2 focus:ring-[#134e4a]/10 shadow-sm"
-            autoComplete="off"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-        </div>
-      </div>
 
       <div className="grid grid-cols-1 gap-6 lg:gap-8 min-w-0 lg:grid-cols-4">
         {activeTab !== 'customers' && (
@@ -1027,6 +1082,59 @@ const Sales = () => {
                     </button>
                   </div>
                 </section>
+
+                <section className="rounded-xl border border-amber-200/90 bg-amber-50/40 shadow-sm overflow-hidden">
+                  <div className="h-1 bg-amber-500" aria-hidden />
+                  <div className="p-5">
+                    <p className="text-[10px] font-semibold uppercase tracking-widest text-amber-900/80 flex items-center gap-1.5">
+                      <Bell size={14} className="shrink-0" strokeWidth={2} />
+                      Quote validity
+                    </p>
+                    <p className="text-[11px] text-amber-950/80 mt-1 leading-snug">
+                      Quotes stay open for <strong>{QUOTATION_VALIDITY_DAYS} days</strong> from the quote date. From day{' '}
+                      <strong>{QUOTATION_FOLLOWUP_START_DAY}</strong> we flag follow-up if there is still no payment on
+                      the quote. Day {QUOTATION_VALIDITY_DAYS}+ with no commitment auto-archives as{' '}
+                      <strong>Expired</strong> (revivable). Master list price changes void quotes under 2 days old with
+                      no commitment.
+                    </p>
+                    <label className="mt-3 flex cursor-pointer items-start gap-2 rounded-lg border border-amber-200/80 bg-white/70 px-2.5 py-2 text-[10px] text-amber-950">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 h-3.5 w-3.5 rounded border-amber-300 text-amber-600"
+                        checked={showArchivedQuotations}
+                        onChange={(e) => setShowArchivedQuotations(e.target.checked)}
+                      />
+                      <span>Show expired / void (archived) in the list</span>
+                    </label>
+                    {quotationFollowUpRows.length > 0 ? (
+                      <div className="mt-4 rounded-lg border border-amber-200 bg-white/90 p-2.5">
+                        <p className="text-[9px] font-bold text-amber-900 uppercase tracking-wider mb-2">
+                          Follow-up ({quotationFollowUpRows.length})
+                        </p>
+                        <ul className="max-h-[200px] overflow-y-auto custom-scrollbar space-y-1.5">
+                          {quotationFollowUpRows.slice(0, 12).map((q) => (
+                            <li key={q.id}>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedItem(q);
+                                  setQuotationAccessMode('view');
+                                  setShowQuotationModal(true);
+                                }}
+                                className="w-full text-left rounded-md border border-amber-100 bg-amber-50/50 px-2 py-1.5 hover:bg-amber-100/80 transition-colors"
+                              >
+                                <span className="text-[10px] font-bold text-[#134e4a] tabular-nums">{q.id}</span>
+                                <span className="text-[9px] text-slate-600 block truncate">{q.customer}</span>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : (
+                      <p className="text-[10px] text-amber-800/60 mt-3 italic">No follow-up flags for current search.</p>
+                    )}
+                  </div>
+                </section>
               </>
             ) : activeTab === 'receipts' ? (
               <ReceiptsAdvancesPanel 
@@ -1034,6 +1142,12 @@ const Sales = () => {
                 ledgerNonce={ledgerNonce}
                 onSelectAdvance={setAdvanceViewEntry}
                 onLinkAdvance={setLinkAdvanceEntry}
+              />
+            ) : activeTab === 'cuttinglist' ? (
+              <SalesCuttingListMaterialPanel
+                ready={cuttingListMaterialReadiness.ready}
+                waitingWithSpecNoStock={cuttingListMaterialReadiness.waitingWithSpecNoStock}
+                onOpenCuttingList={openCuttingListFromMaterialAlert}
               />
             ) : (
               <section className="rounded-xl border border-dashed border-slate-200 bg-slate-50/40 p-5">
@@ -1047,7 +1161,7 @@ const Sales = () => {
 
         <div
           className={
-            'lg:col-span-3 min-w-0'
+            activeTab === 'customers' ? 'lg:col-span-4 min-w-0' : 'lg:col-span-3 min-w-0'
           }
         >
           <MainPanel
@@ -1115,7 +1229,7 @@ const Sales = () => {
                             `Tot ${formatNgn(totalN)}`,
                           ].join(' · ');
                           return (
-                            <li key={q.id} className={CARD_ROW}>
+                            <li key={q.id} className={salesListItemClass(`q-${q.id}`, actionMenuKey)}>
                               <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
                                 <div className="min-w-0 flex-1 leading-tight">
                                   <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 min-w-0">
@@ -1133,6 +1247,14 @@ const Sales = () => {
                                       <span className={`${CHIP} ${quotePayChipBorder(q.paymentStatus)}`}>
                                         {q.paymentStatus}
                                       </span>
+                                      {quotationNeedsFollowUpAlert(q) ? (
+                                        <span
+                                          className={`${CHIP} border-amber-300 bg-amber-100 text-amber-950`}
+                                          title={`Day ${QUOTATION_FOLLOWUP_START_DAY}–${QUOTATION_VALIDITY_DAYS - 1} follow-up — still unpaid on quote`}
+                                        >
+                                          Follow up
+                                        </span>
+                                      ) : null}
                                       <SalesRowMenu
                                         rowKey={`q-${q.id}`}
                                         openKey={actionMenuKey}
@@ -1205,7 +1327,7 @@ const Sales = () => {
                         {filteredMergedReceipts.map((r) => {
                           const meta2 = [r.quotationRef, r.date, r._payBadge].filter(Boolean).join(' · ');
                           return (
-                            <li key={r.id} className={CARD_ROW}>
+                            <li key={r.id} className={salesListItemClass(`rc-${r.id}`, actionMenuKey)}>
                               <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
                                 <div className="min-w-0 flex-1 leading-tight">
                                   <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 min-w-0">
@@ -1246,13 +1368,25 @@ const Sales = () => {
                                       />
                                     </div>
                                   </div>
-                                  {meta2 ? (
-                                    <p
-                                      className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2"
-                                      title={meta2}
-                                    >
-                                      {meta2}
-                                    </p>
+                                  {(meta2 || r.financeDeliveryClearedAtISO) ? (
+                                    <div className="flex flex-nowrap items-center gap-2 mt-0.5 min-w-0">
+                                      {meta2 ? (
+                                        <p
+                                          className="text-[8px] text-slate-500 leading-snug truncate min-w-0 flex-1"
+                                          title={meta2}
+                                        >
+                                          {meta2}
+                                        </p>
+                                      ) : null}
+                                      {r.financeDeliveryClearedAtISO ? (
+                                        <span
+                                          className={`${CHIP} border-emerald-200 bg-emerald-50 text-emerald-900 shrink-0 whitespace-nowrap`}
+                                          title={r.financeDeliveryClearedAtISO}
+                                        >
+                                          Cleared for delivery (Finance)
+                                        </span>
+                                      ) : null}
+                                    </div>
                                   ) : null}
                                 </div>
                               </div>
@@ -1286,7 +1420,7 @@ const Sales = () => {
                     ) : (
                       <ul className="space-y-1.5">
                         {filteredCuttingLists.map((c) => (
-                          <li key={c.id} className={CARD_ROW}>
+                          <li key={c.id} className={salesListItemClass(`cl-${c.id}`, actionMenuKey)}>
                             <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
                               <div className="min-w-0 flex-1 leading-tight">
                                 <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 min-w-0">
@@ -1368,7 +1502,7 @@ const Sales = () => {
                             .filter(Boolean)
                             .join(' · ');
                           return (
-                            <li key={r.refundID} className={CARD_ROW}>
+                            <li key={r.refundID} className={salesListItemClass(`rf-${r.refundID}`, actionMenuKey)}>
                               <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
                                 <div className="min-w-0 flex-1 leading-tight">
                                   <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 min-w-0">
@@ -1428,7 +1562,7 @@ const Sales = () => {
                     onAddClose={() => setCustomerAddOpen(false)}
                     createdByLabel={salesRoleLabel}
                     quotations={quotations}
-                    receipts={importedReceipts}
+                    receipts={mergedReceiptRows}
                     cuttingLists={cuttingLists}
                   />
                 ) : null}
@@ -1446,6 +1580,10 @@ const Sales = () => {
         onClose={() => setShowQuotationModal(false)}
         ledgerNonce={ledgerSyncKey}
         onLedgerChange={onLedgerSynced}
+        onQuotationRevived={(q) => {
+          setSelectedItem(q);
+          setQuotationAccessMode('edit');
+        }}
         useLedgerApi={Boolean(ws?.canMutate)}
         useQuotationApi={Boolean(ws?.canMutate)}
         quotedByStaff={salesRoleLabel}
@@ -1578,7 +1716,7 @@ const Sales = () => {
         accessMode={cuttingAccessMode}
         onClose={() => setShowCuttingModal(false)}
         quotations={quotations}
-        receipts={importedReceipts}
+        receipts={mergedReceiptRows}
         cuttingLists={cuttingLists}
         onPersist={persistCuttingList}
         onCuttingListUpdated={(cl) => setSelectedItem(cl)}
@@ -1594,7 +1732,7 @@ const Sales = () => {
         requesterLabel={salesRoleLabel}
         approverLabel={salesRoleLabel}
         quotations={quotations}
-        receipts={importedReceipts}
+        receipts={mergedReceiptRows}
         cuttingLists={cuttingLists}
         availableStock={ws?.snapshot?.salesAvailableStock ?? []}
       />

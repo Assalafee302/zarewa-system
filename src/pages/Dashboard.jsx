@@ -59,9 +59,9 @@ import {
 import {
   liveCashflowMonthly,
   liveMetersSeries,
+  liveProductionAttributedSalesSeriesByMonth,
+  liveProductionAttributedSalesSeriesByWeek,
   liveProductionPulse,
-  liveSalesSeriesByMonth,
-  liveSalesSeriesByWeek,
   liveStockMix,
   liveTopSalesPerformersByMaterial,
 } from '../lib/liveAnalytics';
@@ -99,7 +99,7 @@ const Dashboard = () => {
   const [priceDraft, setPriceDraft] = useState([]);
   const [salesTrendGranularity, setSalesTrendGranularity] = useState('month');
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     const next = mergeDashboardPrefs(ws?.snapshot?.dashboardPrefs);
     setPrefs((prev) => (dashboardPrefsShallowEqual(prev, next) ? prev : next));
@@ -111,7 +111,7 @@ const Dashboard = () => {
       setPrefs((prev) => (dashboardPrefsShallowEqual(prev, next) ? prev : next));
     }
   }, [location.pathname, location.key, ws?.snapshot?.dashboardPrefs]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   const spotPriceRows = useMemo(
     () => spotPricesRowsFromMasterData(ws?.snapshot?.masterData),
@@ -189,15 +189,6 @@ const Dashboard = () => {
       ws?.hasWorkspaceData
         ? Array.isArray(ws?.snapshot?.receipts)
           ? ws.snapshot.receipts
-          : []
-        : [],
-    [ws]
-  );
-  const cuttingLists = useMemo(
-    () =>
-      ws?.hasWorkspaceData
-        ? Array.isArray(ws?.snapshot?.cuttingLists)
-          ? ws.snapshot.cuttingLists
           : []
         : [],
     [ws]
@@ -281,7 +272,7 @@ const Dashboard = () => {
       .slice(0, 2);
   }, [invProducts]);
 
-  const metersSeries = useMemo(() => liveMetersSeries(cuttingLists, 6), [cuttingLists]);
+  const metersSeries = useMemo(() => liveMetersSeries(productionJobs, 6), [productionJobs]);
   const metersCurrent = metersSeries[metersSeries.length - 1];
   const metersPrev = metersSeries[metersSeries.length - 2];
   const metersDeltaPct = useMemo(() => {
@@ -289,7 +280,10 @@ const Dashboard = () => {
     return ((metersCurrent.meters - metersPrev.meters) / metersPrev.meters) * 100;
   }, [metersCurrent, metersPrev]);
 
-  const salesByMonth = useMemo(() => liveSalesSeriesByMonth(quotations, 6), [quotations]);
+  const salesByMonth = useMemo(
+    () => liveProductionAttributedSalesSeriesByMonth(quotations, productionJobs, 6),
+    [quotations, productionJobs]
+  );
   const stockMix = useMemo(() => liveStockMix(invProducts), [invProducts]);
   const cashflowMonthly = useMemo(
     () => liveCashflowMonthly(receipts, expenses, 6, treasuryMovements),
@@ -391,35 +385,34 @@ const Dashboard = () => {
   const salesTrendData = useMemo(
     () =>
       salesTrendGranularity === 'week'
-        ? liveSalesSeriesByWeek(quotations, 8)
+        ? liveProductionAttributedSalesSeriesByWeek(quotations, productionJobs, 8)
         : salesByMonth,
-    [quotations, salesByMonth, salesTrendGranularity]
+    [quotations, productionJobs, salesByMonth, salesTrendGranularity]
   );
 
   const pulse = useMemo(
-    () => liveProductionPulse(cuttingLists, movements, wipByProduct, pendingCoilRequests),
-    [cuttingLists, movements, pendingCoilRequests, wipByProduct]
+    () => liveProductionPulse(productionJobs, movements, wipByProduct, pendingCoilRequests),
+    [productionJobs, movements, pendingCoilRequests, wipByProduct]
   );
 
   const productionMetrics = ws?.snapshot?.productionMetrics;
 
   const topCoilsRows = useMemo(
-    () => liveTopSalesPerformersByMaterial(cuttingLists, quotations, { limit: 5 }),
-    [cuttingLists, quotations]
+    () => liveTopSalesPerformersByMaterial(productionJobs, quotations, { limit: 5 }),
+    [productionJobs, quotations]
   );
 
   return (
     <PageShell blurred={priceEditorOpen}>
       <PageHeader
-        eyebrow="Operations"
         title="Operations dashboard"
         subtitle={
           currentUserName
             ? `${currentUserName}, here is the live sales, treasury, production, and inventory picture for today.`
             : 'Live sales, treasury, production, and inventory control in one view'
         }
-        actions={
-          <div className="flex flex-wrap items-center gap-2 justify-end w-full lg:max-w-md">
+        toolbar={
+          <div className="flex flex-wrap items-center gap-2 justify-end w-full">
             <button
               type="button"
               onClick={() => navigate('/settings')}
@@ -706,18 +699,20 @@ const Dashboard = () => {
                 className="p-5 rounded-xl border border-slate-200 bg-slate-50/50 text-left hover:border-slate-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/20"
               >
                 <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-2">
-                  Meters sold (7 days)
+                  Metres produced (7 days)
                 </p>
                 <p className="text-3xl font-bold tracking-tight text-[#134e4a] tabular-nums">
-                  {pulse.metersSold7d.toLocaleString()}
+                  {pulse.metresProduced7d.toLocaleString()}
                   <span className="text-lg font-semibold text-slate-500 ml-1">m</span>
                 </p>
-                <p className="text-[9px] text-slate-500 mt-2">From cutting lists recorded in the last 7 days.</p>
+                <p className="text-[9px] text-slate-500 mt-2">
+                  Actual metres from jobs completed in the last 7 days (production date).
+                </p>
               </button>
               <button
                 type="button"
                 onClick={() => navigate('/operations')}
-                title="Meters corrugated at the mill — line output before full dispatch"
+                title="Metres corrugated at the mill — line output before full dispatch"
                 className="p-5 rounded-xl border border-slate-200 bg-slate-50/50 text-left hover:border-slate-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/20"
               >
                 <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-1">
@@ -748,7 +743,7 @@ const Dashboard = () => {
                   <span className="text-lg font-semibold text-slate-500 ml-1">m</span>
                 </p>
                 <p className="text-[9px] text-slate-500 mt-2 leading-snug">
-                  Corrugated off the line; may differ from sold while WIP is in yard.
+                  Corrugated off the line; may differ from produced (completed jobs) while WIP is in yard.
                 </p>
               </button>
               <button
@@ -786,15 +781,15 @@ const Dashboard = () => {
                   </span>
                   <div>
                     <h3 className="text-xs font-semibold uppercase tracking-widest text-slate-700">
-                      Top 5 performers (sales)
+                      Top material performers (production)
                     </h3>
                     <p className="text-[11px] text-slate-500 mt-1 max-w-xl leading-relaxed">
                       By <span className="font-medium text-slate-600">colour</span>,{' '}
                       <span className="font-medium text-slate-600">gauge</span>, and{' '}
                       <span className="font-medium text-slate-600">profile</span>
                       {' '}
-                      — from cutting lists this month, with revenue from linked quotations (each quote counted once
-                      per material mix).
+                      — actual metres from jobs completed this month; ₦ is each job’s share of its quotation total (by
+                      actual metres across completed jobs for that quote).
                     </p>
                   </div>
                 </div>
@@ -820,17 +815,17 @@ const Dashboard = () => {
               <span>Material</span>
               <span className="text-right tabular-nums">
                 <span className="inline-flex flex-wrap justify-end gap-x-2 gap-y-0">
-                  <span>Meters</span>
+                  <span>Metres</span>
                   <span className="text-slate-300 font-normal">·</span>
                   <span>kg</span>
                 </span>
               </span>
-              <span className="text-right tabular-nums">Revenue</span>
+              <span className="text-right tabular-nums">Sales (₦)</span>
             </div>
 
             {topCoilsRows.length === 0 ? (
               <p className="text-sm text-slate-500 py-8 text-center border-t border-slate-100">
-                No cutting lists in the current month yet — rankings will appear as sales are recorded.
+                No production completions in the current month yet — rankings appear as jobs are completed.
               </p>
             ) : (
               <ul className="divide-y divide-slate-100">
@@ -853,7 +848,7 @@ const Dashboard = () => {
                         <p className="text-[11px] text-slate-600 pl-9">{row.materialType}</p>
                         <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1 pl-9 text-[11px] tabular-nums">
                           <span className="text-slate-500">
-                            {row.metersSold.toLocaleString()} m · ~{row.weightKg.toLocaleString()} kg
+                            {row.metresProduced.toLocaleString()} m · ~{row.weightKg.toLocaleString()} kg
                           </span>
                           <span className="font-semibold text-[#134e4a]">{formatNgn(row.revenueNgn)}</span>
                         </div>
@@ -868,7 +863,7 @@ const Dashboard = () => {
                         </span>
                         <span className="text-[12px] text-slate-600 truncate pr-1">{row.materialType}</span>
                         <span className="flex flex-wrap items-baseline justify-end gap-x-2 gap-y-0 text-sm font-semibold text-slate-800 tabular-nums text-right">
-                          <span>{row.metersSold.toLocaleString()} m</span>
+                          <span>{row.metresProduced.toLocaleString()} m</span>
                           <span className="text-slate-300 font-normal">·</span>
                           <span className="text-slate-500 font-medium">~{row.weightKg.toLocaleString()} kg</span>
                         </span>
@@ -890,13 +885,13 @@ const Dashboard = () => {
                   <div className="flex items-center gap-2 text-slate-800">
                     <LineChartIcon size={18} className="text-[#134e4a]" />
                     <h3 className="text-xs font-semibold uppercase tracking-widest text-slate-700">
-                      Sales trend
+                      Sales trend (produced)
                     </h3>
                   </div>
                   <div
                     className="inline-flex rounded-lg border border-slate-200 p-0.5 bg-slate-50"
                     role="group"
-                    aria-label="Sales trend granularity"
+                    aria-label="Sales trend by production completion date"
                   >
                     <button
                       type="button"
@@ -922,7 +917,10 @@ const Dashboard = () => {
                     </button>
                   </div>
                 </div>
-                <div className="h-64 w-full" title="Hover points for exact amounts">
+                <div
+                  className="h-64 w-full"
+                  title="₦ from quotations when production completes in each period; split by actual metres per job."
+                >
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={salesTrendData} margin={{ top: 8, right: 12, left: 4, bottom: 8 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
@@ -941,7 +939,7 @@ const Dashboard = () => {
                         axisLine={false}
                       />
                       <Tooltip
-                        formatter={(value) => [formatNgn(value), 'Revenue']}
+                        formatter={(value) => [formatNgn(value), 'Sales (produced)']}
                         labelFormatter={(l) => l}
                         contentStyle={{
                           borderRadius: 8,
@@ -1246,9 +1244,10 @@ const Dashboard = () => {
               (corrugated off the line into sellable SKU).
             </p>
             <p>
-              <span className="font-semibold text-slate-800">Meters sold (7 days)</span> is driven by cutting lists
-              registered in that window — so mill output can be higher than sold while WIP sits in the yard, or lower
-              if you are dispatching older stock.
+              <span className="font-semibold text-slate-800">Metres produced (7 days)</span> is the sum of{' '}
+              <span className="font-semibold text-slate-800">actual metres</span> on production jobs completed in that
+              window — so mill output can be higher than produced while WIP sits in the yard, or lower if you are
+              dispatching older stock.
             </p>
             <p className="text-[11px] text-slate-500">
               For detail, open <span className="font-semibold">Production</span> and use production traceability /

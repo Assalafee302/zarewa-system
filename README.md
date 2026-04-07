@@ -1,16 +1,44 @@
-# React + Vite
+# Zarewa System
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Internal operations app: sales, production, HR, treasury, and role-based access. The UI is **React + Vite**; the API and persistence live under `server/` (SQLite via better-sqlite3).
 
-Currently, two official plugins are available:
+## Quick start
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```bash
+npm ci
+npm run dev          # Vite (frontend)
+# In another terminal:
+npm run server       # API on the port in your env (see docs)
+```
 
-## React Compiler
+Apply schema changes when pulling updates:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+npm run db:migrate
+```
 
-## Expanding the ESLint configuration
+## Documentation
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+- [Access control & APIs](docs/ACCESS_CONTROL.md) — permissions, approvals, sensitive routes  
+- [Environment variables](docs/ENVIRONMENT.md) — ports, DB path, cookies, Playwright  
+- [Staff approvals (who does what)](docs/STAFF_APPROVALS.md)  
+- [Customer refunds — operations & UAT](docs/REFUND_OPERATIONS.md)  
+- [Production / cutover checklist](docs/DEPLOYMENT.md)
+
+## Quality gates
+
+| Command | Purpose |
+|--------|---------|
+| `npm run lint` | ESLint |
+| `npm run test` | Vitest (full server + shared suite) |
+| `npm run test:e2e` | Playwright (`e2e/`) |
+| `npm run test:all` | Vitest then Playwright (no production build) |
+| `npm run verify:complete` | **Release gate:** production build + Vitest + all E2E (same as CI) |
+
+CI (GitHub Actions on `main` / `master` and PRs) runs `node scripts/verify-complete.mjs` after lint and Playwright browser install.
+
+## Stack notes
+
+- Vite React frontend; routing in `src/App.jsx`  
+- REST-style handlers in `server/httpApi.js` with auth in `server/auth.js`  
+- Migrations in `server/migrate.js` (invoked by `db:migrate`)

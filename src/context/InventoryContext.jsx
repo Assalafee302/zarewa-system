@@ -8,6 +8,7 @@ import React, {
   useState,
 } from 'react';
 import { apiFetch } from '../lib/apiBase';
+import { procurementKindFromPo } from '../lib/procurementPoKind';
 import { useWorkspace } from './WorkspaceContext';
 
 const InventoryContext = createContext(null);
@@ -53,8 +54,11 @@ function normalizePoLine(l, idx, catalog = []) {
 }
 
 function normalizePurchaseOrder(po, catalog = []) {
+  const lines = po.lines.map((l, i) => normalizePoLine(l, i, catalog));
+  const procurementKind = procurementKindFromPo({ procurementKind: po.procurementKind, lines });
   return {
     ...po,
+    procurementKind,
     transportAgentId: po.transportAgentId ?? '',
     transportAgentName: po.transportAgentName ?? '',
     transportReference: po.transportReference ?? '',
@@ -64,7 +68,7 @@ function normalizePurchaseOrder(po, catalog = []) {
     transportPaid: Boolean(po.transportPaid),
     transportPaidAtISO: po.transportPaidAtISO ?? '',
     supplierPaidNgn: Number(po.supplierPaidNgn) || 0,
-    lines: po.lines.map((l, i) => normalizePoLine(l, i, catalog)),
+    lines,
   };
 }
 
@@ -85,7 +89,7 @@ export function InventoryProvider({ children }) {
   const [coilLots, setCoilLots] = useState([]);
   const [wipByProduct, setWipByProduct] = useState({});
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     const s = ws?.snapshot;
     if (!s) {
@@ -137,7 +141,7 @@ export function InventoryProvider({ children }) {
       setWipByProduct({ ...s.wipByProduct });
     }
   }, [ws?.snapshot]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   const appendMovement = useCallback((entry) => {
     setMovements((prev) => [
@@ -256,8 +260,104 @@ export function InventoryProvider({ children }) {
     [appendMovement, products, ws]
   );
 
+  const updatePurchaseOrder = useCallback(
+    async ({
+      poID,
+      supplierID,
+      supplierName,
+      orderDateISO,
+      expectedDeliveryISO,
+      lines,
+      editApprovalId,
+    }) => {
+      const id = String(poID || '').trim();
+      if (!id) return { ok: false, error: 'Purchase order not found.' };
+
+      const normalizedLines = lines
+        .filter((l) => l.productID && Number(l.qtyOrdered) > 0)
+        .map((l, idx) =>
+          normalizePoLine(
+            {
+              lineKey: l.lineKey || `L${Date.now()}-${idx}-${l.productID}`,
+              productID: l.productID,
+              productName: l.productName,
+              color: l.color,
+              gauge: l.gauge,
+              metersOffered: l.metersOffered,
+              conversionKgPerM: l.conversionKgPerM,
+              unitPricePerKgNgn: l.unitPricePerKgNgn ?? l.unitPriceNgn,
+              qtyOrdered: l.qtyOrdered,
+              unitPriceNgn: l.unitPriceNgn ?? l.unitPricePerKgNgn,
+              qtyReceived: 0,
+            },
+            idx,
+            products
+          )
+        );
+      if (!normalizedLines.length) return { ok: false, error: 'Add at least one valid line.' };
+
+      if (ws?.canMutate) {
+        const { ok, data } = await apiFetch(`/api/purchase-orders/${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            supplierID,
+            supplierName,
+            orderDateISO: orderDateISO || new Date().toISOString().slice(0, 10),
+            expectedDeliveryISO: expectedDeliveryISO || '',
+            lines: normalizedLines.map((l) => ({
+              lineKey: l.lineKey,
+              productID: l.productID,
+              productName: l.productName,
+              color: l.color,
+              gauge: l.gauge,
+              metersOffered: l.metersOffered,
+              conversionKgPerM: l.conversionKgPerM,
+              unitPricePerKgNgn: l.unitPricePerKgNgn,
+              unitPriceNgn: l.unitPriceNgn,
+              qtyOrdered: l.qtyOrdered,
+            })),
+            ...(editApprovalId ? { editApprovalId: String(editApprovalId).trim() } : {}),
+          }),
+        });
+        if (!ok || !data?.ok) {
+          return { ok: false, error: data?.error || 'Could not update PO on server.' };
+        }
+        await ws.refresh();
+        return { ok: true, poID: id };
+      }
+
+      setPurchaseOrders((prev) =>
+        prev.map((p) =>
+          p.poID === id
+            ? normalizePurchaseOrder(
+                {
+                  ...p,
+                  supplierID,
+                  supplierName,
+                  orderDateISO: orderDateISO || new Date().toISOString().slice(0, 10),
+                  expectedDeliveryISO: expectedDeliveryISO || '',
+                  lines: normalizedLines,
+                },
+                products
+              )
+            : p
+        )
+      );
+      appendMovement({
+        type: 'PO_UPDATED',
+        ref: id,
+        detail: `${supplierName} · ${normalizedLines.length} line(s) revised`,
+      });
+      return { ok: true, poID: id };
+    },
+    [appendMovement, products, ws]
+  );
+
   const linkTransportToPurchaseOrder = useCallback(
-    async (poID, { transportAgentId, transportAgentName, transportReference, transportNote }) => {
+    async (
+      poID,
+      { transportAgentId, transportAgentName, transportReference, transportNote, editApprovalId } = {}
+    ) => {
       if (ws?.canMutate) {
         const { ok, data } = await apiFetch(
           `/api/purchase-orders/${encodeURIComponent(poID)}/link-transport`,
@@ -268,6 +368,7 @@ export function InventoryProvider({ children }) {
               transportAgentName,
               transportReference,
               transportNote,
+              ...(editApprovalId ? { editApprovalId: String(editApprovalId).trim() } : {}),
             }),
           }
         );
@@ -418,13 +519,16 @@ export function InventoryProvider({ children }) {
   );
 
   const setPurchaseOrderStatus = useCallback(
-    async (poID, status) => {
+    async (poID, status, { editApprovalId } = {}) => {
       if (ws?.canMutate) {
         const { ok, data } = await apiFetch(
           `/api/purchase-orders/${encodeURIComponent(poID)}/status`,
           {
             method: 'PATCH',
-            body: JSON.stringify({ status }),
+            body: JSON.stringify({
+              status,
+              ...(editApprovalId ? { editApprovalId: String(editApprovalId).trim() } : {}),
+            }),
           }
         );
         if (!ok || !data?.ok) {
@@ -443,13 +547,18 @@ export function InventoryProvider({ children }) {
   );
 
   const attachSupplierInvoice = useCallback(
-    async (poID, { invoiceNo, invoiceDateISO, deliveryDateISO }) => {
+    async (poID, { invoiceNo, invoiceDateISO, deliveryDateISO, editApprovalId } = {}) => {
       if (ws?.canMutate) {
         const { ok, data } = await apiFetch(
           `/api/purchase-orders/${encodeURIComponent(poID)}/invoice`,
           {
             method: 'PATCH',
-            body: JSON.stringify({ invoiceNo, invoiceDateISO, deliveryDateISO }),
+            body: JSON.stringify({
+              invoiceNo,
+              invoiceDateISO,
+              deliveryDateISO,
+              ...(editApprovalId ? { editApprovalId: String(editApprovalId).trim() } : {}),
+            }),
           }
         );
         if (!ok || !data?.ok) {
@@ -534,8 +643,9 @@ export function InventoryProvider({ children }) {
         return { ok: true, coilNos: data.coilNos || [] };
       }
 
-      /* Offline / demo GRN (no API): synthetic coil IDs (CL-2026-####) from a local counter only.
+      /* Offline / demo GRN (no API): synthetic coil IDs (CL-YY-####) from a local counter only.
          The live server assigns coil numbers when POST /api/purchase-orders/:id/grn succeeds — do not expect IDs to match. */
+      const coilYy = String(new Date().getFullYear()).slice(-2);
       const coilNumbers = [];
 
       setCoilLots((prevLots) => {
@@ -544,7 +654,7 @@ export function InventoryProvider({ children }) {
           seq += 1;
           const coilNo =
             e.coilNo?.trim() ||
-            `CL-2026-${String(seq).padStart(4, '0')}`;
+            `CL-${coilYy}-${String(seq).padStart(4, '0')}`;
           coilNumbers.push(coilNo);
           const w = e.weightKg != null && e.weightKg !== '' ? Number(e.weightKg) : null;
           const qty = Number(e.qtyReceived);
@@ -821,6 +931,7 @@ export function InventoryProvider({ children }) {
       wipByProduct,
       getProduct,
       createPurchaseOrder,
+      updatePurchaseOrder,
       setPurchaseOrderStatus,
       attachSupplierInvoice,
       confirmStoreReceipt,
@@ -840,6 +951,7 @@ export function InventoryProvider({ children }) {
       wipByProduct,
       getProduct,
       createPurchaseOrder,
+      updatePurchaseOrder,
       setPurchaseOrderStatus,
       attachSupplierInvoice,
       confirmStoreReceipt,

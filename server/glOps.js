@@ -3,13 +3,9 @@
  * @param {import('better-sqlite3').Database} db
  */
 
-function nextJournalId() {
-  return `JE-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function nextLineId() {
-  return `JL-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
+import { DEFAULT_BRANCH_ID } from './branches.js';
+import { assertPeriodOpen } from './controlOps.js';
+import { nextGlJournalHumanId, nextGlJournalLineHumanId } from './humanId.js';
 
 export function ensureGlSchema(db) {
   db.exec(`
@@ -89,6 +85,9 @@ export function ensureSupplementalGlAccounts(db) {
     `INSERT OR IGNORE INTO gl_accounts (id, code, name, type, is_active, sort_order) VALUES (?,?,?,?,1,?)`
   );
   ins.run('acc-adv', '2500', 'Customer advances / deposits', 'liability', 75);
+  ins.run('acc-revenue', '4000', 'Sales revenue (management)', 'revenue', 35);
+  ins.run('acc-accum-dep', '1398', 'Accumulated depreciation', 'asset', 31);
+  ins.run('acc-dep-exp', '6100', 'Depreciation expense', 'expense', 92);
 }
 
 export function getGlAccountIdByCode(db, code) {
@@ -116,6 +115,12 @@ export function postBalancedJournalTx(db, payload) {
   const entryDate = String(payload.entryDateISO || '').slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(entryDate)) return { ok: false, error: 'Invalid entry date.' };
 
+  try {
+    assertPeriodOpen(db, entryDate, 'GL journal date');
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+
   const sk = payload.sourceKind != null ? String(payload.sourceKind).trim() : '';
   const sid = payload.sourceId != null ? String(payload.sourceId).trim() : '';
   if (sk && sid) {
@@ -125,7 +130,8 @@ export function postBalancedJournalTx(db, payload) {
     if (dup) return { ok: true, journalId: dup.id, duplicate: true };
   }
 
-  const jid = nextJournalId();
+  const branchForJe = String(payload.branchId || DEFAULT_BRANCH_ID).trim();
+  const jid = nextGlJournalHumanId(db, branchForJe);
   const periodKey = entryDate.slice(0, 7);
   const now = new Date().toISOString();
 
@@ -156,7 +162,7 @@ export function postBalancedJournalTx(db, payload) {
     if (d < 0 || c < 0) throw new Error('Amounts must be non-negative.');
     if ((d === 0) === (c === 0)) throw new Error('Each line needs either debit or credit.');
     if (d > 0 && c > 0) throw new Error('Line cannot have both debit and credit.');
-    insL.run(nextLineId(), jid, aid, d, c, l.memo ?? null);
+    insL.run(nextGlJournalLineHumanId(db, branchForJe), jid, aid, d, c, l.memo ?? null);
   }
   return { ok: true, journalId: jid };
 }
@@ -200,6 +206,32 @@ export function tryPostGrnInventoryJournal(db, { entryDateISO, coilNo, landedCos
     });
     if (!r.ok) return r;
     return r;
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+}
+
+/**
+ * Raw materials receipt (stone metres, accessories) — same DR inventory / CR GRNI as coil GRN when cost &gt; 0.
+ * @param {{ entryDateISO: string, sourceKind: string, sourceId: string, landedCostNgn: number, branchId?: string, createdByUserId?: string, memo?: string }} p
+ */
+export function tryPostInventoryReceiptJournal(db, p) {
+  const amt = Math.round(Number(p.landedCostNgn) || 0);
+  if (amt <= 0) return { ok: true, skipped: true };
+  const sourceId = String(p.sourceId || '').trim() || `rcpt-${Date.now()}`;
+  try {
+    return postBalancedJournalTx(db, {
+      entryDateISO: p.entryDateISO,
+      memo: p.memo || `Inventory receipt ${sourceId}`,
+      sourceKind: p.sourceKind || 'INVENTORY_RECEIPT',
+      sourceId,
+      branchId: p.branchId,
+      createdByUserId: p.createdByUserId,
+      lines: [
+        { accountCode: '1300', debitNgn: amt, memo: sourceId },
+        { accountCode: '2100', creditNgn: amt, memo: sourceId },
+      ],
+    });
   } catch (e) {
     return { ok: false, error: String(e.message || e) };
   }
@@ -374,6 +406,32 @@ export function tryPostCustomerAdvanceReversalGl(db, payload) {
   } catch (e) {
     return { ok: false, error: String(e.message || e) };
   }
+}
+
+/**
+ * Cash refund to customer: reduce customer advances (2500) and cash (1000).
+ * Idempotent per payout slice via source_id = refundId:paid:cumulativePaidNgn.
+ */
+export function tryPostCustomerRefundPayoutGlTx(db, payload) {
+  const refundId = String(payload.refundId || '').trim();
+  const amt = Math.round(Number(payload.payoutAmountNgn) || 0);
+  const cum = Math.round(Number(payload.cumulativePaidNgn) || 0);
+  if (!refundId || amt <= 0) return { ok: true, skipped: true };
+  const date = String(payload.entryDateISO || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { ok: false, error: 'Invalid refund GL date.' };
+  ensureSupplementalGlAccounts(db);
+  return postBalancedJournalTx(db, {
+    entryDateISO: date,
+    memo: `Customer refund payout ${refundId}`,
+    sourceKind: 'CUSTOMER_REFUND_PAYOUT_GL',
+    sourceId: `${refundId}:paid:${cum}`,
+    branchId: payload.branchId ?? null,
+    createdByUserId: payload.createdByUserId ?? null,
+    lines: [
+      { accountCode: '2500', debitNgn: amt, memo: refundId },
+      { accountCode: '1000', creditNgn: amt, memo: refundId },
+    ],
+  });
 }
 
 export function listGlJournalEntries(db, startDate, endDate) {

@@ -31,6 +31,7 @@ export function documentTitleForPath(pathname) {
   if (p === '/accounting/controls') return `Accounting – Period & controls | ${DOCUMENT_TITLE_BASE}`;
 
   if (p === '/reports') return `Reports | ${DOCUMENT_TITLE_BASE}`;
+  if (p === '/edit-approvals') return `Edit approvals | ${DOCUMENT_TITLE_BASE}`;
   if (p === '/manager') return `Management dashboard | ${DOCUMENT_TITLE_BASE}`;
 
   if (p.startsWith('/settings')) {

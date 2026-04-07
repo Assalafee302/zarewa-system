@@ -5,6 +5,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { MainPanel, PageHeader } from '../../components/layout';
 import { useHrWorkspace } from '../../context/HrWorkspaceContext';
 import { apiFetch } from '../../lib/apiBase';
+import { APP_DATA_TABLE_PAGE_SIZE, useAppTablePaging } from '../../lib/appDataTable';
+import { AppTablePager } from '../../components/ui/AppDataTable';
 import { formatNgn } from '../../hr/hrFormat';
 import { HrOpsToolbar, HrSectionCard } from './hrUx';
 
@@ -90,6 +92,18 @@ export default function HrNextDirectory() {
     [staff, filters]
   );
 
+  const dirPage = useAppTablePaging(
+    filtered,
+    APP_DATA_TABLE_PAGE_SIZE,
+    filters.branchId,
+    filters.orgNode,
+    filters.roleFamily,
+    filters.gradeBand,
+    filters.status,
+    filters.quality
+  );
+  const queuePage = useAppTablePaging(queue, APP_DATA_TABLE_PAGE_SIZE, queue.length);
+
   const resolveCleanup = async (item, action, targetValue) => {
     const { ok, data } = await apiFetch('/api/hr/data-cleanup-queue/resolve', {
       method: 'POST',
@@ -101,7 +115,7 @@ export default function HrNextDirectory() {
   if (!caps?.canViewDirectory) {
     return (
       <MainPanel>
-        <PageHeader eyebrow="Human resources" title="Directory data quality" subtitle="No access." />
+        <PageHeader title="Directory data quality" subtitle="No access." />
       </MainPanel>
     );
   }
@@ -110,7 +124,6 @@ export default function HrNextDirectory() {
     <MainPanel className="z-app-bg min-h-screen">
       <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}>
         <PageHeader
-          eyebrow="Human resources"
           title="Directory Intelligence"
           subtitle="Enterprise-grade observability into staff normalization, salary benchmarks, and data health."
           actions={
@@ -234,20 +247,26 @@ export default function HrNextDirectory() {
         className="!p-0 overflow-hidden"
       >
         <div className="overflow-x-auto">
-          <table className="w-full text-left font-pj">
+          <table className="w-full border-collapse text-left text-sm font-pj">
             <thead>
-              <tr className="bg-slate-50/50 text-[10px] font-black uppercase tracking-[0.15em] text-slate-500">
-                <th className="px-6 py-4">Employee</th>
-                <th className="px-6 py-4 hidden md:table-cell">Structural Unit</th>
-                <th className="px-6 py-4 hidden lg:table-cell">Professional Track</th>
-                <th className="px-6 py-4">Comp Architecture</th>
-                <th className="px-6 py-4 hidden sm:table-cell">Compliance</th>
-                <th className="px-6 py-4 text-center">Data Health</th>
+              <tr className="border-b border-slate-200 bg-slate-50/50 text-xs font-bold uppercase tracking-wide text-slate-600">
+                <th className="px-4 py-3">Employee</th>
+                <th className="px-4 py-3 hidden md:table-cell">Structural Unit</th>
+                <th className="px-4 py-3 hidden lg:table-cell">Professional Track</th>
+                <th className="px-4 py-3">Comp Architecture</th>
+                <th className="px-4 py-3 hidden sm:table-cell">Compliance</th>
+                <th className="px-4 py-3 text-center">Data Health</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               <AnimatePresence>
-                {filtered.map((s, idx) => (
+                {dirPage.slice.map((s, idx) => {
+                  const empTitle = `${s.displayName || s.username} · ${s.employeeNo || s.userId}`;
+                  const structTitle = `${s.normalized?.branchId || 'HQ'} · ${s.normalized?.orgNode || 'Unassigned'}`;
+                  const structLine = `${s.normalized?.branchId || 'HQ'} · ${s.normalized?.orgNode || 'Unassigned'}`;
+                  const trackTitle = `${s.normalized?.taxonomy?.roleFamily || 'Generalist'} · ${s.normalized?.taxonomy?.gradeBand || 'Standard'}`;
+                  const trackLine = `${s.normalized?.taxonomy?.roleFamily || 'Generalist'} · Lvl ${s.normalized?.taxonomy?.gradeBand || 'Standard'}`;
+                  return (
                   <motion.tr 
                     key={s.userId}
                     variants={itemVars}
@@ -255,57 +274,45 @@ export default function HrNextDirectory() {
                     animate="show"
                     exit={{ opacity: 0, x: -10 }}
                     transition={{ delay: idx * 0.02 }}
-                    className="hover:bg-slate-50/80 transition-colors group"
+                    className="hover:bg-teal-50/30 transition-colors group"
                   >
-                    <td className="px-6 py-4">
-                      <div>
-                        <p className="text-sm font-bold text-slate-900 group-hover:text-[#134e4a] transition-colors">{s.displayName || s.username}</p>
-                        <p className="text-[10px] font-black font-mono text-slate-400 uppercase tracking-tighter">{s.employeeNo || s.userId}</p>
-                      </div>
+                    <td className="max-w-0 px-4 py-3 whitespace-nowrap truncate font-medium text-slate-900" title={empTitle}>
+                      <span className="group-hover:text-[#134e4a]">{empTitle}</span>
                     </td>
-                    <td className="px-6 py-4 hidden md:table-cell">
-                      <div className="flex flex-col">
-                        <span className="text-[11px] font-bold text-slate-700">{s.normalized?.branchId || 'HQ'}</span>
-                        <span className="text-[10px] font-medium text-slate-500">{s.normalized?.orgNode || 'Unassigned'}</span>
-                      </div>
+                    <td className="max-w-0 px-4 py-3 hidden md:table-cell whitespace-nowrap truncate text-slate-700" title={structTitle}>
+                      {structLine}
                     </td>
-                    <td className="px-6 py-4 hidden lg:table-cell">
-                      <div className="flex flex-col">
-                        <span className="text-[11px] font-bold text-slate-700">{s.normalized?.taxonomy?.roleFamily || 'Generalist'}</span>
-                        <span className="text-[10px] font-medium text-slate-500">Level: {s.normalized?.taxonomy?.gradeBand || 'Standard'}</span>
-                      </div>
+                    <td className="max-w-0 px-4 py-3 hidden lg:table-cell whitespace-nowrap truncate text-slate-700" title={trackTitle}>
+                      {trackLine}
                     </td>
-                    <td className="px-6 py-4">
-                      <span className="font-pj font-black text-[#134e4a] text-sm tabular-nums">₦{formatNgn(s.baseSalaryNgn || 0)}</span>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <span className="font-pj font-black text-[#134e4a] tabular-nums">₦{formatNgn(s.baseSalaryNgn || 0)}</span>
                     </td>
-                    <td className="px-6 py-4 hidden sm:table-cell">
+                    <td className="px-4 py-3 hidden sm:table-cell whitespace-nowrap">
                       {s.complianceBadges?.handbookAcknowledged ? (
-                        <div className="flex items-center gap-1.5 text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full w-fit">
-                          <CheckCircle2 size={12} strokeWidth={3} />
-                          <span className="text-[9px] font-black uppercase">Standard OK</span>
-                        </div>
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-bold text-emerald-800">
+                          <CheckCircle2 size={12} strokeWidth={3} /> OK
+                        </span>
                       ) : (
-                        <div className="flex items-center gap-1.5 text-orange-600 bg-orange-50 px-2 py-1 rounded-full w-fit">
-                          <AlertTriangle size={12} strokeWidth={3} />
-                          <span className="text-[9px] font-black uppercase">Review Pend.</span>
-                        </div>
+                        <span className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2 py-0.5 text-xs font-bold text-orange-800">
+                          <AlertTriangle size={12} strokeWidth={3} /> Review
+                        </span>
                       )}
                     </td>
-                    <td className="px-6 py-4">
-                      <div className="flex justify-center">
+                    <td className="px-4 py-3 text-center whitespace-nowrap">
                         {Object.values(s.qualityFlags || {}).some(Boolean) ? (
-                          <span className="inline-flex rounded-lg px-3 py-1 text-[10px] font-black uppercase tracking-wider bg-orange-100 text-orange-900 border border-orange-200">
-                            Action Reqd
+                          <span className="inline-flex rounded-lg px-2 py-0.5 text-xs font-bold uppercase bg-orange-100 text-orange-900 border border-orange-200">
+                            Action
                           </span>
                         ) : (
-                          <span className="inline-flex rounded-lg px-3 py-1 text-[10px] font-black uppercase tracking-wider bg-emerald-100 text-emerald-900 border border-emerald-200">
-                            Validated
+                          <span className="inline-flex rounded-lg px-2 py-0.5 text-xs font-bold uppercase bg-emerald-100 text-emerald-900 border border-emerald-200">
+                            OK
                           </span>
                         )}
-                      </div>
                     </td>
                   </motion.tr>
-                ))}
+                  );
+                })}
               </AnimatePresence>
             </tbody>
           </table>
@@ -314,6 +321,19 @@ export default function HrNextDirectory() {
               <p className="text-slate-400 font-bold italic">No matching records for current high-density filter criteria</p>
             </div>
           )}
+          {filtered.length > 0 ? (
+            <div className="border-t border-slate-100 px-4 py-3 bg-white">
+              <AppTablePager
+                showingFrom={dirPage.showingFrom}
+                showingTo={dirPage.showingTo}
+                total={dirPage.total}
+                hasPrev={dirPage.hasPrev}
+                hasNext={dirPage.hasNext}
+                onPrev={dirPage.goPrev}
+                onNext={dirPage.goNext}
+              />
+            </div>
+          ) : null}
         </div>
       </HrSectionCard>
 
@@ -336,7 +356,7 @@ export default function HrNextDirectory() {
         
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <AnimatePresence>
-            {queue.slice(0, 12).map((item) => (
+            {queuePage.slice.map((item) => (
               <motion.div 
                 key={item.userId}
                 variants={itemVars}
@@ -378,6 +398,19 @@ export default function HrNextDirectory() {
             </div>
           )}
         </div>
+        {queue.length > 0 ? (
+          <div className="mt-4">
+            <AppTablePager
+              showingFrom={queuePage.showingFrom}
+              showingTo={queuePage.showingTo}
+              total={queuePage.total}
+              hasPrev={queuePage.hasPrev}
+              hasNext={queuePage.hasNext}
+              onPrev={queuePage.goPrev}
+              onNext={queuePage.goNext}
+            />
+          </div>
+        ) : null}
       </motion.section>
     </MainPanel>
   );

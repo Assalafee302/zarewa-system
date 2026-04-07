@@ -4,6 +4,8 @@ import { ModalFrame } from '../layout';
 import { apiFetch } from '../../lib/apiBase';
 import { useToast } from '../../context/ToastContext';
 import { WORKSPACE_DEPARTMENT_IDS, WORKSPACE_DEPARTMENT_LABELS } from '../../lib/departmentWorkspace';
+import { APP_DATA_TABLE_PAGE_SIZE, useAppTablePaging } from '../../lib/appDataTable';
+import { AppTablePager } from '../ui/AppDataTable';
 
 /**
  * Admin UI: assign role, status, and granular permissions (settings.view).
@@ -80,6 +82,12 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
       return a.localeCompare(b);
     });
   }, [permissionKeys]);
+
+  const userPage = useAppTablePaging(
+    Array.isArray(appUsers) ? appUsers : [],
+    APP_DATA_TABLE_PAGE_SIZE,
+    appUsers?.length
+  );
 
   const refresh = async () => {
     try {
@@ -293,8 +301,8 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
           <p className="text-sm text-slate-500">No users in the directory snapshot.</p>
         ) : (
           <div className="overflow-x-auto rounded-2xl border border-slate-200/90">
-            <table className="w-full min-w-[720px] text-left text-xs">
-              <thead className="border-b border-slate-200 bg-slate-50/80 text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
+            <table className="w-full min-w-[720px] text-left text-sm">
+              <thead className="border-b border-slate-200 bg-slate-50/80 text-xs font-bold uppercase tracking-wide text-slate-600">
                 <tr>
                   <th className="px-3 py-2.5">User</th>
                   <th className="px-3 py-2.5">Dept</th>
@@ -304,20 +312,22 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {appUsers.map((user) => {
+                {userPage.slice.map((user) => {
                   const busy = rowBusyId === user.id;
+                  const who = `${user.displayName} · ${user.username}${user.hasCustomPermissions ? ' · custom perms' : ''}`;
                   return (
-                    <tr key={user.id} className="bg-white/90">
-                      <td className="px-3 py-3 align-top">
-                        <p className="font-bold text-slate-800">{user.displayName}</p>
-                        <p className="mt-0.5 font-mono text-[10px] text-slate-500">{user.username}</p>
+                    <tr key={user.id} className="bg-white/90 hover:bg-teal-50/30">
+                      <td className="px-3 py-3 align-middle max-w-[14rem] whitespace-nowrap truncate" title={who}>
+                        <span className="font-bold text-slate-800">{user.displayName}</span>
+                        <span className="text-slate-500"> · </span>
+                        <span className="font-mono text-xs text-slate-600">{user.username}</span>
                         {user.hasCustomPermissions ? (
-                          <span className="mt-1 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-amber-900">
-                            Custom perms
+                          <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">
+                            Custom
                           </span>
                         ) : null}
                       </td>
-                      <td className="px-3 py-3 align-top">
+                      <td className="px-3 py-3 align-middle">
                         <select
                           className="z-input !py-1.5 !text-[11px] max-w-[12rem]"
                           value={user.department || 'general'}
@@ -331,7 +341,7 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
                           ))}
                         </select>
                       </td>
-                      <td className="px-3 py-3 align-top">
+                      <td className="px-3 py-3 align-middle">
                         <select
                           className="z-input !py-1.5 !text-[11px] max-w-[11rem]"
                           value={user.roleKey}
@@ -345,7 +355,7 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
                           ))}
                         </select>
                       </td>
-                      <td className="px-3 py-3 align-top">
+                      <td className="px-3 py-3 align-middle">
                         <select
                           className="z-input !py-1.5 !text-[11px] max-w-[9rem]"
                           value={user.status}
@@ -357,7 +367,7 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
                           <option value="suspended">suspended</option>
                         </select>
                       </td>
-                      <td className="px-3 py-3 align-top">
+                      <td className="px-3 py-3 align-middle whitespace-nowrap">
                         <button
                           type="button"
                           disabled={busy}
@@ -374,6 +384,17 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
             </table>
           </div>
         )}
+        {appUsers.length > 0 ? (
+          <AppTablePager
+            showingFrom={userPage.showingFrom}
+            showingTo={userPage.showingTo}
+            total={userPage.total}
+            hasPrev={userPage.hasPrev}
+            hasNext={userPage.hasNext}
+            onPrev={userPage.goPrev}
+            onNext={userPage.goNext}
+          />
+        ) : null}
       </div>
 
       <ModalFrame

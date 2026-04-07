@@ -18,12 +18,29 @@ export function parseQuotationAccessoryLines(linesJson) {
   const arr = payload?.accessories;
   if (!Array.isArray(arr)) return [];
   return arr
-    .map((row) => ({
-      quoteLineId: String(row?.id ?? '').trim(),
-      name: String(row?.name ?? '').trim(),
-      orderedQty: Number(String(row?.qty ?? '').replace(/,/g, '')) || 0,
-      unitPriceNgn: Math.round(Number(String(row?.unitPrice ?? '').replace(/,/g, '')) || 0),
-    }))
+    .map((row) => {
+      const orderedQty = Number(String(row?.qty ?? '').replace(/,/g, '')) || 0;
+      let unitPriceNgn = Math.round(
+        Number(String(row?.unitPrice ?? row?.unit_price_ngn ?? row?.unit_price ?? '').replace(/,/g, '')) || 0
+      );
+      if (unitPriceNgn <= 0 && orderedQty > 0) {
+        const lump = Math.round(
+          Number(String(row?.value ?? row?.lineTotal ?? row?.line_total_ngn ?? '').replace(/,/g, '')) || 0
+        );
+        if (lump > 0) unitPriceNgn = Math.round(lump / orderedQty);
+      }
+      if (unitPriceNgn <= 0) {
+        unitPriceNgn = Math.round(
+          Number(String(row?.value ?? row?.lineTotal ?? row?.line_total_ngn ?? '').replace(/,/g, '')) || 0
+        );
+      }
+      return {
+        quoteLineId: String(row?.id ?? '').trim(),
+        name: String(row?.name ?? '').trim(),
+        orderedQty,
+        unitPriceNgn,
+      };
+    })
     .filter((r) => r.name && r.orderedQty > 0);
 }
 

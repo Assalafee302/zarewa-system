@@ -48,6 +48,10 @@ test.describe('HR loan lifecycle', () => {
     });
     if (register.status() !== 201) throw new Error(await register.text());
     const staffUserId = (await register.json()).userId;
+    const tenurePatch = await page.request.patch(`/api/hr/staff/${encodeURIComponent(staffUserId)}`, {
+      data: { dateJoinedIso: '2018-01-15' },
+    });
+    expect(tenurePatch.status()).toBe(200);
     await apiSignOut(page);
 
     await signInViaApi(page, staffUsername, 'Staff@123456');
@@ -78,6 +82,13 @@ test.describe('HR loan lifecycle', () => {
       (
         await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/manager-review`, {
           data: { approve: true, note: 'Approve', reasonCode: 'policy' },
+        })
+      ).status()
+    ).toBe(200);
+    expect(
+      (
+        await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/manager-review`, {
+          data: { approve: true, note: 'GM ok', reasonCode: 'policy' },
         })
       ).status()
     ).toBe(200);

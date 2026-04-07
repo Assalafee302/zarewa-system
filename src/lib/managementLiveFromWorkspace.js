@@ -3,6 +3,9 @@
  * so the Manager page updates as soon as Sales / Operations data refreshes (no stale API-only lists).
  */
 
+import { DEFAULT_MANAGER_TARGETS_PER_MONTH } from './dashboardPrefs';
+import { productionAttributedRevenueNgn, productionOutputDateISO } from './liveAnalytics';
+
 /** @typedef {'month' | '4months' | 'half' | 'year'} ManagerMetricPeriodKey */
 
 export const MANAGER_METRIC_PERIODS = [
@@ -168,26 +171,39 @@ export function buildManagementQueuesFromSnapshot(snapshot) {
 
 /**
  * Headline metrics for the hero + top customers (month-scoped) from workspace quotation / cutting-list rows.
+ * Produced-sales and completed metres match {@link DashboardKpiStrip} when the same period start is used.
+ *
  * @param {object[]} quotations
  * @param {object[]} cuttingLists
+ * @param {object[]} productionJobs
  * @param {number} lowStockSkuCount — from live inventory context
- * @param {{ nairaTarget?: number; meterTarget?: number }} targets
+ * @param {{ nairaTarget?: number; meterTarget?: number }} targets — per **month** (multiplied by selected period span)
  * @param {ManagerMetricPeriodKey} [periodKey]
  */
 export function buildManagerSnapshotsFromWorkspace(
   quotations,
   cuttingLists,
+  productionJobs,
   lowStockSkuCount,
   targets,
   periodKey = 'month'
 ) {
   const ms = managementPeriodStartISO(periodKey);
   const qMonth = quotations.filter((q) => String(q.dateISO || '') >= ms);
-  const revenue = qMonth.reduce((s, q) => s + (Number(q.paidNgn) || 0), 0);
+  const paidOnQuotesNgn = qMonth.reduce((s, q) => s + (Number(q.paidNgn) || 0), 0);
   const quoteCount = qMonth.length;
-  const metersProduced = cuttingLists
+  const metersCuttingLists = cuttingLists
     .filter((cl) => String(cl.dateISO || '') >= ms)
     .reduce((s, cl) => s + (Number(cl.totalMeters) || 0), 0);
+
+  const jobs = Array.isArray(productionJobs) ? productionJobs : [];
+  const producedSalesNgn = productionAttributedRevenueNgn(quotations, jobs, ms, '');
+  const completedProductionMetres = jobs.reduce((s, j) => {
+    if (String(j.status || '').trim() !== 'Completed') return s;
+    const d = productionOutputDateISO(j);
+    if (!d || d < ms) return s;
+    return s + (Number(j.actualMeters) || 0);
+  }, 0);
 
   const revByCustomer = new Map();
   for (const q of qMonth) {
@@ -207,14 +223,16 @@ export function buildManagerSnapshotsFromWorkspace(
 
   const meta = MANAGER_METRIC_PERIODS.find((p) => p.key === periodKey);
   const monthsSpan = meta?.monthsSpan ?? 1;
-  const baseNaira = Number(targets?.nairaTarget) || 50000000;
-  const baseMeters = Number(targets?.meterTarget) || 250000;
+  const baseNaira = Number(targets?.nairaTarget) || DEFAULT_MANAGER_TARGETS_PER_MONTH.nairaTargetPerMonth;
+  const baseMeters = Number(targets?.meterTarget) || DEFAULT_MANAGER_TARGETS_PER_MONTH.meterTargetPerMonth;
 
   return {
-    revenue,
+    paidOnQuotesNgn,
+    producedSalesNgn,
     quoteCount,
     lowStockCount: lowStockSkuCount,
-    metersProduced,
+    metersCuttingLists,
+    completedProductionMetres,
     topByRevenue,
     periodKey,
     periodLabel: meta?.label ?? 'This month',

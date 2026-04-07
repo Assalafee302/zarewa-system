@@ -5,6 +5,17 @@ import { ModalFrame, PageHeader } from '../../components/layout';
 import { useHrWorkspace } from '../../context/HrWorkspaceContext';
 import { useToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/apiBase';
+import { APP_DATA_TABLE_PAGE_SIZE, useAppTablePaging } from '../../lib/appDataTable';
+import {
+  AppTable,
+  AppTableBody,
+  AppTablePager,
+  AppTableTd,
+  AppTableTh,
+  AppTableThead,
+  AppTableTr,
+  AppTableWrap,
+} from '../../components/ui/AppDataTable';
 import { formatNgn } from '../../hr/hrFormat';
 import HrCapsLoading from './hrCapsLoading';
 
@@ -54,7 +65,7 @@ export default function HrSalaryWelfare() {
     setLoadState('ok');
   }, [canDir]);
 
-  /* eslint-disable react-hooks/set-state-in-effect -- load HR data and mirror snapshot/staff into form fields */
+   
   useEffect(() => {
     if (caps === null) return;
     if (!canDir && !canPay) return;
@@ -72,7 +83,7 @@ export default function HrSalaryWelfare() {
     return m;
   }, [snapshot]);
 
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   const filteredStaff = useMemo(() => {
     const q = tableQ.trim().toLowerCase();
@@ -91,6 +102,10 @@ export default function HrSalaryWelfare() {
     );
   }, [staff, tableQ]);
 
+  const approvedLoans = snapshot?.approvedLoans || [];
+  const loansPage = useAppTablePaging(approvedLoans, APP_DATA_TABLE_PAGE_SIZE, approvedLoans.length);
+  const compPage = useAppTablePaging(filteredStaff, APP_DATA_TABLE_PAGE_SIZE, tableQ);
+
   if (caps === null) return <HrCapsLoading />;
   if (!c.canViewDirectory && !c.canPayroll) {
     return <Navigate to="/hr" replace />;
@@ -99,7 +114,6 @@ export default function HrSalaryWelfare() {
   return (
     <div className="space-y-8">
       <PageHeader
-        eyebrow="Human resources"
         title="Salary & benefits"
         subtitle="Package breakdown (base, housing, transport), per-staff PAYE when set on the file, approved loan deductions, and notes for bonuses / benefits. Official payslips come from Payroll after recompute; absent days and daily late marks feed deductions there too."
         actions={
@@ -188,68 +202,73 @@ export default function HrSalaryWelfare() {
             Executive-approved loans appear here. Finance must pay the linked <strong>payment request</strong> (Account)
             before the monthly repayment amount is applied in payroll runs.
           </p>
-          <div className="mt-4 overflow-x-auto">
-            <table className="min-w-full text-left text-sm">
-              <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-500">
-                <tr>
-                  <th className="px-3 py-2">Employee</th>
-                  <th className="px-3 py-2">Branch</th>
-                  <th className="px-3 py-2">Amount</th>
-                  <th className="px-3 py-2">Months</th>
-                  <th className="px-3 py-2">Deduction / mo</th>
-                  <th className="px-3 py-2">Principal left</th>
-                  <th className="px-3 py-2">Months left</th>
-                  <th className="px-3 py-2">Payroll</th>
-                  <th className="px-3 py-2">Finance queue</th>
-                  <th className="px-3 py-2">Decided</th>
-                  <th className="px-3 py-2" />
-                </tr>
-              </thead>
-              <tbody>
-                {(snapshot.approvedLoans || []).map((ln) => (
-                  <tr key={ln.requestId} className="border-t border-slate-100">
-                    <td className="px-3 py-2">
-                      <p className="font-semibold text-slate-800">{ln.staffDisplayName}</p>
-                      <p className="text-xs text-slate-500">{ln.employeeNo || ln.staffUsername}</p>
-                    </td>
-                    <td className="px-3 py-2 text-xs text-slate-600">{ln.branchId || '—'}</td>
-                    <td className="px-3 py-2 tabular-nums">₦{formatNgn(ln.amountNgn)}</td>
-                    <td className="px-3 py-2">{ln.repaymentMonths || '—'}</td>
-                    <td className="px-3 py-2 font-semibold tabular-nums text-amber-900">
-                      ₦{formatNgn(ln.deductionPerMonthNgn)}
-                    </td>
-                    <td className="px-3 py-2 text-xs tabular-nums text-slate-700">
-                      {ln.principalOutstandingNgn != null && Number.isFinite(Number(ln.principalOutstandingNgn))
-                        ? `₦${formatNgn(ln.principalOutstandingNgn)}`
-                        : '—'}
-                    </td>
-                    <td className="px-3 py-2 text-xs text-slate-600 tabular-nums">
-                      {ln.repaymentMonths > 0
-                        ? `${ln.repaymentMonthsRemaining ?? '—'} / ${ln.loanMonthsDeducted ?? 0} done`
-                        : 'Open-ended'}
-                    </td>
-                    <td className="px-3 py-2 text-xs">
-                      {ln.deductionsActive ? (
-                        <span className="font-semibold text-emerald-800">Active</span>
-                      ) : ln.loanDisbursedAtIso ? (
-                        <span className="text-slate-600">Schedule complete</span>
-                      ) : (
-                        <span className="text-slate-600">Awaiting disbursement pay</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2 text-xs text-slate-600">
-                      {ln.financePaymentRequestId ? (
-                        <span className="font-semibold text-[#134e4a]">
-                          {ln.disbursementQueueStatus || 'Pending'} · {ln.financePaymentRequestId}
-                        </span>
-                      ) : (
-                        'Not queued'
-                      )}
-                    </td>
-                    <td className="px-3 py-2 text-xs text-slate-600 whitespace-nowrap">
-                      {ln.decidedAtIso ? String(ln.decidedAtIso).slice(0, 10) : '—'}
-                    </td>
-                    <td className="px-3 py-2 text-right space-x-2 whitespace-nowrap">
+          <div className="mt-4">
+            <AppTableWrap>
+              <AppTable role="numeric">
+                <AppTableThead>
+                  <AppTableTh>Employee</AppTableTh>
+                  <AppTableTh>Branch</AppTableTh>
+                  <AppTableTh>Amount</AppTableTh>
+                  <AppTableTh>Months</AppTableTh>
+                  <AppTableTh>Deduction / mo</AppTableTh>
+                  <AppTableTh>Principal left</AppTableTh>
+                  <AppTableTh>Months left</AppTableTh>
+                  <AppTableTh>Payroll</AppTableTh>
+                  <AppTableTh>Finance queue</AppTableTh>
+                  <AppTableTh>Decided</AppTableTh>
+                  <AppTableTh> </AppTableTh>
+                </AppTableThead>
+                <AppTableBody>
+                  {loansPage.slice.map((ln) => {
+                    const who = `${ln.staffDisplayName} · ${ln.employeeNo || ln.staffUsername || ''}`;
+                    return (
+                      <AppTableTr key={ln.requestId}>
+                        <AppTableTd title={who}>
+                          <span className="font-semibold text-slate-800">{ln.staffDisplayName}</span>
+                          <span className="text-slate-500"> · </span>
+                          <span className="text-xs text-slate-500">{ln.employeeNo || ln.staffUsername}</span>
+                        </AppTableTd>
+                        <AppTableTd monospace title={ln.branchId || ''}>
+                          {ln.branchId || '—'}
+                        </AppTableTd>
+                        <AppTableTd monospace>₦{formatNgn(ln.amountNgn)}</AppTableTd>
+                        <AppTableTd monospace>{ln.repaymentMonths || '—'}</AppTableTd>
+                        <AppTableTd monospace className="font-semibold text-amber-900">
+                          ₦{formatNgn(ln.deductionPerMonthNgn)}
+                        </AppTableTd>
+                        <AppTableTd monospace className="text-xs text-slate-700">
+                          {ln.principalOutstandingNgn != null && Number.isFinite(Number(ln.principalOutstandingNgn))
+                            ? `₦${formatNgn(ln.principalOutstandingNgn)}`
+                            : '—'}
+                        </AppTableTd>
+                        <AppTableTd monospace className="text-xs text-slate-600">
+                          {ln.repaymentMonths > 0
+                            ? `${ln.repaymentMonthsRemaining ?? '—'} / ${ln.loanMonthsDeducted ?? 0} done`
+                            : 'Open-ended'}
+                        </AppTableTd>
+                        <AppTableTd className="text-xs">
+                          {ln.deductionsActive ? (
+                            <span className="font-semibold text-emerald-800">Active</span>
+                          ) : ln.loanDisbursedAtIso ? (
+                            <span className="text-slate-600">Schedule complete</span>
+                          ) : (
+                            <span className="text-slate-600">Awaiting disbursement pay</span>
+                          )}
+                        </AppTableTd>
+                        <AppTableTd className="text-xs text-slate-600" title={ln.financePaymentRequestId || ''}>
+                          {ln.financePaymentRequestId ? (
+                            <span className="font-semibold text-[#134e4a]">
+                              {ln.disbursementQueueStatus || 'Pending'} · {ln.financePaymentRequestId}
+                            </span>
+                          ) : (
+                            'Not queued'
+                          )}
+                        </AppTableTd>
+                        <AppTableTd className="text-xs text-slate-600 whitespace-nowrap" monospace>
+                          {ln.decidedAtIso ? String(ln.decidedAtIso).slice(0, 10) : '—'}
+                        </AppTableTd>
+                        <AppTableTd align="right" truncate={false}>
+                          <span className="inline-flex flex-nowrap gap-1 justify-end">
                       {canLoanMaint &&
                       ln.loanDisbursedAtIso &&
                       !ln.loanClosedEarlyAtIso &&
@@ -296,11 +315,23 @@ export default function HrSalaryWelfare() {
                           Profile
                         </Link>
                       ) : null}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                          </span>
+                        </AppTableTd>
+                      </AppTableTr>
+                    );
+                  })}
+                </AppTableBody>
+              </AppTable>
+            </AppTableWrap>
+            <AppTablePager
+              showingFrom={loansPage.showingFrom}
+              showingTo={loansPage.showingTo}
+              total={loansPage.total}
+              hasPrev={loansPage.hasPrev}
+              hasNext={loansPage.hasNext}
+              onPrev={loansPage.goPrev}
+              onNext={loansPage.goNext}
+            />
           </div>
           <p className="mt-3 text-[11px] text-slate-500">
             Multiple approved loans for one employee add together in payroll. Repayment term uses{' '}
@@ -470,55 +501,72 @@ export default function HrSalaryWelfare() {
               />
             </div>
           </div>
-          <div className="mt-4 overflow-x-auto">
-            <table className="min-w-full text-left text-sm">
-              <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-500">
-                <tr>
-                  <th className="px-3 py-2">Name</th>
-                  <th className="px-3 py-2">Branch</th>
-                  <th className="px-3 py-2 text-right">Base</th>
-                  <th className="px-3 py-2 text-right">Housing</th>
-                  <th className="px-3 py-2 text-right">Transport</th>
-                  <th className="px-3 py-2 text-right">PAYE %</th>
-                  <th className="px-3 py-2 text-right">Loan / mo</th>
-                  <th className="px-3 py-2">Bonus / EOY note</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredStaff.map((s) => {
-                  const loanM = loanByUserId[s.userId] || 0;
-                  const note = (s.bonusAccrualNote || '').trim();
-                  const paye =
-                    s.payeTaxPercent != null && Number.isFinite(Number(s.payeTaxPercent))
-                      ? `${Number(s.payeTaxPercent)}%`
-                      : 'Run default';
-                  return (
-                    <tr key={s.userId} className="border-t border-slate-100 hover:bg-slate-50/80">
-                      <td className="px-3 py-2">
-                        <Link
-                          to={`/hr/staff/${encodeURIComponent(s.userId)}`}
-                          className="font-semibold text-[#134e4a] hover:underline no-underline"
-                        >
-                          {s.displayName}
-                        </Link>
-                        <p className="text-xs text-slate-500">{s.employeeNo || s.username}</p>
-                      </td>
-                      <td className="px-3 py-2 text-slate-700">{s.branchId || '—'}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">₦{formatNgn(s.baseSalaryNgn)}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">₦{formatNgn(s.housingAllowanceNgn)}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">₦{formatNgn(s.transportAllowanceNgn)}</td>
-                      <td className="px-3 py-2 text-right text-xs font-medium tabular-nums">{paye}</td>
-                      <td className="px-3 py-2 text-right tabular-nums text-amber-900">
-                        {loanM ? `₦${formatNgn(loanM)}` : '—'}
-                      </td>
-                      <td className="px-3 py-2 max-w-[220px] truncate text-xs text-slate-600" title={note}>
-                        {note || '—'}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="mt-4">
+            <AppTableWrap>
+              <AppTable role="numeric">
+                <AppTableThead>
+                  <AppTableTh>Name</AppTableTh>
+                  <AppTableTh>Branch</AppTableTh>
+                  <AppTableTh align="right">Base</AppTableTh>
+                  <AppTableTh align="right">Housing</AppTableTh>
+                  <AppTableTh align="right">Transport</AppTableTh>
+                  <AppTableTh align="right">PAYE %</AppTableTh>
+                  <AppTableTh align="right">Loan / mo</AppTableTh>
+                  <AppTableTh>Bonus / EOY note</AppTableTh>
+                </AppTableThead>
+                <AppTableBody>
+                  {compPage.slice.map((s) => {
+                    const loanM = loanByUserId[s.userId] || 0;
+                    const note = (s.bonusAccrualNote || '').trim();
+                    const paye =
+                      s.payeTaxPercent != null && Number.isFinite(Number(s.payeTaxPercent))
+                        ? `${Number(s.payeTaxPercent)}%`
+                        : 'Run default';
+                    const nameLine = `${s.displayName} · ${s.employeeNo || s.username}`;
+                    return (
+                      <AppTableTr key={s.userId}>
+                        <AppTableTd title={nameLine}>
+                          <Link
+                            to={`/hr/staff/${encodeURIComponent(s.userId)}`}
+                            className="font-semibold text-[#134e4a] hover:underline"
+                          >
+                            {nameLine}
+                          </Link>
+                        </AppTableTd>
+                        <AppTableTd title={s.branchId || ''}>{s.branchId || '—'}</AppTableTd>
+                        <AppTableTd align="right" monospace>
+                          ₦{formatNgn(s.baseSalaryNgn)}
+                        </AppTableTd>
+                        <AppTableTd align="right" monospace>
+                          ₦{formatNgn(s.housingAllowanceNgn)}
+                        </AppTableTd>
+                        <AppTableTd align="right" monospace>
+                          ₦{formatNgn(s.transportAllowanceNgn)}
+                        </AppTableTd>
+                        <AppTableTd align="right" monospace className="text-xs font-medium">
+                          {paye}
+                        </AppTableTd>
+                        <AppTableTd align="right" monospace className="text-amber-900">
+                          {loanM ? `₦${formatNgn(loanM)}` : '—'}
+                        </AppTableTd>
+                        <AppTableTd className="text-xs text-slate-600" title={note}>
+                          {note || '—'}
+                        </AppTableTd>
+                      </AppTableTr>
+                    );
+                  })}
+                </AppTableBody>
+              </AppTable>
+            </AppTableWrap>
+            <AppTablePager
+              showingFrom={compPage.showingFrom}
+              showingTo={compPage.showingTo}
+              total={compPage.total}
+              hasPrev={compPage.hasPrev}
+              hasNext={compPage.hasNext}
+              onPrev={compPage.goPrev}
+              onNext={compPage.goNext}
+            />
           </div>
         </section>
       ) : null}

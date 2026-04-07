@@ -56,7 +56,7 @@ export const PRODUCTS_SEED = [
   },
   {
     productID: 'PRD-102',
-    name: 'Aluzinc coil (kg)',
+    name: 'Aluzinc (PPGI) coil (kg)',
     stockLevel: aluzinc028Kg,
     unit: 'kg',
     lowStockThreshold: 15000,
@@ -64,7 +64,7 @@ export const PRODUCTS_SEED = [
     dashboardAttrs: {
       gauge: 'Per PO / coil',
       colour: 'Per PO / coil',
-      materialType: 'Aluzinc',
+      materialType: 'Aluzinc (PPGI)',
     },
   },
   {
@@ -146,7 +146,7 @@ export const PURCHASE_ORDERS_SEED = [
       {
         lineKey: 'L0-PRD-102',
         productID: 'PRD-102',
-        productName: 'Aluzinc coil (kg)',
+        productName: 'Aluzinc (PPGI) coil (kg)',
         color: 'GB',
         gauge: '0.28',
         metersOffered: 1550,
@@ -179,7 +179,7 @@ export const PURCHASE_ORDERS_SEED = [
       {
         lineKey: 'L0-MM-102',
         productID: 'PRD-102',
-        productName: 'Aluzinc coil (kg)',
+        productName: 'Aluzinc (PPGI) coil (kg)',
         color: 'TB',
         gauge: '0.28',
         metersOffered: 800,

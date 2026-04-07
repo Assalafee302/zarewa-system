@@ -9,6 +9,7 @@ describe('documentTitleForPath', () => {
     expect(documentTitleForPath('/operations')).toContain('Store & production');
     expect(documentTitleForPath('/accounts')).toContain('Finance & accounts');
     expect(documentTitleForPath('/reports')).toContain('Reports');
+    expect(documentTitleForPath('/edit-approvals')).toContain('Edit approvals');
     expect(documentTitleForPath('/manager')).toContain('Management');
   });
 

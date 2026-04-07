@@ -16,10 +16,13 @@ import { PageHeader, PageShell, MainPanel, ModalFrame } from '../components/layo
 import { useInventory } from '../context/InventoryContext';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { PROCUREMENT_COIL_CATALOG, CONVERSION_FLAG_RATIO, formatNgn } from '../Data/mockData';
-
-function poTotalNgn(po) {
-  return (po?.lines || []).reduce((s, l) => s + Number(l.qtyOrdered) * Number(l.unitPriceNgn || 0), 0);
-}
+import { purchaseOrderOrderedValueNgn } from '../lib/liveAnalytics';
+import {
+  poLineBenchmarkPriceNgn,
+  poLinePriceSuffix,
+  poLineQtyLabel,
+  procurementKindFromPo,
+} from '../lib/procurementPoKind';
 
 function isoDaysBetween(startISO, endISO) {
   const a = new Date(String(startISO || ''));
@@ -59,36 +62,56 @@ const SupplierProfile = () => {
 
   const stats = useMemo(() => {
     let spend = 0;
-    let kg = 0;
+    let coilKg = 0;
+    let stoneM = 0;
+    let accUnits = 0;
     const gaugePrices = [];
     for (const po of orders) {
-      spend += poTotalNgn(po);
-      for (const l of po.lines) {
-        kg += Number(l.qtyOrdered) || 0;
-        if (l.gauge && l.unitPriceNgn) {
-          gaugePrices.push({
-            gauge: l.gauge,
-            color: l.color,
-            priceKg: l.unitPriceNgn,
-            poID: po.poID,
-            date: po.orderDateISO,
-          });
+      spend += purchaseOrderOrderedValueNgn(po);
+      const pk = procurementKindFromPo(po);
+      for (const l of po.lines || []) {
+        const q = Number(l.qtyOrdered) || 0;
+        if (pk === 'coil') coilKg += q;
+        else if (pk === 'stone') stoneM += q;
+        else accUnits += q;
+        if (pk === 'coil' && l.gauge) {
+          const priceKg = poLineBenchmarkPriceNgn(l, 'coil');
+          if (priceKg > 0) {
+            gaugePrices.push({
+              gauge: l.gauge,
+              color: l.color,
+              priceKg,
+              poID: po.poID,
+              date: po.orderDateISO,
+            });
+          }
         }
       }
     }
+    const volumeSummary = [
+      coilKg > 0 ? `${coilKg.toLocaleString()} kg coil` : null,
+      stoneM > 0 ? `${stoneM.toLocaleString()} m stone` : null,
+      accUnits > 0 ? `${accUnits.toLocaleString()} acc. units` : null,
+    ]
+      .filter(Boolean)
+      .join(' · ');
     const outstanding = orders.reduce((s, po) => {
       if (po.status === 'Rejected') return s;
-      const tot = poTotalNgn(po);
+      const tot = purchaseOrderOrderedValueNgn(po);
       const paid = Number(po.supplierPaidNgn) || 0;
       return s + Math.max(0, tot - paid);
     }, 0);
-    return { spend, kg, gaugePrices, outstanding };
+    return { spend, volumeSummary, gaugePrices, outstanding };
   }, [orders]);
 
   const insights = useMemo(() => {
     const byStatus = { Pending: 0, Approved: 0, 'On loading': 0, 'In Transit': 0, Received: 0, Rejected: 0 };
-    let totalOrderedKg = 0;
-    let totalReceivedKg = 0;
+    let coilOrd = 0;
+    let coilRec = 0;
+    let stoneOrd = 0;
+    let stoneRec = 0;
+    let accOrd = 0;
+    let accRec = 0;
     let paidNgn = 0;
     let openValueNgn = 0;
     let leadDaysSum = 0;
@@ -99,7 +122,7 @@ const SupplierProfile = () => {
     for (const po of orders) {
       const status = String(po.status || '');
       if (Object.prototype.hasOwnProperty.call(byStatus, status)) byStatus[status] += 1;
-      const poTotal = poTotalNgn(po);
+      const poTotal = purchaseOrderOrderedValueNgn(po);
       const poPaid = Number(po.supplierPaidNgn) || 0;
       paidNgn += poPaid;
       if (status !== 'Rejected' && status !== 'Received') {
@@ -112,38 +135,67 @@ const SupplierProfile = () => {
         leadDaysCount += 1;
       }
 
+      const pk = procurementKindFromPo(po);
       for (const l of po.lines || []) {
         const ordered = Number(l.qtyOrdered) || 0;
         const received = Number(l.qtyReceived) || 0;
-        totalOrderedKg += ordered;
-        totalReceivedKg += received;
-        const key = `${l.productID || '—'}|${l.gauge || '—'}|${l.color || '—'}`;
+        if (pk === 'coil') {
+          coilOrd += ordered;
+          coilRec += received;
+        } else if (pk === 'stone') {
+          stoneOrd += ordered;
+          stoneRec += received;
+        } else {
+          accOrd += ordered;
+          accRec += received;
+        }
+        const key = `${pk}|${l.productID || '—'}|${l.gauge || '—'}|${l.color || '—'}`;
         const row = materialMix.get(key) || {
           key,
+          kind: pk,
           productID: l.productID || '—',
           gauge: l.gauge || '—',
           color: l.color || '—',
-          orderedKg: 0,
-          receivedKg: 0,
+          orderedQty: 0,
+          receivedQty: 0,
           poLines: 0,
         };
-        row.orderedKg += ordered;
-        row.receivedKg += received;
+        row.orderedQty += ordered;
+        row.receivedQty += received;
         row.poLines += 1;
         materialMix.set(key, row);
       }
     }
 
     const materialTop = [...materialMix.values()]
-      .sort((a, b) => b.orderedKg - a.orderedKg)
+      .sort((a, b) => b.orderedQty - a.orderedQty)
       .slice(0, 8);
-    const fulfillmentPct = totalOrderedKg > 0 ? Math.round((totalReceivedKg / totalOrderedKg) * 100) : 0;
+    const kindsWithQty = [coilOrd > 0, stoneOrd > 0, accOrd > 0].filter(Boolean).length;
+    let fulfillmentPct = 0;
+    if (kindsWithQty === 1) {
+      if (coilOrd > 0) fulfillmentPct = Math.round((coilRec / coilOrd) * 100);
+      else if (stoneOrd > 0) fulfillmentPct = Math.round((stoneRec / stoneOrd) * 100);
+      else if (accOrd > 0) fulfillmentPct = Math.round((accRec / accOrd) * 100);
+    }
+    const fulfillmentSub = [
+      coilOrd > 0 ? `${coilRec.toLocaleString()}/${coilOrd.toLocaleString()} kg coil` : null,
+      stoneOrd > 0 ? `${stoneRec.toLocaleString()}/${stoneOrd.toLocaleString()} m stone` : null,
+      accOrd > 0 ? `${accRec.toLocaleString()}/${accOrd.toLocaleString()} acc. units` : null,
+    ]
+      .filter(Boolean)
+      .join(' · ');
     const paymentPct = stats.spend > 0 ? Math.round((paidNgn / stats.spend) * 100) : 0;
     const avgLeadDays = leadDaysCount > 0 ? Math.round(leadDaysSum / leadDaysCount) : null;
     return {
       byStatus,
-      totalOrderedKg,
-      totalReceivedKg,
+      coilOrd,
+      coilRec,
+      stoneOrd,
+      stoneRec,
+      accOrd,
+      accRec,
+      fulfillmentSub,
+      kindsWithQty,
       paidNgn,
       openValueNgn,
       fulfillmentPct,
@@ -157,10 +209,13 @@ const SupplierProfile = () => {
   const avgPeerPriceByGauge = useMemo(() => {
     const map = new Map();
     for (const po of purchaseOrders) {
-      for (const l of po.lines) {
-        if (!l.gauge || !l.unitPriceNgn) continue;
+      if (procurementKindFromPo(po) !== 'coil') continue;
+      for (const l of po.lines || []) {
+        if (!l.gauge) continue;
+        const p = poLineBenchmarkPriceNgn(l, 'coil');
+        if (!p) continue;
         const arr = map.get(l.gauge) || [];
-        arr.push(l.unitPriceNgn);
+        arr.push(p);
         map.set(l.gauge, arr);
       }
     }
@@ -174,7 +229,7 @@ const SupplierProfile = () => {
   if (!supplier) {
     return (
       <PageShell>
-        <PageHeader eyebrow="Procurement" title="Supplier" subtitle="Not found" />
+        <PageHeader title="Supplier" subtitle="Not found" />
         <MainPanel>
           <Link to="/procurement" className="z-btn-primary inline-flex">
             <ArrowLeft size={16} /> Back to procurement
@@ -187,7 +242,6 @@ const SupplierProfile = () => {
   return (
     <PageShell>
       <PageHeader
-        eyebrow="Procurement"
         title={supplier.name}
         subtitle={`${supplier.supplierID} · ${supplier.city || '—'} · ${supplier.paymentTerms || '—'}`}
         actions={
@@ -227,7 +281,7 @@ const SupplierProfile = () => {
               <div className="rounded-lg border border-slate-200/90 bg-slate-50/40 px-3 py-3">
                 <p className="text-[9px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Total spend</p>
                 <p className="text-lg font-black text-[#134e4a] tabular-nums">{formatNgn(stats.spend)}</p>
-                <p className="text-[9px] text-slate-500 mt-1">{stats.kg.toLocaleString()} kg ordered</p>
+                <p className="text-[9px] text-slate-500 mt-1">{stats.volumeSummary || '—'}</p>
               </div>
               <div className="rounded-lg border border-slate-200/90 bg-slate-50/40 px-3 py-3">
                 <p className="text-[9px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Outstanding</p>
@@ -251,9 +305,15 @@ const SupplierProfile = () => {
               </div>
               <div className="rounded-lg border border-slate-200/90 bg-slate-50/40 px-3 py-3">
                 <p className="text-[9px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Fulfillment</p>
-                <p className="text-lg font-black text-[#134e4a]">{insights.fulfillmentPct}%</p>
-                <p className="text-[9px] text-slate-500 mt-1">
-                  {insights.totalReceivedKg.toLocaleString()} / {insights.totalOrderedKg.toLocaleString()}kg
+                <p className="text-lg font-black text-[#134e4a]">
+                  {insights.kindsWithQty === 1
+                    ? `${insights.fulfillmentPct}%`
+                    : insights.kindsWithQty > 1
+                      ? 'Mixed'
+                      : '—'}
+                </p>
+                <p className="text-[9px] text-slate-500 mt-1 leading-snug">
+                  {insights.fulfillmentSub || '—'}
                 </p>
               </div>
               <div className="rounded-lg border border-slate-200/90 bg-slate-50/40 px-3 py-3">
@@ -324,10 +384,11 @@ const SupplierProfile = () => {
                         <span className="text-[10px] font-bold uppercase text-slate-500">{po.status}</span>
                       </div>
                       <p className="text-[10px] text-slate-500 mt-1">
-                        {po.orderDateISO || '—'} · Invoice {po.invoiceNo || '—'} · {(po.lines || []).length} line(s)
+                        {po.orderDateISO || '—'} · {procurementKindFromPo(po)} · Invoice {po.invoiceNo || '—'} ·{' '}
+                        {(po.lines || []).length} line(s)
                       </p>
                       <p className="text-[10px] font-black text-[#134e4a] tabular-nums mt-0.5">
-                        {formatNgn(poTotalNgn(po))} · Paid {formatNgn(Number(po.supplierPaidNgn) || 0)}
+                        {formatNgn(purchaseOrderOrderedValueNgn(po))} · Paid {formatNgn(Number(po.supplierPaidNgn) || 0)}
                       </p>
                     </button>
                   ))
@@ -353,7 +414,11 @@ const SupplierProfile = () => {
                       {m.productID} · {m.gauge} · {m.color}
                     </p>
                     <p className="font-bold text-[#134e4a] tabular-nums">
-                      {m.orderedKg.toLocaleString()}kg ordered · {m.receivedKg.toLocaleString()}kg received
+                      {m.kind === 'stone'
+                        ? `${m.orderedQty.toLocaleString()} m ordered · ${m.receivedQty.toLocaleString()} m received`
+                        : m.kind === 'accessory'
+                          ? `${m.orderedQty.toLocaleString()} units ordered · ${m.receivedQty.toLocaleString()} units received`
+                          : `${m.orderedQty.toLocaleString()} kg ordered · ${m.receivedQty.toLocaleString()} kg received`}
                     </p>
                   </li>
                 ))}
@@ -410,9 +475,13 @@ const SupplierProfile = () => {
               </p>
               <ul className="space-y-2 max-h-[45vh] overflow-y-auto custom-scrollbar">
                 {(selectedPo.lines || []).map((l) => {
-                  const peer = l.gauge ? avgPeerPriceByGauge[l.gauge] : null;
+                  const lineKind = procurementKindFromPo(selectedPo);
+                  const bench = poLineBenchmarkPriceNgn(l, lineKind);
+                  const peer =
+                    lineKind === 'coil' && l.gauge ? avgPeerPriceByGauge[l.gauge] : null;
                   const diff =
-                    peer && l.unitPriceNgn ? ((Number(l.unitPriceNgn) - peer) / peer) * 100 : null;
+                    peer && bench > 0 ? ((bench - peer) / peer) * 100 : null;
+                  const sfx = poLinePriceSuffix(lineKind);
                   return (
                     <li
                       key={l.lineKey || l.productID}
@@ -422,12 +491,13 @@ const SupplierProfile = () => {
                         {l.productID} · {l.color || '—'} {l.gauge || '—'}
                       </p>
                       <p className="text-slate-500 mt-0.5">
-                        {Number(l.qtyOrdered || 0).toLocaleString()}kg @ {formatNgn(l.unitPriceNgn)}/kg
+                        {poLineQtyLabel(l, lineKind)} @ {formatNgn(bench)}
+                        {sfx}
                       </p>
                       {diff != null ? (
                         <p className={`mt-0.5 font-semibold ${diff <= 2 ? 'text-emerald-700' : 'text-amber-700'}`}>
                           {diff > 0 ? '+' : ''}
-                          {diff.toFixed(1)}% vs avg peer
+                          {diff.toFixed(1)}% vs avg peer (₦/kg)
                         </p>
                       ) : null}
                     </li>
@@ -435,7 +505,7 @@ const SupplierProfile = () => {
                 })}
               </ul>
               <p className="text-right text-sm font-black text-[#134e4a] tabular-nums">
-                Total {formatNgn(poTotalNgn(selectedPo))} · Paid {formatNgn(Number(selectedPo.supplierPaidNgn) || 0)}
+                Total {formatNgn(purchaseOrderOrderedValueNgn(selectedPo))} · Paid {formatNgn(Number(selectedPo.supplierPaidNgn) || 0)}
               </p>
             </div>
           ) : null}

@@ -27,6 +27,7 @@ import {
   recordAdvanceAppliedToQuotation,
 } from '../lib/customerLedgerStore';
 import { apiFetch } from '../lib/apiBase';
+import { EditSecondApprovalInline } from './EditSecondApprovalInline';
 import QuotationPrintView from './QuotationPrintView';
 
 const DEFAULT_PROFILES = ['Longspan (Indus6)', 'Metrotile', 'Steptile', 'Capping', 'Ridge Cap'];
@@ -290,6 +291,7 @@ function OrderLinesSection({
  * @param {'view' | 'edit'} [props.accessMode]
  * @param {string} [props.quotedByStaff] — workspace staff label for new quotations (print + audit)
  * @param {boolean} [props.useQuotationApi] — persist create/update to SQLite via POST/PATCH /api/quotations
+ * @param {(quotation: object) => void} [props.onQuotationRevived] — after POST /api/quotations/:id/revive
  */
 const QuotationModal = ({
   isOpen,
@@ -297,6 +299,7 @@ const QuotationModal = ({
   editData,
   accessMode = 'edit',
   onLedgerChange,
+  onQuotationRevived,
   useLedgerApi = false,
   useQuotationApi = false,
   quotedByStaff = 'Sales',
@@ -305,7 +308,9 @@ const QuotationModal = ({
   const { customers } = useCustomers();
   const { show: showToast } = useToast();
   const ws = useWorkspace();
-  const readOnly = accessMode === 'view';
+  const archivedLifecycle =
+    Boolean(editData?.id) && ['Expired', 'Void'].includes(String(editData?.status || '').trim());
+  const readOnly = accessMode === 'view' || archivedLifecycle;
 
   const [customerQuery, setCustomerQuery] = useState('');
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
@@ -319,6 +324,7 @@ const QuotationModal = ({
   const [quotationEditType, setQuotationEditType] = useState('');
   const [treasuryPayAccounts, setTreasuryPayAccounts] = useState([]);
   const [paymentAccountId, setPaymentAccountId] = useState('');
+  const [materialTypeId, setMaterialTypeId] = useState('');
   const [materialGauge, setMaterialGauge] = useState('');
   const [materialColor, setMaterialColor] = useState('');
   const [materialDesign, setMaterialDesign] = useState('');
@@ -328,6 +334,8 @@ const QuotationModal = ({
   const [printDocumentKind, setPrintDocumentKind] = useState('quotation');
   const [applyAdvanceAmount, setApplyAdvanceAmount] = useState('');
   const [saving, setSaving] = useState(false);
+  const [reviving, setReviving] = useState(false);
+  const [quotationEditApprovalId, setQuotationEditApprovalId] = useState('');
   const liveMasterData = ws?.snapshot?.masterData ?? null;
 
   const treasuryPayAccountsLive = useMemo(
@@ -335,17 +343,24 @@ const QuotationModal = ({
     [ws?.snapshot]
   );
 
-  /** Master data rows first; defaults only fill names not already in setup (offline / partial setup). */
+  const materialTypeOptions = useMemo(() => {
+    const rows = (liveMasterData?.materialTypes || []).filter((row) => row.active);
+    return rows.map((row) => ({ value: row.id, label: row.name, inventoryModel: row.inventoryModel || '' }));
+  }, [liveMasterData?.materialTypes]);
+
+  /** Filter profiles by selected material type (stone vs coil). */
   const profileOptions = useMemo(() => {
-    const fromMaster = (liveMasterData?.profiles || [])
-      .filter((row) => row.active)
-      .map((row) => ({ value: row.name, label: row.name }));
-    if (fromMaster.length > 0) return fromMaster;
+    const fromMaster = (liveMasterData?.profiles || []).filter((row) => row.active);
+    const filtered = materialTypeId
+      ? fromMaster.filter((row) => String(row.materialTypeId || '').trim() === materialTypeId)
+      : fromMaster;
+    const opts = filtered.map((row) => ({ value: row.name, label: row.name }));
+    if (opts.length > 0) return opts;
     return DEFAULT_PROFILES.map((name) => ({
       value: name,
       label: name,
     }));
-  }, [liveMasterData?.profiles]);
+  }, [liveMasterData?.profiles, materialTypeId]);
 
   const gaugeOptions = useMemo(() => {
     const fromMaster = (liveMasterData?.gauges || [])
@@ -439,6 +454,10 @@ const QuotationModal = ({
     () => liveMasterData?.profiles?.find((row) => row.name === materialDesign) || null,
     [liveMasterData?.profiles, materialDesign]
   );
+  const selectedMaterialTypeMeta = useMemo(
+    () => liveMasterData?.materialTypes?.find((row) => row.id === materialTypeId) || null,
+    [liveMasterData?.materialTypes, materialTypeId]
+  );
 
   const resolveUnitPrice = (itemName, option) => {
     const matches = priceListRows
@@ -450,6 +469,7 @@ const QuotationModal = ({
         if (row.gaugeId && row.gaugeId !== selectedGaugeMeta?.id) return false;
         if (row.colourId && row.colourId !== selectedColourMeta?.id) return false;
         if (row.profileId && row.profileId !== selectedProfileMeta?.id) return false;
+        if (row.materialTypeId && row.materialTypeId !== selectedMaterialTypeMeta?.id) return false;
         return true;
       })
       .sort((a, b) => {
@@ -477,6 +497,7 @@ const QuotationModal = ({
       return list[0] ? String(list[0].id) : '';
     });
     setQuoteDate(editData?.dateISO ?? new Date().toISOString().slice(0, 10));
+    setMaterialTypeId(editData?.materialTypeId ?? '');
     setMaterialGauge(editData?.materialGauge ?? '');
     setMaterialColor(editData?.materialColor ?? '');
     setMaterialDesign(editData?.materialDesign ?? '');
@@ -499,6 +520,7 @@ const QuotationModal = ({
     editData?.customerID,
     editData?.dateISO,
     customers,
+    editData?.materialTypeId,
     editData?.materialGauge,
     editData?.materialColor,
     editData?.materialDesign,
@@ -506,6 +528,12 @@ const QuotationModal = ({
     editData?.quotationLines,
     treasuryPayAccountsLive,
   ]);
+
+  useEffect(() => {
+    if (!materialDesign) return;
+    const ok = profileOptions.some((p) => p.value === materialDesign);
+    if (!ok) setMaterialDesign('');
+  }, [materialTypeId, profileOptions, materialDesign]);
 
   useEffect(() => {
     return () => {
@@ -677,6 +705,7 @@ const QuotationModal = ({
           projectName: projectName.trim(),
           dateISO: quoteDate,
           lines: buildLinesPayload(),
+          materialTypeId,
           materialGauge,
           materialColor,
           materialDesign,
@@ -690,12 +719,16 @@ const QuotationModal = ({
         if (editData?.id) {
           const { ok, data } = await apiFetch(`/api/quotations/${encodeURIComponent(editData.id)}`, {
             method: 'PATCH',
-            body: JSON.stringify(body),
+            body: JSON.stringify({
+              ...body,
+              ...(quotationEditApprovalId ? { editApprovalId: quotationEditApprovalId.trim() } : {}),
+            }),
           });
           if (!ok || !data?.ok) {
             showToast(data?.error || 'Could not update quotation.', { variant: 'error' });
             return;
           }
+          setQuotationEditApprovalId('');
           showToast(`Quotation ${editData.id} saved to database.`);
         } else {
           const { ok, data } = await apiFetch('/api/quotations', {
@@ -719,6 +752,27 @@ const QuotationModal = ({
       `Quotation not saved to the database. Start the API server to persist this record (${preparedByLabel}).`,
       { variant: 'error' }
     );
+  };
+
+  const onReviveArchived = async () => {
+    if (!editData?.id || !useQuotationApi || !ws?.canMutate) return;
+    setReviving(true);
+    try {
+      const { ok, data } = await apiFetch(`/api/quotations/${encodeURIComponent(editData.id)}/revive`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      if (!ok || !data?.ok) {
+        showToast(data?.error || 'Could not revive quotation.', { variant: 'error' });
+        return;
+      }
+      showToast(`Quotation ${editData.id} revived — back in the active pipeline as Pending.`);
+      await onLedgerChange?.();
+      if (typeof ws?.refresh === 'function') await ws.refresh();
+      if (data.quotation && typeof onQuotationRevived === 'function') onQuotationRevived(data.quotation);
+    } finally {
+      setReviving(false);
+    }
   };
 
   return (
@@ -762,10 +816,37 @@ const QuotationModal = ({
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 custom-scrollbar bg-white">
+          {archivedLifecycle ? (
+            <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50/90 px-3 py-2.5 space-y-2">
+              <p className="text-[10px] font-bold text-amber-900 uppercase tracking-wide">
+                Archived quotation ({String(editData.status)})
+              </p>
+              <p className="text-[10px] text-amber-950/90 leading-snug">
+                {editData.lifecycleNote
+                  ? String(editData.lifecycleNote)
+                  : 'Valid for 10 days from quote date, or voided after a master price change. Revive to continue this record as Pending, or create a new quotation.'}
+              </p>
+              {useQuotationApi && ws?.canMutate && ws?.hasPermission?.('quotations.manage') ? (
+                <button
+                  type="button"
+                  onClick={onReviveArchived}
+                  disabled={reviving}
+                  className="inline-flex items-center justify-center rounded-lg bg-[#134e4a] px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-white hover:bg-[#0f3d39] disabled:opacity-40"
+                >
+                  {reviving ? 'Reviving…' : 'Revive as Pending'}
+                </button>
+              ) : (
+                <p className="text-[9px] text-amber-900/80">
+                  Sign in with quotation edit permission to revive this record.
+                </p>
+              )}
+            </div>
+          ) : null}
           {readOnly ? (
             <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] font-medium text-slate-600">
-              View only — fields are locked. Editing may require branch manager approval when the quote is fully
-              paid.
+              {archivedLifecycle
+                ? 'Archived — use Revive above to unlock editing.'
+                : 'View only — fields are locked. Editing may require branch manager approval when the quote is fully paid.'}
             </div>
           ) : null}
 
@@ -936,6 +1017,25 @@ const QuotationModal = ({
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5">
+            <div className="relative sm:col-span-3">
+              <label className="text-[9px] font-semibold text-slate-400 uppercase tracking-wide mb-1 block">
+                Material type
+              </label>
+              <select
+                value={materialTypeId}
+                onChange={(e) => setMaterialTypeId(e.target.value)}
+                disabled={readOnly}
+                className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-xs font-semibold text-[#134e4a] appearance-none outline-none disabled:opacity-60"
+              >
+                <option value="">Select material type…</option>
+                {materialTypeOptions.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown size={12} className="absolute right-2 bottom-2.5 text-slate-300 pointer-events-none" />
+            </div>
             <div className="relative sm:col-span-3">
               <label className="text-[9px] font-semibold text-slate-400 uppercase tracking-wide mb-1 block">
                 Material gauge
@@ -1109,6 +1209,17 @@ const QuotationModal = ({
             resolveUnitPrice={resolveUnitPrice}
           />
         </div>
+
+        {useQuotationApi && editData?.id && !readOnly ? (
+          <div className="px-5 py-3 border-t border-slate-200 bg-amber-50/40 shrink-0">
+            <EditSecondApprovalInline
+              entityKind="quotation"
+              entityId={editData.id}
+              value={quotationEditApprovalId}
+              onChange={setQuotationEditApprovalId}
+            />
+          </div>
+        ) : null}
 
         <div className="px-5 py-4 bg-[#134e4a] flex justify-between items-center text-white shrink-0 flex-wrap gap-3">
           <div>

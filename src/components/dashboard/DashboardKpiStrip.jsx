@@ -8,7 +8,9 @@ import { formatNgn } from '../../Data/mockData';
 import {
   liveLiquidityBreakdown,
   liveMetersSeries,
-  liveSalesSeriesByMonth,
+  liveProductionAttributedSalesSeriesByMonth,
+  productionAttributedRevenueNgn,
+  productionOutputDateISO,
   totalLiquidityNgn,
 } from '../../lib/liveAnalytics';
 
@@ -81,9 +83,9 @@ function KpiCard({ title, value, sub, onClick, titleAttr, highlight, children })
 }
 
 /**
- * Same four KPI cards as Operations dashboard: meters sold, MTD sales, treasury liquidity, low stock.
- * Uses workspace snapshot + inventory — identical formulas to Dashboard.jsx.
- * @param {{ startISO: string; label: string } | null | undefined} [metricsWindow] — When set (e.g. Manager dashboard), meters & sales cards use sums from that date onward.
+ * Same four KPI cards as Operations dashboard: metres produced, MTD sales (production basis), treasury, low stock.
+ * Uses workspace snapshot + inventory — aligned with Dashboard.jsx.
+ * @param {{ startISO: string; label: string } | null | undefined} [metricsWindow] — When set (e.g. Manager dashboard), metres & sales cards use sums from that date onward.
  */
 export function DashboardKpiStrip({ sectionClassName = 'mb-8', metricsWindow }) {
   const navigate = useNavigate();
@@ -105,11 +107,11 @@ export function DashboardKpiStrip({ sectionClassName = 'mb-8', metricsWindow }) 
         : [],
     [ws]
   );
-  const cuttingLists = useMemo(
+  const productionJobs = useMemo(
     () =>
       ws?.hasWorkspaceData
-        ? Array.isArray(ws?.snapshot?.cuttingLists)
-          ? ws.snapshot.cuttingLists
+        ? Array.isArray(ws?.snapshot?.productionJobs)
+          ? ws.snapshot.productionJobs
           : []
         : [],
     [ws]
@@ -124,7 +126,7 @@ export function DashboardKpiStrip({ sectionClassName = 'mb-8', metricsWindow }) 
     [ws]
   );
 
-  const metersSeries = useMemo(() => liveMetersSeries(cuttingLists, 6), [cuttingLists]);
+  const metersSeries = useMemo(() => liveMetersSeries(productionJobs, 6), [productionJobs]);
   const metersCurrent = metersSeries[metersSeries.length - 1];
   const metersPrev = metersSeries[metersSeries.length - 2];
   const metersDeltaPct = useMemo(() => {
@@ -135,27 +137,27 @@ export function DashboardKpiStrip({ sectionClassName = 'mb-8', metricsWindow }) 
   const windowStart = metricsWindow?.startISO ? String(metricsWindow.startISO).slice(0, 10) : '';
   const metersInWindow = useMemo(() => {
     if (!windowStart) return null;
-    return cuttingLists.reduce((s, cl) => {
-      const d = String(cl.dateISO || '').slice(0, 10);
+    return productionJobs.reduce((s, j) => {
+      if (String(j.status || '').trim() !== 'Completed') return s;
+      const d = productionOutputDateISO(j);
       if (!d || d < windowStart) return s;
-      return s + (Number(cl.totalMeters) || 0);
+      return s + (Number(j.actualMeters) || 0);
     }, 0);
-  }, [cuttingLists, windowStart]);
+  }, [productionJobs, windowStart]);
 
   const salesInWindow = useMemo(() => {
     if (!windowStart) return null;
-    return quotations.reduce((s, q) => {
-      const d = String(q.dateISO || '').slice(0, 10);
-      if (!d || d < windowStart) return s;
-      return s + (Number(q.totalNgn) || 0);
-    }, 0);
-  }, [quotations, windowStart]);
+    return productionAttributedRevenueNgn(quotations, productionJobs, windowStart, '');
+  }, [quotations, productionJobs, windowStart]);
 
   const useWindow = Boolean(metricsWindow && windowStart);
 
   const liquidityBreakdown = useMemo(() => liveLiquidityBreakdown(treasuryAccounts), [treasuryAccounts]);
   const liquidityTotal = useMemo(() => totalLiquidityNgn(treasuryAccounts), [treasuryAccounts]);
-  const salesByMonth = useMemo(() => liveSalesSeriesByMonth(quotations, 6), [quotations]);
+  const salesByMonth = useMemo(
+    () => liveProductionAttributedSalesSeriesByMonth(quotations, productionJobs, 6),
+    [quotations, productionJobs]
+  );
   const salesMonthRevenue = salesByMonth[salesByMonth.length - 1]?.amountNgn || 0;
 
   const stockAlerts = useMemo(() => {
@@ -177,16 +179,16 @@ export function DashboardKpiStrip({ sectionClassName = 'mb-8', metricsWindow }) 
       <h2 className="sr-only">Key performance indicators</h2>
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <KpiCard
-          title={useWindow ? `Meters (${metricsWindow.label})` : 'Meters sold (this month)'}
+          title={useWindow ? `Metres (${metricsWindow.label})` : 'Metres produced (this month)'}
           value={`${(useWindow ? metersInWindow ?? 0 : metersCurrent.meters).toLocaleString()} m`}
           sub={
             useWindow
-              ? 'Cutting lists in selected range'
+              ? 'Completed jobs · production completion date'
               : metersDeltaPct == null
                 ? metersCurrent.label
                 : `${metersDeltaPct >= 0 ? '+' : ''}${metersDeltaPct.toFixed(1)}% vs ${metersPrev?.label ?? 'prior month'}`
           }
-          titleAttr="Recent metres from cutting lists."
+          titleAttr="Actual metres from completed production jobs (dated when production finished)."
           onClick={() => navigate('/operations')}
           highlight={
             useWindow
@@ -218,10 +220,14 @@ export function DashboardKpiStrip({ sectionClassName = 'mb-8', metricsWindow }) 
         </KpiCard>
 
         <KpiCard
-          title={useWindow ? `Sales (${metricsWindow.label})` : 'Sales revenue (MTD)'}
+          title={useWindow ? `Sales (${metricsWindow.label})` : 'Sales (produced, MTD)'}
           value={formatNgn(useWindow ? salesInWindow ?? 0 : salesMonthRevenue)}
-          sub={useWindow ? 'Quotation totals in range' : 'Quotations & receipts'}
-          titleAttr="Month-to-date quotation value from live records."
+          sub={
+            useWindow
+              ? 'Quote total × actual-metre share · jobs completed in range'
+              : 'Production completions this month · not quotation date'
+          }
+          titleAttr="Sales value from quotations when jobs complete; split by actual metres across completed jobs per quote."
           onClick={() => navigate('/sales')}
         />
 

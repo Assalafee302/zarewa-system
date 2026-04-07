@@ -36,7 +36,7 @@ async function freshPaidQuotationWithAccessory(agent) {
   const total = q.body.quotation.totalNgn;
   const boot = await agent.get('/api/bootstrap');
   const treasuryAccountId = boot.body.treasuryAccounts[0].id;
-  const payNgn = Math.max(Math.ceil(total * 0.51), 1);
+  const payNgn = Math.max(Math.ceil(total * 0.71), 1);
   const rcpt = await agent.post('/api/ledger/receipt').send({
     customerID: 'CUS-001',
     quotationId: qid,

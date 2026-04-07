@@ -35,7 +35,7 @@ const AdvancePaymentModal = ({
 
   const treasuryList = useMemo(() => treasuryAccountsFromSnapshot(ws?.snapshot), [ws?.snapshot]);
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     if (!isOpen) return;
     setCustomerID(defaultCustomerID || '');
@@ -47,7 +47,7 @@ const AdvancePaymentModal = ({
     setPurpose('');
     setShowPrint(false);
   }, [isOpen, defaultCustomerID, treasuryList]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   const customerName = useMemo(
     () => customers.find((c) => c.customerID === customerID)?.name ?? '',

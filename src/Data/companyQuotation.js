@@ -7,6 +7,10 @@ export const ZAREWA_LOGO_SRC = '/zarewa-logo.png';
 
 export const ZAREWA_QUOTATION_BRANDING = {
   legalName: ZAREWA_COMPANY_ACCOUNT_NAME,
+  /** Shown under “Yours faithfully” on printed quotes (matches letterhead ampersand). */
+  signatureLegalName: 'ZAREWA ALUMINIUM & PLASTICS LTD',
+  /** Printed above “Yours faithfully” (marketing signatory line). */
+  marketingSignatoryName: 'AUWAL',
   poBox: 'P.O. BOX 7068, KADUNA',
   email: 'zarewaglobal@gmail.com',
   logoSrc: ZAREWA_LOGO_SRC,
@@ -15,7 +19,7 @@ export const ZAREWA_QUOTATION_BRANDING = {
       title: 'KADUNA HEAD OFFICE',
       lines: [
         'No A1 Kaduna–Zaria Road, Unguwan Gwari, Kawo, Kaduna State.',
-        'Tel: +234 803 000 0000 · +234 806 000 0000',
+        'Tel: +234 803 000 0000 · +234 806 000 0000 · +234 809 000 0000',
       ],
     },
     {
@@ -23,13 +27,6 @@ export const ZAREWA_QUOTATION_BRANDING = {
       lines: [
         'Yola Numan Road, 1 km from welcome to Yola, Adamawa State.',
         'Tel: +234 701 000 0000',
-      ],
-    },
-    {
-      title: 'JALINGO FACTORY',
-      lines: [
-        'Wukari Road, Jalingo, Taraba State.',
-        'Tel: +234 803 000 0001',
       ],
     },
     {
@@ -42,9 +39,12 @@ export const ZAREWA_QUOTATION_BRANDING = {
   ],
 };
 
-/** Corporate blue for official quotation / invoice / receipt printouts */
-export const ZAREWA_DOC_BLUE = '#1e3a8a';
-export const ZAREWA_DOC_BLUE_SOFT = '#dbeafe';
+/** Primary ink / borders for official quotation / invoice / receipt printouts */
+export const ZAREWA_DOC_BLUE = '#1a3a5a';
+/** Light panel tint paired with ZAREWA_DOC_BLUE */
+export const ZAREWA_DOC_BLUE_SOFT = '#e9eef4';
+/** Letterhead mark background (ZP block) */
+export const ZAREWA_DOC_MAROON = '#7b2c5a';
 
 /**
  * Demo line items matching a typical longspan quote (amounts align to a coherent grand total).
@@ -55,7 +55,7 @@ export const DEFAULT_QUOTATION_PRINT_LINES = {
     { name: 'Top End', qty: 30, unitPrice: 2000, value: 60000 },
     { name: 'Barge board', qty: 14, unitPrice: 2000, value: 28000 },
     { name: 'Eave angle', qty: 60, unitPrice: 850, value: 51000 },
-    { name: 'Ridge cap', qty: 50, unitPrice: 2000, value: 100000 },
+    { name: 'Capping', qty: 50, unitPrice: 2000, value: 100000 },
     { name: 'Flat sheet', qty: 47, unitPrice: 4850, value: 227950 },
     { name: 'Roofing sheet', qty: 340.3, unitPrice: 4850, value: 1650454.94 },
   ],

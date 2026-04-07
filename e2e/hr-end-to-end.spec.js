@@ -92,6 +92,10 @@ test.describe('HR end-to-end (staff → requests → approvals → disbursement 
     expect(regJson.ok).toBe(true);
     const staffUserId = regJson.userId;
     expect(String(staffUserId)).toBeTruthy();
+    const tenurePatch = await page.request.patch(`/api/hr/staff/${encodeURIComponent(staffUserId)}`, {
+      data: { dateJoinedIso: '2018-01-15' },
+    });
+    expect(tenurePatch.status()).toBe(200);
 
     await apiSignOut(page);
 
@@ -162,6 +166,11 @@ test.describe('HR end-to-end (staff → requests → approvals → disbursement 
       { data: { approve: true, note: 'Approved (Playwright)', reasonCode: 'policy' } }
     );
     expect(mgrApproveLoan.status()).toBe(200);
+    const gmApproveLoan = await page.request.patch(
+      `/api/hr/requests/${encodeURIComponent(loanRequestId)}/manager-review`,
+      { data: { approve: true, note: 'GM ok (Playwright)', reasonCode: 'policy' } }
+    );
+    expect(gmApproveLoan.status()).toBe(200);
 
     const hrApproveLeave = await page.request.patch(
       `/api/hr/requests/${encodeURIComponent(leaveRequestId)}/hr-review`,
@@ -174,6 +183,11 @@ test.describe('HR end-to-end (staff → requests → approvals → disbursement 
       { data: { approve: true, note: 'Approved leave (Playwright)', reasonCode: 'policy' } }
     );
     expect(mgrApproveLeave.status()).toBe(200);
+    const gmApproveLeave = await page.request.patch(
+      `/api/hr/requests/${encodeURIComponent(leaveRequestId)}/manager-review`,
+      { data: { approve: true, note: 'GM leave ok (Playwright)', reasonCode: 'policy' } }
+    );
+    expect(gmApproveLeave.status()).toBe(200);
 
     // Leave balances: recompute for the leave start month and assert usedDays reflects the approved leave.
     const leaveRecompute = await page.request.post('/api/hr/leave/recompute', {

@@ -42,7 +42,7 @@ test.describe('HR stress (opt-in)', () => {
           jobTitle: 'Stress test',
           department: 'Operations',
           employmentType: 'permanent',
-          dateJoinedIso: '2025-01-15',
+          dateJoinedIso: '2018-01-15',
           baseSalaryNgn: 220_000,
           housingAllowanceNgn: 0,
           transportAllowanceNgn: 0,
@@ -93,6 +93,12 @@ test.describe('HR stress (opt-in)', () => {
       });
       if (mgr.status() !== 200) {
         throw new Error(`Manager approve failed (${mgr.status()}): ${await mgr.text()}`);
+      }
+      const mgr2 = await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/manager-review`, {
+        data: { approve: true, note: 'Stress GM approve', reasonCode: 'policy' },
+      });
+      if (mgr2.status() !== 200) {
+        throw new Error(`Second approve failed (${mgr2.status()}): ${await mgr2.text()}`);
       }
     }
     const tApproveMs = Date.now() - t1;

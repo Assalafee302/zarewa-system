@@ -56,6 +56,8 @@ export const ROLE_DEFINITIONS = {
       'hr.staff.manage',
       'hr.requests.hr_review',
       'hr.requests.final_approve',
+      'hr.requests.gm_approve',
+      'hr.branch.endorse_staff',
       'hr.payroll.manage',
       'hr.attendance.upload',
       'hr.loan_maintain',
@@ -87,16 +89,19 @@ export const ROLE_DEFINITIONS = {
       'audit.view',
       'hr.directory.view',
       'hr.daily_roll.mark',
-      // Manager dashboard (/manager): quotation clearance / flags / production override, refunds & payment approvals, conversion sign-off
+      // Manager dashboard (/manager): quotation clearance / flags / production override, payment approvals, conversion sign-off; refunds approved by branch manager
       'quotations.manage',
-      'refunds.approve',
       'finance.approve',
       'production.release',
+      'hr.payroll.md_approve',
+      'pricing.manage',
+      'md.price_exception.approve',
     ],
   },
   ceo: {
     label: 'Chief Executive Officer',
-    permissions: ['*'],
+    // Read-only executive: org aggregates only (see GET /api/exec/summary); no line-level modules.
+    permissions: ['exec.dashboard.view', 'dashboard.view'],
   },
   finance_manager: {
     label: 'Finance manager',
@@ -111,6 +116,7 @@ export const ROLE_DEFINITIONS = {
       'finance.approve',
       'finance.pay',
       'finance.reverse',
+      'finance.cross_branch_post',
       'treasury.manage',
       'audit.view',
       'period.manage',
@@ -129,7 +135,7 @@ export const ROLE_DEFINITIONS = {
     ],
   },
   sales_manager: {
-    label: 'Sales manager',
+    label: 'Branch manager',
     permissions: [
       'dashboard.view',
       'reports.view',
@@ -138,10 +144,18 @@ export const ROLE_DEFINITIONS = {
       'customers.manage',
       'quotations.manage',
       'receipts.post',
-      'refunds.request',
       'refunds.approve',
+      'operations.view',
+      'operations.manage',
+      'production.manage',
+      'production.release',
+      'deliveries.manage',
+      'inventory.receive',
+      'inventory.adjust',
+      'finance.approve',
       'hr.directory.view',
       'hr.daily_roll.mark',
+      'hr.branch.endorse_staff',
     ],
   },
   sales_staff: {
@@ -219,6 +233,14 @@ const DEFAULT_USERS = [
     roleKey: 'md',
     department: 'leadership',
     password: 'Md@1234567890!',
+  },
+  {
+    id: 'USR-CEO',
+    username: 'ceo',
+    displayName: 'Chief Executive Officer',
+    roleKey: 'ceo',
+    department: 'leadership',
+    password: 'Ceo@1234567890!',
   },
   {
     id: 'USR-FIN',
@@ -336,6 +358,36 @@ export function canUseAllBranchesRollup(user) {
   return roleKey === 'admin' || roleKey === 'md' || roleKey === 'ceo';
 }
 
+/** Only these roles may PATCH without a prior second-party approval token. */
+const EDIT_MUTATION_EXEMPT_ROLE_KEYS = new Set(['admin', 'ceo']);
+
+/** Who may approve another user's edit request (two-person control). */
+const EDIT_APPROVER_ROLE_KEYS = new Set([
+  'admin',
+  'ceo',
+  'md',
+  'sales_manager',
+  'finance_manager',
+  'hr_manager',
+  'procurement_officer',
+  'operations_officer',
+]);
+
+/** @param {object|null|undefined} user */
+export function editMutationRequiresSecondApproval(user) {
+  if (!user) return true;
+  const rk = String(user.roleKey || '').trim().toLowerCase();
+  return !EDIT_MUTATION_EXEMPT_ROLE_KEYS.has(rk);
+}
+
+/** @param {object|null|undefined} user */
+export function userCanApproveEditMutations(user) {
+  if (!user) return false;
+  const rk = String(user.roleKey || '').trim().toLowerCase();
+  if (EDIT_APPROVER_ROLE_KEYS.has(rk)) return true;
+  return userHasPermission(user, 'quotations.manage');
+}
+
 export function publicUserFromRow(row) {
   if (!row) return null;
   const roleKey = row.role_key ?? row.roleKey;
@@ -443,6 +495,68 @@ export function seedAuthUsers(db) {
       }
     }
   })();
+}
+
+const DEFAULT_ADMIN_ROW = DEFAULT_USERS.find((u) => u.username === 'admin');
+
+/**
+ * Insert or update the built-in admin user so username `admin` can sign in with the default dev password.
+ * For local/staging recovery; same production guard as {@link seedAuthUsers}.
+ * @param {import('better-sqlite3').Database} db
+ */
+export function ensureDefaultAdminUser(db) {
+  if (
+    process.env.NODE_ENV === 'production' &&
+    process.env.ZAREWA_ALLOW_SEEDED_USERS !== 'true' &&
+    process.env.ZAREWA_ALLOW_SEEDED_USERS !== '1'
+  ) {
+    return;
+  }
+  if (!DEFAULT_ADMIN_ROW) return;
+  const admin = DEFAULT_ADMIN_ROW;
+  const hash = createPasswordHash(admin.password);
+  const createdAtISO = nowIso();
+  const cols = db.prepare(`PRAGMA table_info(app_users)`).all();
+  const hasDept = cols.some((c) => c.name === 'department');
+  const dept = normalizeWorkspaceDepartment(admin.department);
+  const existing = db
+    .prepare(`SELECT id FROM app_users WHERE lower(trim(username)) = ?`)
+    .get(admin.username.toLowerCase());
+  if (existing?.id) {
+    if (hasDept) {
+      db.prepare(
+        `UPDATE app_users SET display_name = ?, password_hash = ?, role_key = ?, department = ?, status = 'active' WHERE id = ?`
+      ).run(admin.displayName, hash, admin.roleKey, dept, existing.id);
+    } else {
+      db.prepare(
+        `UPDATE app_users SET display_name = ?, password_hash = ?, role_key = ?, status = 'active' WHERE id = ?`
+      ).run(admin.displayName, hash, admin.roleKey, existing.id);
+    }
+    return;
+  }
+  if (hasDept) {
+    db.prepare(
+      `INSERT INTO app_users (
+      id, username, display_name, password_hash, role_key, department, status, last_login_at_iso, created_at_iso
+    ) VALUES (?,?,?,?,?,?,?,?,?)`
+    ).run(
+      admin.id,
+      admin.username,
+      admin.displayName,
+      hash,
+      admin.roleKey,
+      dept,
+      'active',
+      '',
+      createdAtISO
+    );
+  } else {
+    db.prepare(
+      `INSERT INTO app_users (
+      id, username, display_name, password_hash, role_key, status, last_login_at_iso, created_at_iso
+    ) VALUES (?,?,?,?,?,?,?,?)`
+    ).run(admin.id, admin.username, admin.displayName, hash, admin.roleKey, 'active', '', createdAtISO);
+  }
 }
 
 /**
@@ -605,6 +719,9 @@ export function attachAuthContext(db) {
 }
 
 function sessionCookieFlags() {
+  if (process.env.COOKIE_SECURE === '0' || process.env.COOKIE_SECURE === 'false') {
+    return '';
+  }
   const secure =
     process.env.COOKIE_SECURE === '1' ||
     process.env.COOKIE_SECURE === 'true' ||

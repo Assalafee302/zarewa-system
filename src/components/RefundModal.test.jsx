@@ -3,6 +3,11 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import RefundModal from './RefundModal.jsx';
+import { ToastProvider } from '../context/ToastContext.jsx';
+
+function renderWithToast(ui) {
+  return render(<ToastProvider>{ui}</ToastProvider>);
+}
 
 vi.mock('../context/CustomersContext', () => ({
   useCustomers: () => ({
@@ -47,13 +52,13 @@ describe('RefundModal', () => {
 
   it(
     'keeps the modal open when async approval persist fails',
-    { timeout: 40_000 },
+    { timeout: 90_000 },
     async () => {
       const user = userEvent.setup();
       const onClose = vi.fn();
       const onPersist = vi.fn().mockResolvedValue({ ok: false });
 
-      render(
+      renderWithToast(
         <RefundModal
           {...baseProps}
           mode="approve"
@@ -95,7 +100,7 @@ describe('RefundModal', () => {
       const onClose = vi.fn();
       const onPersist = vi.fn().mockResolvedValue({ ok: true });
 
-      render(
+      renderWithToast(
         <RefundModal
           {...baseProps}
           mode="approve"

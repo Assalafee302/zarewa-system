@@ -6,6 +6,8 @@ import { useHrWorkspace } from '../../context/HrWorkspaceContext';
 import { useToast } from '../../context/ToastContext';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { apiFetch } from '../../lib/apiBase';
+import { APP_DATA_TABLE_PAGE_SIZE, useAppTablePaging } from '../../lib/appDataTable';
+import { AppTablePager } from '../../components/ui/AppDataTable';
 import HrCapsLoading from './hrCapsLoading';
 import { HrOpsToolbar, HrSectionCard } from './hrUx';
 
@@ -29,6 +31,7 @@ export default function HrTime() {
   const [rollStatusByUser, setRollStatusByUser] = useState({});
   const [rollLoading, setRollLoading] = useState(false);
   const [rollSaving, setRollSaving] = useState(false);
+  const [leaveOverlay, setLeaveOverlay] = useState({});
 
   const branches = useMemo(
     () => ws?.snapshot?.workspaceBranches ?? ws?.session?.branches ?? [],
@@ -36,6 +39,13 @@ export default function HrTime() {
   );
   const defaultRollBranchId = branches[0]?.id || '';
   const rollBranchKey = rollBranchId || defaultRollBranchId;
+
+  const rollStaff = useMemo(
+    () => staff.filter((s) => String(s.branchId || '') === rollBranchKey),
+    [staff, rollBranchKey]
+  );
+  const rollPage = useAppTablePaging(rollStaff, APP_DATA_TABLE_PAGE_SIZE, rollBranchKey, rollDay);
+  const uploadsPage = useAppTablePaging(uploads, APP_DATA_TABLE_PAGE_SIZE);
 
   const canView = caps?.canUploadAttendance || caps?.canPayroll || caps?.canViewDirectory;
   const canUpload = caps?.canUploadAttendance || caps?.canPayroll;
@@ -93,6 +103,18 @@ export default function HrTime() {
       }
     }
     setRollStatusByUser(m);
+    const ov = await apiFetch(
+      `/api/hr/attendance/leave-overlay?branchId=${encodeURIComponent(rollBranchKey)}&dayIso=${encodeURIComponent(rollDay)}`
+    );
+    if (ov.ok && ov.data?.ok && Array.isArray(ov.data.overlay)) {
+      const om = {};
+      for (const row of ov.data.overlay) {
+        om[String(row.userId)] = row;
+      }
+      setLeaveOverlay(om);
+    } else {
+      setLeaveOverlay({});
+    }
   }, [rollBranchKey, rollDay, showToast]);
 
   useEffect(() => {
@@ -171,7 +193,6 @@ export default function HrTime() {
   return (
     <>
       <PageHeader
-        eyebrow="Human resources"
         title="Time & attendance"
         subtitle="Daily present/late per branch (same daily rate as absent: base ÷ 22 per late day in the payroll month). Monthly absent uploads still apply for full-day absence."
         actions={
@@ -265,37 +286,40 @@ export default function HrTime() {
                   {rollLoading ? 'Loading…' : 'Reload'}
                 </button>
               </div>
-              {(() => {
-                const branchStaff = staff.filter((s) => String(s.branchId || '') === rollBranchKey);
-                if (branchStaff.length === 0) {
-                  return <p className="text-sm text-slate-600">No staff mapped to this branch.</p>;
-                }
-                return (
+              {rollStaff.length === 0 ? (
+                <p className="text-sm text-slate-600">No staff mapped to this branch.</p>
+              ) : (
+                <>
                   <div className="overflow-x-auto rounded-2xl border border-slate-200/90 bg-white shadow-sm">
-                    <table className="min-w-full text-left text-sm">
-                      <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-500">
+                    <table className="min-w-full border-collapse text-left text-sm">
+                      <thead className="border-b border-slate-200 bg-slate-50 text-xs font-bold uppercase tracking-wide text-slate-600">
                         <tr>
-                          <th className="px-4 py-3">Staff</th>
-                          <th className="px-4 py-3">Today</th>
+                          <th className="px-3 py-2.5">Staff</th>
+                          <th className="px-3 py-2.5">Today</th>
                         </tr>
                       </thead>
-                      <tbody>
-                        {branchStaff.map((s) => {
+                      <tbody className="divide-y divide-slate-100">
+                        {rollPage.slice.map((s) => {
                           const st = rollStatusByUser[s.userId] ?? 'present';
+                          const leave = leaveOverlay[s.userId]?.onLeave;
+                          const who = `${s.displayName || s.username} · ${s.employeeNo || s.userId}${
+                            leave
+                              ? ` · Leave${leaveOverlay[s.userId].leaveType ? ` (${leaveOverlay[s.userId].leaveType})` : ''}`
+                              : ''
+                          }`;
                           return (
-                            <tr key={s.userId} className="border-t border-slate-100">
-                              <td className="px-4 py-3">
-                                <p className="font-semibold text-slate-900">{s.displayName || s.username}</p>
-                                <p className="text-xs text-slate-500">{s.employeeNo || s.userId}</p>
+                            <tr key={s.userId} className="border-t border-slate-100 hover:bg-teal-50/30">
+                              <td className="max-w-0 px-3 py-2.5 whitespace-nowrap truncate font-medium text-slate-900" title={who}>
+                                {who}
                               </td>
-                              <td className="px-4 py-3">
-                                <div className="flex flex-wrap gap-2">
+                              <td className="px-3 py-2.5 whitespace-nowrap">
+                                <div className="flex flex-nowrap gap-2">
                                   <button
                                     type="button"
                                     onClick={() =>
                                       setRollStatusByUser((m) => ({ ...m, [s.userId]: 'present' }))
                                     }
-                                    className={`rounded-lg px-3 py-1.5 text-[11px] font-black uppercase ${
+                                    className={`rounded-lg px-3 py-1.5 text-xs font-bold ${
                                       st === 'present'
                                         ? 'bg-emerald-600 text-white'
                                         : 'border border-slate-200 text-slate-700 hover:bg-slate-50'
@@ -305,10 +329,8 @@ export default function HrTime() {
                                   </button>
                                   <button
                                     type="button"
-                                    onClick={() =>
-                                      setRollStatusByUser((m) => ({ ...m, [s.userId]: 'late' }))
-                                    }
-                                    className={`rounded-lg px-3 py-1.5 text-[11px] font-black uppercase ${
+                                    onClick={() => setRollStatusByUser((m) => ({ ...m, [s.userId]: 'late' }))}
+                                    className={`rounded-lg px-3 py-1.5 text-xs font-bold ${
                                       st === 'late'
                                         ? 'bg-amber-600 text-white'
                                         : 'border border-slate-200 text-slate-700 hover:bg-slate-50'
@@ -324,15 +346,23 @@ export default function HrTime() {
                       </tbody>
                     </table>
                   </div>
-                );
-              })()}
+                  <AppTablePager
+                    showingFrom={rollPage.showingFrom}
+                    showingTo={rollPage.showingTo}
+                    total={rollPage.total}
+                    hasPrev={rollPage.hasPrev}
+                    hasNext={rollPage.hasNext}
+                    onPrev={rollPage.goPrev}
+                    onNext={rollPage.goNext}
+                  />
+                </>
+              )}
               {canUpload ? (
                 <button
                   type="button"
                   disabled={rollSaving || rollLoading || !rollBranchKey}
                   onClick={async () => {
-                    const branchStaff = staff.filter((s) => String(s.branchId || '') === rollBranchKey);
-                    const rows = branchStaff.map((s) => ({
+                    const rows = rollStaff.map((s) => ({
                       userId: s.userId,
                       status: rollStatusByUser[s.userId] ?? 'present',
                     }));
@@ -381,34 +411,49 @@ export default function HrTime() {
             ) : null}
           </div>
         ) : (
-          <div className="overflow-x-auto rounded-2xl border border-slate-200/90 bg-white shadow-sm">
-            <table className="min-w-full text-left text-sm">
-              <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-500">
-                <tr>
-                  <th className="px-4 py-3">Period</th>
-                  <th className="px-4 py-3">Branch</th>
-                  <th className="px-4 py-3">Rows</th>
-                  <th className="px-4 py-3">Uploaded</th>
-                  <th className="px-4 py-3">Notes</th>
-                </tr>
-              </thead>
-              <tbody>
-                {uploads.map((u) => (
-                  <tr key={u.id} className="border-t border-slate-100">
-                    <td className="px-4 py-3 font-semibold">{u.periodYyyymm}</td>
-                    <td className="px-4 py-3">{u.branchId}</td>
-                    <td className="px-4 py-3 tabular-nums">{Array.isArray(u.rows) ? u.rows.length : 0}</td>
-                    <td className="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">
-                      {u.createdAtIso ? String(u.createdAtIso).slice(0, 19).replace('T', ' ') : '—'}
-                    </td>
-                    <td className="px-4 py-3 text-xs text-slate-600 max-w-xs truncate" title={u.notes || ''}>
-                      {u.notes || '—'}
-                    </td>
+          <>
+            <div className="overflow-x-auto rounded-2xl border border-slate-200/90 bg-white shadow-sm">
+              <table className="min-w-full border-collapse text-left text-sm">
+                <thead className="border-b border-slate-200 bg-slate-50 text-xs font-bold uppercase tracking-wide text-slate-600">
+                  <tr>
+                    <th className="px-3 py-2.5">Period</th>
+                    <th className="px-3 py-2.5">Branch</th>
+                    <th className="px-3 py-2.5">Rows</th>
+                    <th className="px-3 py-2.5">Uploaded</th>
+                    <th className="px-3 py-2.5">Notes</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {uploadsPage.slice.map((u) => (
+                    <tr key={u.id} className="border-t border-slate-100 hover:bg-teal-50/30">
+                      <td className="px-3 py-2.5 font-semibold whitespace-nowrap">{u.periodYyyymm}</td>
+                      <td className="max-w-0 px-3 py-2.5 font-mono text-xs whitespace-nowrap truncate" title={u.branchId}>
+                        {u.branchId}
+                      </td>
+                      <td className="px-3 py-2.5 tabular-nums whitespace-nowrap">
+                        {Array.isArray(u.rows) ? u.rows.length : 0}
+                      </td>
+                      <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">
+                        {u.createdAtIso ? String(u.createdAtIso).slice(0, 19).replace('T', ' ') : '—'}
+                      </td>
+                      <td className="max-w-0 px-3 py-2.5 text-slate-600 whitespace-nowrap truncate" title={u.notes || ''}>
+                        {u.notes || '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <AppTablePager
+              showingFrom={uploadsPage.showingFrom}
+              showingTo={uploadsPage.showingTo}
+              total={uploadsPage.total}
+              hasPrev={uploadsPage.hasPrev}
+              hasNext={uploadsPage.hasNext}
+              onPrev={uploadsPage.goPrev}
+              onNext={uploadsPage.goNext}
+            />
+          </>
         )}
         </HrSectionCard>
       </MainPanel>

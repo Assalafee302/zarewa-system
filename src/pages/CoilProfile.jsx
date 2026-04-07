@@ -176,7 +176,7 @@ export default function CoilProfile() {
   if (!coil) {
     return (
       <PageShell>
-        <PageHeader eyebrow="Production" title="Coil profile" subtitle="Not found" />
+        <PageHeader title="Coil profile" subtitle="Not found" />
         <MainPanel>
           <Link to="/operations" className="z-btn-primary inline-flex">
             <ArrowLeft size={16} /> Back to operations
@@ -280,7 +280,6 @@ export default function CoilProfile() {
   return (
     <PageShell>
       <PageHeader
-        eyebrow="Production"
         title={`Coil ${coil.coilNo}`}
         subtitle={`${coil.productID || '—'} · ${coil.colour || '—'} · ${coil.gaugeLabel || '—'}`}
         actions={

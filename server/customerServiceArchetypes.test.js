@@ -150,10 +150,10 @@ async function ensureQuotationPaidForCuttingList(agent, quotationRef) {
   const total = Number(q.totalNgn) || 0;
   const paid = Number(q.paidNgn) || 0;
   if (total <= 0) return;
-  const half = total * 0.5;
-  if (paid >= half - 1e-6) return;
+  const minPaid = total * 0.7;
+  if (paid >= minPaid - 1e-6) return;
   const patch = await agent.patch(`/api/quotations/${encodeURIComponent(quotationRef)}`).send({
-    paidNgn: Math.ceil(half),
+    paidNgn: Math.ceil(minPaid),
   });
   expect(patch.status).toBe(200);
 }

@@ -22,7 +22,7 @@ export default function LinkAdvanceModal({
   const [quotationRef, setQuotationRef] = useState('');
   const [amount, setAmount] = useState('');
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     if (!isOpen || !advanceEntry) return;
     setQuotationRef('');
@@ -30,7 +30,7 @@ export default function LinkAdvanceModal({
       advanceEntry.amountNgn != null ? String(Math.min(Number(advanceEntry.amountNgn) || 0, 999999999)) : ''
     );
   }, [isOpen, advanceEntry]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   const quoteOptions = useMemo(() => {
     const cid = advanceEntry?.customerID;

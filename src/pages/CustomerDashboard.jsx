@@ -38,6 +38,7 @@ import {
   Tooltip,
 } from 'recharts';
 import { PageHeader, PageShell, MainPanel, ModalFrame } from '../components/layout';
+import { EditSecondApprovalInline } from '../components/EditSecondApprovalInline';
 import { useCustomers } from '../context/CustomersContext';
 import { useToast } from '../context/ToastContext';
 import { useWorkspace } from '../context/WorkspaceContext';
@@ -48,11 +49,20 @@ import {
   advanceBalanceNgn,
   amountDueOnQuotation,
   entriesForCustomer,
-  ledgerReceiptTotalNgn,
   recordRefundAdvance,
 } from '../lib/customerLedgerStore';
+import { mergeReceiptRowsForSales, receiptCashReceivedNgn } from '../lib/salesReceiptsList';
+import {
+  allocatedQuotationRevenueForProductionJob,
+  metersProducedByQuotationRef,
+  productionOutputDateISO,
+} from '../lib/liveAnalytics';
 
-const TODAY_ISO = '2026-03-28';
+/** Local calendar date YYYY-MM-DD for comparisons (due dates, overdue, receipt windows). */
+function localDateISO(d = new Date()) {
+  const z = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`;
+}
 
 const EMPTY_CUSTOMER_CRM = { orders: [], interactions: [], salesTrendByCustomer: {} };
 
@@ -69,10 +79,10 @@ function scrollToId(id) {
   document.getElementById(`cd-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-function quotationUiStatus(q) {
+function quotationUiStatus(q, todayIso) {
   if (q.paymentStatus === 'Paid') return { label: 'Paid', tone: 'paid' };
   const due = q.dueDateISO;
-  if (due && due < TODAY_ISO && q.paymentStatus !== 'Paid') {
+  if (due && due < todayIso && q.paymentStatus !== 'Paid') {
     return { label: 'Overdue', tone: 'overdue' };
   }
   if (q.status === 'Approved' && q.paymentStatus === 'Partial') {
@@ -164,6 +174,9 @@ const CustomerDashboard = () => {
     [allCustomers, routeCustomerId]
   );
   const customerKey = customer?.customerID || routeCustomerId;
+  /** Refreshes each render so overdue / receipt windows stay correct across midnight without a full reload. */
+  const todayIso = localDateISO();
+  const [ledgerViewNonce, setLedgerViewNonce] = useState(0);
 
   const quotationRows = useMemo(
     () =>
@@ -174,6 +187,10 @@ const CustomerDashboard = () => {
     () => (ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.receipts) ? ws.snapshot.receipts : []),
     [ws]
   );
+  const mergedReceiptRowsAll = useMemo(() => {
+    void ledgerViewNonce;
+    return mergeReceiptRowsForSales(receiptRows, quotationRows, ledgerViewNonce);
+  }, [receiptRows, quotationRows, ledgerViewNonce]);
   const cuttingListRows = useMemo(
     () =>
       ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.cuttingLists) ? ws.snapshot.cuttingLists : [],
@@ -183,18 +200,27 @@ const CustomerDashboard = () => {
     () => (ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.refunds) ? ws.snapshot.refunds : []),
     [ws]
   );
+  const productionJobRows = useMemo(
+    () =>
+      ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.productionJobs) ? ws.snapshot.productionJobs : [],
+    [ws]
+  );
 
   const quotations = useMemo(
     () => quotationRows.filter((q) => String(q.customerID || '').trim() === customerKey),
     [customerKey, quotationRows]
   );
   const receipts = useMemo(
-    () => receiptRows.filter((r) => String(r.customerID || '').trim() === customerKey),
-    [customerKey, receiptRows]
+    () => mergedReceiptRowsAll.filter((r) => String(r.customerID || '').trim() === customerKey),
+    [customerKey, mergedReceiptRowsAll]
   );
   const cuttingLists = useMemo(
     () => cuttingListRows.filter((cl) => String(cl.customerID || '').trim() === customerKey),
     [customerKey, cuttingListRows]
+  );
+  const customerProductionJobs = useMemo(
+    () => productionJobRows.filter((j) => String(j.customerID || '').trim() === customerKey),
+    [customerKey, productionJobRows]
   );
   const refundsForCustomer = useMemo(
     () => refundRows.filter((r) => String(r.customerID || '').trim() === customerKey),
@@ -212,18 +238,18 @@ const CustomerDashboard = () => {
 
   const [payWindow, setPayWindow] = useState('all');
   const [showEdit, setShowEdit] = useState(false);
+  const [customerEditApprovalId, setCustomerEditApprovalId] = useState('');
   const [editForm, setEditForm] = useState(() => emptyEdit(customer));
   const [detail, setDetail] = useState(null);
   const [showReports, setShowReports] = useState(false);
   const [reportFrom, setReportFrom] = useState('2026-01-01');
-  const [reportTo, setReportTo] = useState(TODAY_ISO);
+  const [reportTo, setReportTo] = useState(() => localDateISO());
   const [noteDraft, setNoteDraft] = useState('');
   const [staffNotes, setStaffNotes] = useState([]);
-  const [ledgerViewNonce, setLedgerViewNonce] = useState(0);
   const [refundAdvanceOpen, setRefundAdvanceOpen] = useState(false);
   const [refundAdvanceAmt, setRefundAdvanceAmt] = useState('');
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     if (customer) setEditForm(emptyEdit(customer));
   }, [customer]);
@@ -268,7 +294,7 @@ const CustomerDashboard = () => {
       cancelled = true;
     };
   }, [customerKey, ws?.hasWorkspaceData, ws?.canMutate, crm.interactions]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   const addNote = async (e) => {
     e.preventDefault();
@@ -379,11 +405,8 @@ const CustomerDashboard = () => {
   );
 
   const totalPaidReceiptsNgn = useMemo(
-    () => {
-      void ledgerViewNonce;
-      return receipts.reduce((s, r) => s + (r.amountNgn || 0), 0) + ledgerReceiptTotalNgn(customerKey);
-    },
-    [receipts, customerKey, ledgerViewNonce]
+    () => receipts.reduce((s, r) => s + receiptCashReceivedNgn(r), 0),
+    [receipts]
   );
 
   const ledgerLines = useMemo(
@@ -410,9 +433,9 @@ const CustomerDashboard = () => {
     () =>
       quotations.filter((q) => {
         if (q.paymentStatus === 'Paid') return false;
-        return q.dueDateISO && q.dueDateISO < TODAY_ISO;
+        return q.dueDateISO && q.dueDateISO < todayIso;
       }).length,
-    [quotations]
+    [quotations, todayIso]
   );
 
   const paymentProgressPct = useMemo(() => {
@@ -427,9 +450,9 @@ const CustomerDashboard = () => {
     );
     if (payWindow === 'all') return sorted;
     const days = payWindow === '30' ? 30 : 60;
-    const cutoff = new Date(TODAY_ISO);
+    const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
-    const ciso = cutoff.toISOString().slice(0, 10);
+    const ciso = localDateISO(cutoff);
     return sorted.filter((r) => (r.dateISO || '') >= ciso);
   }, [receipts, payWindow]);
 
@@ -439,11 +462,11 @@ const CustomerDashboard = () => {
         id: q.id,
         due: q.dueDateISO,
         amountNgn: amountDueOnQuotation(q),
-        overdue: q.dueDateISO && q.dueDateISO < TODAY_ISO,
+        overdue: q.dueDateISO && q.dueDateISO < todayIso,
       }))
       .filter((o) => o.amountNgn > 0)
       .sort((a, b) => (a.due || '').localeCompare(b.due || ''));
-  }, [quotations]);
+  }, [quotations, todayIso]);
 
   const trendData = useMemo(() => {
     const series =
@@ -561,6 +584,7 @@ const CustomerDashboard = () => {
       const { ok, data } = await apiFetch(`/api/customers/${encodeURIComponent(customerKey)}`, {
         method: 'PATCH',
         body: JSON.stringify({
+          ...(customerEditApprovalId.trim() ? { editApprovalId: customerEditApprovalId.trim() } : {}),
           name: editForm.name.trim(),
           phoneNumber: editForm.phoneNumber.trim(),
           email: editForm.email.trim(),
@@ -585,6 +609,7 @@ const CustomerDashboard = () => {
         return;
       }
       await ws.refresh();
+      setCustomerEditApprovalId('');
       setShowEdit(false);
       showToast('Customer profile updated.');
       return;
@@ -653,13 +678,33 @@ const CustomerDashboard = () => {
     lines.push(`Period: ${reportFrom} → ${reportTo}`);
     lines.push('');
     if (kind === 'sales') {
-      const inRange = quotations.filter(
+      const inRangeQuotes = quotations.filter(
         (q) =>
           (q.dateISO || '') >= reportFrom && (q.dateISO || '') <= reportTo
       );
-      lines.push(`Quotations in range: ${inRange.length}`);
-      inRange.forEach((q) => {
-        lines.push(`  ${q.id}  ${q.date}  ${q.total}  ${q.status}`);
+      const quoteById = new Map(quotations.map((q) => [String(q.id || '').trim(), q]));
+      const metersByRef = metersProducedByQuotationRef(productionJobRows);
+      const jobsInRange = customerProductionJobs.filter((j) => {
+        if (String(j.status || '').trim() !== 'Completed') return false;
+        const iso = productionOutputDateISO(j);
+        return iso && iso >= reportFrom && iso <= reportTo;
+      });
+      lines.push('Quotation pipeline (by quote date — not sales until produced):');
+      lines.push(`  Quotations in range: ${inRangeQuotes.length}`);
+      inRangeQuotes.forEach((q) => {
+        lines.push(`    ${q.id}  ${q.date}  ${q.total}  ${q.status}`);
+      });
+      lines.push('');
+      lines.push('Production completions in range (production completion date; ₦ share by actual metres per quote):');
+      lines.push(`  Jobs completed in range: ${jobsInRange.length}`);
+      jobsInRange.forEach((j) => {
+        const ref = String(j.quotationRef || '').trim();
+        const q = quoteById.get(ref);
+        const ngn = Math.round(allocatedQuotationRevenueForProductionJob(j, q, metersByRef));
+        const m = Number(j.actualMeters) || 0;
+        lines.push(
+          `    ${j.jobID || '—'}  quote ${ref || '—'}  ${productionOutputDateISO(j)}  ${m} m  ${formatNgn(ngn)}`
+        );
       });
     } else if (kind === 'payments') {
       const inRange = receipts.filter(
@@ -691,7 +736,7 @@ const CustomerDashboard = () => {
   if (!customer) {
     return (
       <PageShell>
-        <PageHeader eyebrow="Sales" title="Customer" subtitle="Dashboard" />
+        <PageHeader title="Customer" subtitle="Dashboard" />
         <MainPanel>
           <div className="z-empty-state max-w-md mx-auto">
             <p className="text-sm font-bold text-[#134e4a] mb-2">Customer not found</p>
@@ -721,11 +766,10 @@ const CustomerDashboard = () => {
   return (
     <PageShell blurred={showEdit || !!detail || showReports}>
       <PageHeader
-        eyebrow="Sales"
         title={customer.name}
         subtitle={`${customer.customerID} · ${customer.tier} · ${customer.paymentTerms}`}
-        actions={
-          <div className="flex flex-wrap items-center gap-2">
+        toolbar={
+          <div className="flex flex-wrap items-center gap-2 justify-end">
             <button
               type="button"
               onClick={() =>
@@ -737,7 +781,10 @@ const CustomerDashboard = () => {
             </button>
             <button
               type="button"
-              onClick={() => setShowEdit(true)}
+              onClick={() => {
+                setCustomerEditApprovalId('');
+                setShowEdit(true);
+              }}
               className="z-btn-primary"
             >
               <Pencil size={16} /> Edit profile
@@ -954,7 +1001,13 @@ const CustomerDashboard = () => {
                 {formatNgn(advanceBalNgn)}
               </p>
               <p className="text-[9px] text-amber-900/75 mt-2 leading-snug">
-                Not revenue — liability until applied or refunded.
+                Not revenue — liability until applied or refunded. Paying an approved <strong>sales refund</strong> to the
+                customer reduces this when the money came from advance or overpay credit (see ledger timeline).
+              </p>
+              <p className="text-[9px] text-amber-900/70 mt-2 leading-snug border-t border-amber-200/60 pt-2">
+                <strong>Use credit on another job:</strong> in <strong>Sales → Quotations</strong>, open the new quote and
+                use <strong>Apply customer advance</strong>. Unlinked deposits are listed under{' '}
+                <strong>Sales → Receipts → Advance deposits</strong> (Link to attach to a quotation first if needed).
               </p>
               {advanceBalNgn > 0 ? (
                 <button
@@ -965,7 +1018,7 @@ const CustomerDashboard = () => {
                   }}
                   className="mt-3 text-[9px] font-bold uppercase text-amber-900 hover:underline"
                 >
-                  Refund advance
+                  Refund advance (cash out)
                 </button>
               ) : null}
             </div>
@@ -977,7 +1030,7 @@ const CustomerDashboard = () => {
                 {formatNgn(totalPaidReceiptsNgn)}
               </p>
               <p className="text-[9px] text-gray-500 mt-2 leading-snug">
-                Mock receipts + ledger receipts posted from Sales.
+                Sales receipts and ledger posts, deduplicated (same basis as the Sales receipts list).
               </p>
             </div>
             <div className="rounded-zarewa border border-gray-100 bg-white p-5 shadow-sm">
@@ -1070,7 +1123,7 @@ const CustomerDashboard = () => {
                 </p>
               ) : (
                 sortedQuotations.map((q) => {
-                  const st = quotationUiStatus(q);
+                  const st = quotationUiStatus(q, todayIso);
                   return (
                     <button
                       key={q.id}
@@ -1489,7 +1542,13 @@ const CustomerDashboard = () => {
         </MainPanel>
       </div>
 
-      <ModalFrame isOpen={showEdit} onClose={() => setShowEdit(false)}>
+      <ModalFrame
+        isOpen={showEdit}
+        onClose={() => {
+          setShowEdit(false);
+          setCustomerEditApprovalId('');
+        }}
+      >
         <div className="z-modal-panel max-w-lg p-8 overflow-y-auto max-h-[90vh]">
           <div className="flex justify-between items-center mb-6">
             <h3 className="text-xl font-bold text-[#134e4a] flex items-center gap-2">
@@ -1498,7 +1557,10 @@ const CustomerDashboard = () => {
             </h3>
             <button
               type="button"
-              onClick={() => setShowEdit(false)}
+              onClick={() => {
+                setShowEdit(false);
+                setCustomerEditApprovalId('');
+              }}
               className="p-2 text-gray-400 hover:text-red-500 rounded-xl hover:bg-red-50"
             >
               <X size={22} />
@@ -1657,6 +1719,12 @@ const CustomerDashboard = () => {
                 </select>
               </div>
             </div>
+            <EditSecondApprovalInline
+              entityKind="customer"
+              entityId={customerKey}
+              value={customerEditApprovalId}
+              onChange={setCustomerEditApprovalId}
+            />
             <button type="submit" className="z-btn-primary w-full justify-center py-3 mt-2">
               Save changes
             </button>
@@ -1891,7 +1959,7 @@ const CustomerDashboard = () => {
                 onClick={() => downloadReport('sales')}
                 className="z-btn-secondary w-full justify-center py-3"
               >
-                Total sales (quotations)
+                Quotations & produced sales
               </button>
               <button
                 type="button"

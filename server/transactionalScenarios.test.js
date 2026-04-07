@@ -592,7 +592,7 @@ describe('Transactional scenarios (business checklist)', () => {
           {
             lineKey: 'L-TX12',
             productID: 'PRD-102',
-            productName: 'Aluzinc coil (kg)',
+            productName: 'Aluzinc (PPGI) coil (kg)',
             qtyOrdered: 500,
             unitPricePerKgNgn: 200,
             unitPriceNgn: 200,

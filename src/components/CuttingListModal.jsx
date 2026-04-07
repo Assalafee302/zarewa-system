@@ -20,8 +20,8 @@ import { useToast } from '../context/ToastContext';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { apiFetch } from '../lib/apiBase';
 import { formatNgn } from '../Data/mockData';
+import { receiptCashReceivedNgn } from '../lib/salesReceiptsList';
 import CuttingListReportPrintView from './CuttingListReportPrintView';
-
 const LINE_TYPE_SET = new Set(['Roof', 'Flatsheet', 'Cladding']);
 
 const CATEGORIES = [
@@ -58,22 +58,90 @@ function displayCuttingListStatus(s) {
   return s;
 }
 
-function nextDraftCuttingListId(cuttingLists) {
-  let max = 0;
-  for (const row of cuttingLists || []) {
-    const m = String(row.id).match(/(\d+)$/);
-    if (m) max = Math.max(max, parseInt(m[1], 10));
+function branchCodeForDraft(session) {
+  const bid = String(session?.currentBranchId || '').trim();
+  const branches = Array.isArray(session?.branches) ? session.branches : [];
+  const row = branches.find((b) => b.id === bid);
+  if (row?.code) {
+    const c = String(row.code).trim().toUpperCase();
+    if (c === 'KAD') return 'KD';
+    if (c === 'YOL') return 'YL';
+    if (c === 'MAI') return 'MDG';
+    return c;
   }
-  return max > 0 ? `CL-2026-${String(max + 1).padStart(3, '0')}` : 'CL-2026-001';
+  if (bid === 'BR-KAD' || bid === 'BR-KD') return 'KD';
+  if (bid === 'BR-YOL' || bid === 'BR-YL') return 'YL';
+  if (bid === 'BR-MAI' || bid === 'BR-MDG') return 'MDG';
+  return 'KD';
 }
 
-/** At least 70% of quotation total recorded as paid, or explicitly approved by manager. */
-function meetsCuttingListPayThreshold(q) {
+function nextDraftCuttingListId(cuttingLists, branchCode, yearFull = new Date().getFullYear()) {
+  const yy = String(yearFull).slice(-2);
+  const esc = branchCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const reHumanYy = new RegExp(`^CL-${esc}-${yy}-(\\d+)$`);
+  const reHumanFull = new RegExp(`^CL-${esc}-${yearFull}-(\\d+)$`);
+  const reLegacyYear = new RegExp(`^CL-${yearFull}-(\\d+)$`);
+  const reLegacyYy = new RegExp(`^CL-${yy}-(\\d+)$`);
+  let max = 0;
+  for (const row of cuttingLists || []) {
+    const id = String(row.id || '');
+    let m = id.match(reHumanYy);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+    else {
+      m = id.match(reHumanFull);
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+      else {
+        m = id.match(reLegacyYear);
+        if (m) max = Math.max(max, parseInt(m[1], 10));
+        else {
+          m = id.match(reLegacyYy);
+          if (m) max = Math.max(max, parseInt(m[1], 10));
+        }
+      }
+    }
+  }
+  return `CL-${branchCode}-${yy}-${String(max + 1).padStart(4, '0')}`;
+}
+
+/** Book paid on quote: receipt allocations in DB + ADVANCE_APPLIED (matches `quotations.paid_ngn`). */
+function bookPaidTowardQuotation(q) {
+  return Math.max(0, Number(q.paidNgn ?? q.paid_ngn) || 0);
+}
+
+function sumAdvanceAppliedNgnForQuotation(ledgerEntries, quotationId) {
+  const id = String(quotationId || '').trim();
+  if (!id || !Array.isArray(ledgerEntries)) return 0;
+  let s = 0;
+  for (const e of ledgerEntries) {
+    if (e.type !== 'ADVANCE_APPLIED') continue;
+    if (String(e.quotationRef || '').trim() !== id) continue;
+    s += Math.round(Number(e.amountNgn) || 0);
+  }
+  return s;
+}
+
+/** Cash actually received for this quote: merged receipt rows + ledger advance applied. */
+function cashPaidOnQuotation(quotationId, receiptRows, ledgerEntries) {
+  const id = String(quotationId || '').trim();
+  if (!id) return 0;
+  let s = sumAdvanceAppliedNgnForQuotation(ledgerEntries, id);
+  for (const r of receiptRows || []) {
+    if (String(r.quotationRef || '').trim() !== id) continue;
+    if (String(r.status || '').toLowerCase() === 'reversed') continue;
+    s += receiptCashReceivedNgn(r);
+  }
+  return s;
+}
+
+/** 70% gate: actual cash in, or book allocation, or manager override. */
+function meetsCuttingListPayThreshold(q, receiptRows, ledgerEntries) {
   if (q.manager_production_approved_at_iso || q.managerProductionApprovedAtISO) return true;
   const total = Number(q.totalNgn ?? q.total_ngn) || 0;
-  const paid = Number(q.paidNgn ?? q.paid_ngn) || 0;
   if (total <= 0) return false;
-  return paid >= total * 0.7;
+  const threshold = total * 0.7 - 1e-6;
+  const book = bookPaidTowardQuotation(q);
+  const cash = cashPaidOnQuotation(q.id, receiptRows, ledgerEntries);
+  return cash >= threshold || book >= threshold;
 }
 
 /** Resolve colour / gauge / profile from API or mock quotation objects. */
@@ -212,6 +280,11 @@ const CuttingListModal = ({
 
   const canClearProductionHold = Boolean(ws?.hasPermission?.('production.release'));
 
+  const ledgerEntries = useMemo(
+    () => (Array.isArray(ws?.snapshot?.ledgerEntries) ? ws.snapshot.ledgerEntries : []),
+    [ws]
+  );
+
   const selectableQuotations = useMemo(() => {
     const editingId = editData?.id ?? '';
     const takenByAnother = (quoteId) =>
@@ -223,8 +296,8 @@ const CuttingListModal = ({
       return total > 0;
     });
     const sorted = [...base].sort((a, b) => {
-      const aOk = meetsCuttingListPayThreshold(a) ? 0 : 1;
-      const bOk = meetsCuttingListPayThreshold(b) ? 0 : 1;
+      const aOk = meetsCuttingListPayThreshold(a, receipts, ledgerEntries) ? 0 : 1;
+      const bOk = meetsCuttingListPayThreshold(b, receipts, ledgerEntries) ? 0 : 1;
       if (aOk !== bOk) return aOk - bOk;
       return a.id.localeCompare(b.id);
     });
@@ -235,7 +308,7 @@ const CuttingListModal = ({
       }
     }
     return sorted;
-  }, [quotations, cuttingLists, editData]);
+  }, [quotations, cuttingLists, editData, receipts, ledgerEntries]);
 
   const filteredQuotePicker = useMemo(() => {
     const s = quoteSearch.trim().toLowerCase();
@@ -257,15 +330,21 @@ const CuttingListModal = ({
 
   const materialSpec = useMemo(() => materialSpecFromQuotation(selectedQuotation), [selectedQuotation]);
 
+  const draftBranchCode = useMemo(() => branchCodeForDraft(ws?.session), [ws?.session]);
+
   const draftCuttingListId = useMemo(
-    () => (editData?.id ? editData.id : nextDraftCuttingListId(cuttingLists)),
-    [editData, cuttingLists]
+    () =>
+      editData?.id ? editData.id : nextDraftCuttingListId(cuttingLists, draftBranchCode),
+    [editData, cuttingLists, draftBranchCode]
   );
 
-  const paidOnQuote = selectedQuotation ? Number(selectedQuotation.paidNgn) || 0 : 0;
+  const bookPaidOnQuote = selectedQuotation ? bookPaidTowardQuotation(selectedQuotation) : 0;
+  const cashPaidOnQuote = selectedQuotation
+    ? cashPaidOnQuotation(selectedQuotation.id, receipts, ledgerEntries)
+    : 0;
   const totalQuoteNgn = selectedQuotation ? Number(selectedQuotation.totalNgn) || 0 : 0;
-  const balanceQuote = Math.max(0, totalQuoteNgn - paidOnQuote);
-  const payPercentOnQuote = totalQuoteNgn > 0 ? Math.round((paidOnQuote / totalQuoteNgn) * 100) : 0;
+  const balanceQuote = Math.max(0, totalQuoteNgn - bookPaidOnQuote);
+  const payPercentOnQuote = totalQuoteNgn > 0 ? Math.round((bookPaidOnQuote / totalQuoteNgn) * 100) : 0;
 
   const quoteReceipts = useMemo(() => {
     if (!quotationRef) return [];
@@ -339,7 +418,7 @@ const CuttingListModal = ({
     ]
   );
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     if (!isOpen) {
       setShowPrintPreview(false);
@@ -389,7 +468,7 @@ const CuttingListModal = ({
     setSaving(false);
     if (!editData?.id) setHoldForProductionApproval(false);
   }, [editData, isOpen, quotations]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   const updateLine = useCallback((cat, id, patch) => {
     setLinesByCat((prev) => ({
@@ -440,7 +519,7 @@ const CuttingListModal = ({
       showToast('Add at least one valid line (length and quantity) in any section.', { variant: 'error' });
       return;
     }
-    if (isCreate && selectedQuotation && !meetsCuttingListPayThreshold(selectedQuotation)) {
+    if (isCreate && selectedQuotation && !meetsCuttingListPayThreshold(selectedQuotation, receipts, ledgerEntries)) {
       showToast(
         'Under 70% paid: a manager must approve production on the Manager dashboard before you can save this cutting list.',
         { variant: 'error' }
@@ -598,8 +677,8 @@ const CuttingListModal = ({
                 <div className="md:col-span-2 space-y-2 relative z-20">
                   <label className={label}>Quotation</label>
                   <p className="text-[9px] text-slate-500 leading-snug -mt-1 mb-1">
-                    Search by quotation ID, customer, or customer code, then click a row to link. If payment is under{' '}
-                    <span className="font-semibold text-slate-700">70%</span>, a manager must use{' '}
+                    Search by quotation ID, customer, or customer code, then click a row to link. If less than{' '}
+                    <span className="font-semibold text-slate-700">70%</span> of the quote is paid on the customer ledger, a manager must use{' '}
                     <span className="font-semibold text-slate-700">Manager dashboard</span> → Transaction Intel →{' '}
                     <span className="font-semibold text-slate-700">Override</span> before you can save a cutting list here.
                   </p>
@@ -652,7 +731,7 @@ const CuttingListModal = ({
                           ) : (
                             filteredQuotePicker.map((q) => {
                               const cust = q.customer ?? q.customer_name ?? '';
-                              const okPay = meetsCuttingListPayThreshold(q);
+                              const okPay = meetsCuttingListPayThreshold(q, receipts, ledgerEntries);
                               return (
                                 <button
                                   key={q.id}
@@ -679,7 +758,7 @@ const CuttingListModal = ({
                                   <div className="flex items-center justify-between gap-2 mt-0.5">
                                     <span className="text-[11px] font-semibold text-slate-800 truncate">{cust || '—'}</span>
                                     <span className="text-[10px] font-bold text-orange-700 tabular-nums shrink-0">
-                                      {formatNgn(Number(q.paidNgn ?? q.paid_ngn) || 0)} /{' '}
+                                      {formatNgn(cashPaidOnQuotation(q.id, receipts, ledgerEntries))} /{' '}
                                       {formatNgn(Number(q.totalNgn ?? q.total_ngn) || 0)}
                                     </span>
                                   </div>
@@ -723,7 +802,10 @@ const CuttingListModal = ({
                   </select>
                   <Cog size={12} className="absolute right-2 bottom-2.5 text-slate-300 pointer-events-none" />
                 </div>
-                {isCreate && quotationRef && selectedQuotation && !meetsCuttingListPayThreshold(selectedQuotation) && (
+                {isCreate &&
+                  quotationRef &&
+                  selectedQuotation &&
+                  !meetsCuttingListPayThreshold(selectedQuotation, receipts, ledgerEntries) && (
                   <div className="md:col-span-2 p-4 rounded-xl border border-amber-200 bg-amber-50 space-y-3">
                     <div className="flex items-start gap-3">
                       <AlertTriangle className="text-amber-600 shrink-0 mt-0.5" size={20} />
@@ -797,8 +879,8 @@ const CuttingListModal = ({
                     </span>
                   </div>
                   <div className="flex justify-between gap-2 font-semibold">
-                    <span className="text-slate-500">Paid</span>
-                    <span className="text-[#134e4a] tabular-nums">{formatNgn(paidOnQuote)}</span>
+                    <span className="text-slate-500">Paid (cash in)</span>
+                    <span className="text-[#134e4a] tabular-nums">{formatNgn(cashPaidOnQuote)}</span>
                   </div>
                   <div className="flex justify-between gap-2 font-semibold">
                     <span className="text-slate-500">Outstanding</span>
@@ -839,7 +921,7 @@ const CuttingListModal = ({
                         <li key={r.id} className="flex justify-between gap-2 border-b border-slate-100 pb-1 last:border-0">
                           <span className="text-slate-600">{r.date ?? r.dateISO}</span>
                           <span className="font-semibold text-[#134e4a] tabular-nums">
-                            {r.amount ?? formatNgn(r.amountNgn)}
+                            {formatNgn(receiptCashReceivedNgn(r))}
                           </span>
                         </li>
                       ))}

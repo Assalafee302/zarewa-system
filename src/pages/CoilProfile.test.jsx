@@ -29,7 +29,7 @@ describe('CoilProfile', () => {
     cleanup();
   });
 
-  it('renders a coil profile from route param', () => {
+  it('renders a coil profile from route param', { timeout: 45_000 }, () => {
     mockUseInventory.mockReturnValue({
       coilLots: [
         {

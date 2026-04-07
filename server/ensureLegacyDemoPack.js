@@ -31,7 +31,7 @@ export function ensureLegacyDemoPack(db) {
     try {
       fn();
     } catch (e) {
-      console.error(`[zarewa] Legacy demo pack — ${label} failed:`, e?.message || e);
+      console.warn(`[zarewa] Legacy demo pack — ${label} skipped:`, e?.message || e);
     }
   };
 

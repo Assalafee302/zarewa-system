@@ -25,10 +25,14 @@ export function createApp(db) {
       : corsOrigin.split(',').map((s) => s.trim()).filter(Boolean);
 
   app.disable('x-powered-by');
+  const contentSecurityPolicy =
+    process.env.ZAREWA_CSP ||
+    "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'";
   app.use((req, res, next) => {
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Content-Security-Policy', contentSecurityPolicy);
     next();
   });
   app.use(

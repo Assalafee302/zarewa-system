@@ -20,9 +20,19 @@ export function canAccessModuleWithPermissions(permissions, moduleKey) {
     case 'operations':
       return has('operations.view') || has('production.manage');
     case 'finance':
-      return has('finance.view') || has('finance.post') || has('finance.pay');
+      return (
+        has('finance.view') ||
+        has('finance.post') ||
+        has('finance.pay') ||
+        has('finance.approve') ||
+        has('finance.reverse') ||
+        has('treasury.manage')
+      );
     case 'reports':
       return has('reports.view');
+    case 'edit_approvals':
+      // Route is further restricted by role in WorkspaceContext (edit approvers only).
+      return has('dashboard.view');
     case 'settings':
       // Settings is an administrative module; audit viewers should not automatically gain access.
       return has('settings.view') || has('period.manage');

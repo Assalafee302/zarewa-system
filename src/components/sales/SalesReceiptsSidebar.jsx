@@ -10,6 +10,7 @@ import {
 import { loadLedgerEntries } from '../../lib/customerLedgerStore';
 import { loadDismissedAdvanceIds } from '../../lib/advanceEntryUiStore';
 import { formatNgn } from '../../Data/mockData';
+import { receiptCashReceivedNgn } from '../../lib/salesReceiptsList';
 
 const PANEL_CLASS =
   'flex flex-col h-full min-h-[min(520px,72vh)] rounded-xl border border-slate-200/90 bg-white shadow-sm overflow-hidden';
@@ -72,8 +73,8 @@ export function ReceiptsTransactionsPanel({
     rows.sort((a, b) => {
       if (sort === 'dateAsc') return String(a.dateISO || '').localeCompare(String(b.dateISO || ''));
       if (sort === 'dateDesc') return String(b.dateISO || '').localeCompare(String(a.dateISO || ''));
-      if (sort === 'amountDesc') return (b.amountNgn || 0) - (a.amountNgn || 0);
-      if (sort === 'amountAsc') return (a.amountNgn || 0) - (b.amountNgn || 0);
+      if (sort === 'amountDesc') return receiptCashReceivedNgn(b) - receiptCashReceivedNgn(a);
+      if (sort === 'amountAsc') return receiptCashReceivedNgn(a) - receiptCashReceivedNgn(b);
       if (sort === 'customer') return String(a.customer).localeCompare(String(b.customer));
       return 0;
     });
@@ -205,7 +206,9 @@ export function ReceiptsAdvancesPanel({
           advanceRows.map((e) => (
             <li
               key={e.id}
-              className="flex items-center justify-between gap-2 rounded-lg border border-amber-100 bg-white/90 px-2.5 py-2"
+              className={`flex items-center justify-between gap-2 rounded-lg border border-amber-100 bg-white/90 px-2.5 py-2${
+                menuKey === e.id ? ' relative z-50' : ''
+              }`}
             >
               <div className="min-w-0">
                 <p className="text-[10px] font-black text-[#134e4a] tabular-nums">{formatNgn(e.amountNgn)}</p>

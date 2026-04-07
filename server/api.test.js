@@ -3,7 +3,7 @@ import request from 'supertest';
 import { createDatabase } from './db.js';
 import { createApp } from './app.js';
 
-describe('Zarewa API', () => {
+describe.sequential('Zarewa API', () => {
   let app;
   let agent;
   let db;
@@ -47,6 +47,19 @@ describe('Zarewa API', () => {
     expect(res.body.ok).toBe(true);
   });
 
+  it('GET /api/ai/status reports disabled when no AI key is set', async () => {
+    const res = await agent.get('/api/ai/status');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.enabled).toBe(false);
+  });
+
+  it('POST /api/ai/chat returns 503 when AI is not configured', async () => {
+    const res = await agent.post('/api/ai/chat').send({ messages: [{ role: 'user', content: 'Hi' }] });
+    expect(res.status).toBe(503);
+    expect(res.body.ok).toBe(false);
+  });
+
   it('GET /api/bootstrap requires authentication', async () => {
     const res = await request(app).get('/api/bootstrap');
     expect(res.status).toBe(401);
@@ -82,6 +95,7 @@ describe('Zarewa API', () => {
     expect(res.body.masterData.quoteItems.length).toBeGreaterThan(0);
     expect(res.body.dashboardPrefs).toBeDefined();
     expect(typeof res.body.dashboardPrefs).toBe('object');
+    expect(res.body).toHaveProperty('orgManagerTargets');
     expect(Array.isArray(res.body.workspaceDepartmentIds)).toBe(true);
     expect(res.body.workspaceDepartmentIds).toContain('sales');
     expect(res.body.suggestedRoleByDepartment?.sales).toBe('sales_staff');
@@ -125,10 +139,34 @@ describe('Zarewa API', () => {
     expect(patch.status).toBe(200);
     expect(patch.body.ok).toBe(true);
     expect(patch.body.dashboardPrefs.showCharts).toBe(false);
+    expect(patch.body.dashboardPrefs.managerTargets).toBeDefined();
+    expect(typeof patch.body.dashboardPrefs.managerTargets.nairaTargetPerMonth).toBe('number');
+    expect(typeof patch.body.dashboardPrefs.managerTargets.meterTargetPerMonth).toBe('number');
     const boot = await signedAgent.get('/api/bootstrap');
     expect(boot.status).toBe(200);
     expect(boot.body.dashboardPrefs.showCharts).toBe(false);
     expect(boot.body.dashboardPrefs.showAlertBanner).toBe(false);
+    expect(boot.body.dashboardPrefs.managerTargets?.nairaTargetPerMonth).toBeGreaterThan(0);
+  });
+
+  it('PATCH /api/setup/org-manager-targets persists and returns on bootstrap', async () => {
+    const signedAgent = request.agent(app);
+    await loginAs(signedAgent);
+    const patch = await signedAgent.patch('/api/setup/org-manager-targets').send({
+      nairaTargetPerMonth: 60_000_000,
+      meterTargetPerMonth: 300_000,
+    });
+    expect(patch.status).toBe(200);
+    expect(patch.body.ok).toBe(true);
+    expect(patch.body.orgManagerTargets.nairaTargetPerMonth).toBe(60_000_000);
+    expect(patch.body.orgManagerTargets.meterTargetPerMonth).toBe(300_000);
+    const boot = await signedAgent.get('/api/bootstrap');
+    expect(boot.status).toBe(200);
+    expect(boot.body.orgManagerTargets?.nairaTargetPerMonth).toBe(60_000_000);
+    expect(boot.body.orgManagerTargets?.meterTargetPerMonth).toBe(300_000);
+    const clear = await signedAgent.patch('/api/setup/org-manager-targets').send({ clear: true });
+    expect(clear.status).toBe(200);
+    expect(clear.body.orgManagerTargets).toBeNull();
   });
 
   it('PATCH /api/session/profile updates display name and returns on bootstrap', async () => {
@@ -275,6 +313,8 @@ describe('Zarewa API', () => {
     const patch = await agent.patch('/api/bank-reconciliation/BR-003').send({
       status: 'Matched',
       systemMatch: 'RC-2026-014',
+      // Statement line (312_500) differs from receipt (400_000); book settled amount to receipt to avoid variance workflow in this test.
+      settledAmountNgn: 400_000,
     });
     expect(patch.status).toBe(200);
     const after = await agent.get('/api/bootstrap');
@@ -292,6 +332,24 @@ describe('Zarewa API', () => {
     expect(bad.body.ok).toBe(false);
   });
 
+  it('PATCH /api/bank-reconciliation/:lineId resolves receipt when system match uses unicode dash', async () => {
+    const created = await agent.post('/api/bank-reconciliation').send({
+      bankDateISO: '2026-04-01',
+      description: 'Unicode dash match test',
+      amountNgn: 400_000,
+    });
+    expect(created.status).toBe(201);
+    const lineId = created.body.id;
+    const patch = await agent.patch(`/api/bank-reconciliation/${lineId}`).send({
+      status: 'Matched',
+      systemMatch: 'RC\u20132026-014',
+      settledAmountNgn: 400_000,
+    });
+    expect(patch.status).toBe(200);
+    expect(patch.body.ok).toBe(true);
+    expect(patch.body.status).toBe('Matched');
+  });
+
   it('POST /api/bank-reconciliation creates a statement line in Review', async () => {
     const created = await agent.post('/api/bank-reconciliation').send({
       bankDateISO: '2026-04-01',
@@ -300,12 +358,79 @@ describe('Zarewa API', () => {
     });
     expect(created.status).toBe(201);
     expect(created.body.ok).toBe(true);
-    expect(created.body.id).toMatch(/^BR-/);
+    expect(created.body.id).toMatch(/^BKR-/);
     const boot = await agent.get('/api/bootstrap');
     const row = boot.body.bankReconciliation.find((l) => l.id === created.body.id);
     expect(row?.description).toBe('API test bank line');
     expect(row?.amountNgn).toBe(-5000);
     expect(row?.status).toBe('Review');
+  });
+
+  it('GET /api/bank-reconciliation lists lines for finance roles', async () => {
+    const res = await agent.get('/api/bank-reconciliation');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(Array.isArray(res.body.lines)).toBe(true);
+  });
+
+  it('POST /api/bank-reconciliation/import creates multiple review lines', async () => {
+    const res = await agent.post('/api/bank-reconciliation/import').send({
+      lines: [
+        { bankDateISO: '2026-04-01', description: 'Bulk A', amountNgn: 1000 },
+        { bankDateISO: '2026-04-02', description: 'Bulk B', amountNgn: -2000 },
+      ],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.createdCount).toBe(2);
+    expect(res.body.errorCount).toBe(0);
+  });
+
+  it('POST /api/bank-reconciliation/import-csv creates lines from text', async () => {
+    const csv = `bankDateISO,description,amountNgn
+2026-04-10,"Bank fee April",-1500
+2026-04-11,Inflow customer A,250000`;
+    const res = await agent.post('/api/bank-reconciliation/import-csv').send({ csvText: csv });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.createdCount).toBe(2);
+  });
+
+  it('GET /api/exec/summary returns queue KPIs for CEO', async () => {
+    const ceoAgent = request.agent(app);
+    await loginAs(ceoAgent, 'ceo', 'Ceo@1234567890!');
+    const res = await ceoAgent.get('/api/exec/summary');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(typeof res.body.payrollDraftsAwaitingMd).toBe('number');
+    expect(typeof res.body.bankReconciliationLinesInReview).toBe('number');
+  });
+
+  it('GET /api/advance-deposits requires sign-in and ledger-related permission', async () => {
+    const anon = await request(app).get('/api/advance-deposits');
+    expect(anon.status).toBe(401);
+    const viewerAgent = request.agent(app);
+    await loginAs(viewerAgent, 'viewer', 'Viewer@123456!');
+    const v = await viewerAgent.get('/api/advance-deposits');
+    expect(v.status).toBe(403);
+  });
+
+  it('POST /api/ledger/advance returns same entry when Idempotency-Key repeats', async () => {
+    const idemKey = `idem-adv-${Date.now()}`;
+    const body = {
+      customerID: 'CUS-001',
+      amountNgn: 3_000,
+      paymentMethod: 'Cash',
+      dateISO: '2026-03-28',
+    };
+    const r1 = await agent.post('/api/ledger/advance').set('Idempotency-Key', idemKey).send(body);
+    expect(r1.status).toBe(201);
+    expect(r1.body.entry?.id).toBeTruthy();
+    const r2 = await agent.post('/api/ledger/advance').set('Idempotency-Key', idemKey).send(body);
+    expect(r2.status).toBe(201);
+    expect(r2.body.entry.id).toBe(r1.body.entry.id);
+    const row = db.prepare(`SELECT COUNT(*) AS c FROM ledger_entries WHERE id = ?`).get(r1.body.entry.id);
+    expect(row.c).toBe(1);
   });
 
   it('POST /api/ledger/advance then summary shows advance', async () => {
@@ -579,6 +704,60 @@ describe('Zarewa API', () => {
     expect(p.supplierName).toBe('Temp Co Renamed');
   });
 
+  it('PATCH /api/purchase-orders/:poId revises draft coil PO header and lines', async () => {
+    const create = await agent.post('/api/suppliers').send({ name: 'PO Patch Supplier', city: 'Lagos' });
+    const sid = create.body.supplierID;
+    const po = await agent.post('/api/purchase-orders').send({
+      supplierID: sid,
+      supplierName: 'PO Patch Supplier',
+      orderDateISO: '2026-04-01',
+      expectedDeliveryISO: '',
+      status: 'Pending',
+      lines: [
+        {
+          lineKey: 'L1',
+          productID: 'COIL-ALU',
+          productName: 'Aluminium coil',
+          color: 'HM Blue',
+          gauge: '0.40mm',
+          qtyOrdered: 5,
+          unitPricePerKgNgn: 200,
+          unitPriceNgn: 200,
+          qtyReceived: 0,
+        },
+      ],
+    });
+    expect(po.status).toBe(201);
+    const poId = po.body.poID;
+    const patch = await agent.patch(`/api/purchase-orders/${encodeURIComponent(poId)}`).send({
+      supplierID: sid,
+      supplierName: 'PO Patch Supplier',
+      orderDateISO: '2026-04-02',
+      expectedDeliveryISO: '2026-04-15',
+      lines: [
+        {
+          lineKey: 'L1',
+          productID: 'COIL-ALU',
+          productName: 'Aluminium coil',
+          color: 'Traffic Black',
+          gauge: '0.55mm',
+          qtyOrdered: 8,
+          unitPricePerKgNgn: 210,
+          unitPriceNgn: 210,
+        },
+      ],
+    });
+    expect(patch.status).toBe(200);
+    expect(patch.body.ok).toBe(true);
+    const boot = await agent.get('/api/bootstrap');
+    const row = boot.body.purchaseOrders.find((x) => x.poID === poId);
+    expect(row.orderDateISO).toBe('2026-04-02');
+    expect(row.expectedDeliveryISO).toBe('2026-04-15');
+    expect(row.lines.length).toBe(1);
+    expect(row.lines[0].color).toBe('Traffic Black');
+    expect(row.lines[0].qtyOrdered).toBe(8);
+  });
+
   it('DELETE /api/suppliers/:id fails when POs exist', async () => {
     const boot = await agent.get('/api/bootstrap');
     const sid = boot.body.purchaseOrders[0]?.supplierID;
@@ -789,6 +968,42 @@ describe('Zarewa API', () => {
     expect(fgAfterSecond).toBe(fgAfter);
   });
 
+  it('POST /api/deliveries uses production job product when cutting list header product_id is blank', async () => {
+    const createCl = await agent.post('/api/cutting-lists').send({
+      quotationRef: 'QT-2026-002',
+      customerID: 'CUS-002',
+      productID: 'FG-101',
+      productName: 'Longspan thin',
+      dateISO: '2026-03-29',
+      lines: [{ sheets: 2, lengthM: 10 }],
+    });
+    expect(createCl.status).toBe(201);
+    const clId = createCl.body.id;
+    const job = await agent.post('/api/production-jobs').send({
+      cuttingListId: clId,
+      productID: 'FG-101',
+      productName: 'Longspan thin',
+      plannedMeters: 20,
+      plannedSheets: 2,
+      status: 'Planned',
+    });
+    expect(job.status).toBe(201);
+    db.prepare(`UPDATE cutting_lists SET product_id = NULL, product_name = NULL WHERE id = ?`).run(clId);
+
+    const delivery = await agent.post('/api/deliveries').send({
+      cuttingListId: clId,
+      destination: 'Site B',
+      method: 'Company truck',
+      shipDate: '2026-03-29',
+      eta: '2026-03-30',
+    });
+    expect(delivery.status).toBe(201);
+    const boot = await agent.get('/api/bootstrap');
+    const d = boot.body.deliveries.find((x) => x.id === delivery.body.id);
+    expect(d?.lines?.length).toBeGreaterThan(0);
+    expect(d.lines[0].productID).toBe('FG-101');
+  });
+
   it('POST /api/expenses and /api/treasury/transfer post treasury movements', async () => {
     const before = await agent.get('/api/bootstrap');
     const [from, to] = before.body.treasuryAccounts.slice(0, 2);
@@ -944,6 +1159,59 @@ describe('Zarewa API', () => {
     expect(refund.paidBy).toBe('Finance Manager');
   });
 
+  it('refund payout posts REFUND_ADVANCE when customer has advance credit', async () => {
+    const adv = await agent.post('/api/ledger/advance').send({
+      customerID: 'CUS-001',
+      amountNgn: 500_000,
+      dateISO: '2026-03-27',
+      purpose: 'Test advance before refund payout',
+    });
+    expect(adv.status).toBe(201);
+    expect(adv.body.ok).toBe(true);
+
+    const financeAgent = request.agent(app);
+    await loginAs(financeAgent, 'finance.manager', 'Finance@123');
+
+    const salesStaff = request.agent(app);
+    await loginAs(salesStaff, 'sales.staff', 'Sales@123');
+    const createRefund = await salesStaff.post('/api/refunds').send({
+      customerID: 'CUS-001',
+      customer: 'Alhaji Musa & Sons',
+      quotationRef: 'QT-2026-001',
+      reasonCategory: 'Overpayment',
+      reason: 'Partial return of credit',
+      amountNgn: 80_000,
+      calculationLines: [{ label: 'Credit return', amountNgn: 80_000 }],
+    });
+    expect(createRefund.status).toBe(201);
+
+    const managerAgent = request.agent(app);
+    await loginAs(managerAgent, 'sales.manager', 'Sales@123');
+    const approve = await managerAgent
+      .post(`/api/refunds/${encodeURIComponent(createRefund.body.refundID)}/decision`)
+      .send({
+        status: 'Approved',
+        approvalDate: '2026-03-29',
+        managerComments: 'OK',
+      });
+    expect(approve.status).toBe(200);
+
+    const pay = await financeAgent
+      .post(`/api/refunds/${encodeURIComponent(createRefund.body.refundID)}/pay`)
+      .send({ treasuryAccountId: 1, reference: 'RF-ADV-LEDGER' });
+    expect(pay.status).toBe(201);
+
+    const boot = await financeAgent.get('/api/bootstrap');
+    const refundAdvanceLines = boot.body.ledgerEntries.filter(
+      (e) =>
+        e.customerID === 'CUS-001' &&
+        e.type === 'REFUND_ADVANCE' &&
+        String(e.bankReference || '') === createRefund.body.refundID
+    );
+    expect(refundAdvanceLines.length).toBeGreaterThanOrEqual(1);
+    expect(refundAdvanceLines[0].amountNgn).toBe(80_000);
+  });
+
   it('period locks block backdated finance postings until unlocked', async () => {
     const lock = await agent.post('/api/controls/period-locks').send({
       periodKey: '2026-03',
@@ -962,6 +1230,17 @@ describe('Zarewa API', () => {
     });
     expect(blockedExpense.status).toBe(400);
     expect(blockedExpense.body.error).toMatch(/locked period/i);
+
+    const blockedGl = await agent.post('/api/gl/journal').send({
+      entryDateISO: '2026-03-10',
+      memo: 'Locked period test',
+      lines: [
+        { accountCode: '1000', debitNgn: 1_000 },
+        { accountCode: '1200', creditNgn: 1_000 },
+      ],
+    });
+    expect(blockedGl.status).toBe(400);
+    expect(blockedGl.body.error).toMatch(/locked period/i);
 
     const unlock = await agent.delete('/api/controls/period-locks/2026-03').send({
       reason: 'Re-open for correction',
@@ -1623,6 +1902,110 @@ describe('Zarewa API', () => {
     expect(denied.status).toBe(403);
   });
 
+  it('POST return-to-planned (running→planned) and FG completion-adjustments (audit + stock)', async () => {
+    const sup = await agent.post('/api/suppliers').send({ name: 'Adj Supplier', city: 'Kano' });
+    expect(sup.status).toBe(201);
+    const po = await agent.post('/api/purchase-orders').send({
+      supplierID: sup.body.supplierID,
+      supplierName: 'Adj Supplier',
+      orderDateISO: '2026-03-30',
+      expectedDeliveryISO: '',
+      status: 'Approved',
+      lines: [
+        {
+          lineKey: 'L-ADJ',
+          productID: 'COIL-ALU',
+          productName: 'Aluminium coil (kg)',
+          color: 'IV',
+          gauge: '0.24',
+          metersOffered: 2650,
+          conversionKgPerM: 6000 / 2650,
+          qtyOrdered: 6000,
+          unitPricePerKgNgn: 100,
+          unitPriceNgn: 100,
+          qtyReceived: 0,
+        },
+      ],
+    });
+    expect(po.status).toBe(201);
+    await agent.post(`/api/purchase-orders/${encodeURIComponent(po.body.poID)}/grn`).send({
+      entries: [
+        {
+          lineKey: 'L-ADJ',
+          productID: 'COIL-ALU',
+          qtyReceived: 6000,
+          weightKg: 6000,
+          coilNo: 'CL-API-ADJ',
+          location: 'Bay',
+          gaugeLabel: '0.24mm',
+          materialTypeName: 'Aluminium',
+          supplierExpectedMeters: 2650,
+          supplierConversionKgPerM: 6000 / 2650,
+        },
+      ],
+      supplierID: sup.body.supplierID,
+      supplierName: 'Adj Supplier',
+    });
+    const cutting = await agent.post('/api/cutting-lists').send({
+      quotationRef: 'QT-2026-001',
+      customerID: 'CUS-001',
+      productID: 'FG-101',
+      productName: 'Longspan thin',
+      dateISO: '2026-03-30',
+      machineName: 'M1',
+      operatorName: 'QA',
+      lines: [{ sheets: 1, lengthM: 10 }],
+    });
+    const job = await agent.post('/api/production-jobs').send({
+      cuttingListId: cutting.body.id,
+      productID: 'FG-101',
+      productName: 'Longspan thin',
+      plannedMeters: 10,
+      plannedSheets: 1,
+      status: 'Planned',
+    });
+    const jobId = job.body.jobID;
+    await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/allocations`).send({
+      allocations: [{ coilNo: 'CL-API-ADJ', openingWeightKg: 4000 }],
+    });
+    await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/start`).send({ startedAtISO: '2026-03-30' });
+    const bad = await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/return-to-planned`).send({
+      reason: 'short',
+    });
+    expect(bad.status).toBe(400);
+    const back = await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/return-to-planned`).send({
+      reason: 'Wrong coil picked — return to swap allocation before run.',
+    });
+    expect(back.status).toBe(200);
+    expect(back.body.ok).toBe(true);
+    const bootMid = await agent.get('/api/bootstrap');
+    const pj = bootMid.body.productionJobs.find((j) => j.jobID === jobId);
+    expect(pj.status).toBe('Planned');
+
+    await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/start`).send({ startedAtISO: '2026-03-30' });
+    const done = await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/complete`).send({
+      completedAtISO: '2026-03-30',
+      allocations: [{ coilNo: 'CL-API-ADJ', closingWeightKg: 0, metersProduced: 10 }],
+    });
+    expect(done.status).toBe(200);
+    const fgBefore = await agent.get('/api/bootstrap');
+    const fgProdBefore = fgBefore.body.products.find((p) => p.productID === 'FG-101');
+    const stockBefore = Number(fgProdBefore?.stockLevel ?? 0);
+    const adj = await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/completion-adjustments`).send({
+      deltaFinishedGoodsM: -1.25,
+      note: 'Physical recount short — roll end scrap not entered at completion.',
+    });
+    expect(adj.status).toBe(200);
+    expect(adj.body.ok).toBe(true);
+    const fgAfter = await agent.get('/api/bootstrap');
+    const pj2 = fgAfter.body.productionJobs.find((j) => j.jobID === jobId);
+    expect(pj2.fgAdjustmentMetersTotal).toBeCloseTo(-1.25, 5);
+    expect(pj2.effectiveOutputMeters).toBeCloseTo(8.75, 5);
+    const fgProdAfter = fgAfter.body.products.find((p) => p.productID === 'FG-101');
+    const stockAfter = Number(fgProdAfter?.stockLevel ?? 0);
+    expect(stockAfter).toBeCloseTo(stockBefore - 1.25, 5);
+  });
+
   it('GET /api/refunds/eligible-quotations, intelligence — permissions and response shape', async () => {
     const salesStaff = request.agent(app);
     await loginAs(salesStaff, 'sales.staff', 'Sales@123');
@@ -1643,11 +2026,46 @@ describe('Zarewa API', () => {
     expect(intel.body.summary).toBeDefined();
     expect(typeof intel.body.summary.producedMeters).toBe('number');
     expect(Array.isArray(intel.body.summary.accessoriesSummary?.lines)).toBe(true);
+    expect(typeof intel.body.summary.overpayAdvanceNgn).toBe('number');
+    expect(typeof intel.body.summary.bookedOnQuotationNgn).toBe('number');
+    expect(typeof intel.body.summary.quotationCashInNgn).toBe('number');
 
     const viewer = request.agent(app);
     await loginAs(viewer, 'viewer', 'Viewer@123456!');
     const denied = await viewer.get('/api/refunds/eligible-quotations');
     expect(denied.status).toBe(403);
+  });
+
+  it('GET /api/reports/production-transaction returns row array', async () => {
+    const admin = request.agent(app);
+    await loginAs(admin);
+    const res = await admin.get(
+      '/api/reports/production-transaction?startDate=2026-01-01&endDate=2026-12-31'
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(Array.isArray(res.body.rows)).toBe(true);
+  });
+
+  it('POST /api/coil-lots/import upserts spreadsheet rows', async () => {
+    const admin = request.agent(app);
+    await loginAs(admin);
+    const coilNo = `API-XLS-${Date.now()}`;
+    const res = await admin.post('/api/coil-lots/import').send({
+      insertOnly: true,
+      rows: [
+        {
+          coilNo,
+          productID: 'COIL-ALU',
+          currentKg: 100,
+          colour: 'White',
+          gaugeLabel: '0.45',
+        },
+      ],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.imported).toBe(1);
   });
 
   it('POST /api/refunds/preview returns suggested lines from inputs', async () => {
@@ -1800,6 +2218,12 @@ describe('Zarewa API', () => {
     expect(Array.isArray(rec.body.lines)).toBe(true);
     expect(rec.body.lines.length).toBeGreaterThan(0);
 
+    const md = request.agent(app);
+    await loginAs(md, 'md', 'Md@1234567890!');
+    const mdOk = await md.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/md-approve`).send({});
+    expect(mdOk.status).toBe(200);
+    expect(mdOk.body.ok).toBe(true);
+
     const lock = await fin.patch(`/api/hr/payroll-runs/${encodeURIComponent(runId)}`).send({ status: 'locked' });
     expect(lock.status).toBe(200);
     expect(lock.body.ok).toBe(true);
@@ -1822,10 +2246,27 @@ describe('Zarewa API', () => {
     const adminAgent = request.agent(app);
     await loginAs(adminAgent);
 
+    const reqPolicies = await adminAgent.get('/api/hr/policy-requirements');
+    expect(reqPolicies.status).toBe(200);
+    for (const p of reqPolicies.body.missing || []) {
+      const ack = await adminAgent.post('/api/hr/policy-acknowledgements').send({
+        policyKey: p.key,
+        policyVersion: p.version,
+        signatureName: 'Admin User',
+        context: { channel: 'api.test.loan' },
+      });
+      expect(ack.status).toBe(201);
+    }
+
     const staffList = await adminAgent.get('/api/hr/staff');
     expect(staffList.status).toBe(200);
     const staffUser = staffList.body.staff.find((s) => s.username === 'sales.staff');
     expect(staffUser?.userId).toBeTruthy();
+
+    const tenure = await adminAgent.patch(`/api/hr/staff/${encodeURIComponent(staffUser.userId)}`).send({
+      dateJoinedIso: '2018-01-15',
+    });
+    expect(tenure.status).toBe(200);
 
     const staffAgent = request.agent(app);
     await loginAs(staffAgent, 'sales.staff', 'Sales@123');
@@ -1855,12 +2296,19 @@ describe('Zarewa API', () => {
     });
     expect(hrRev.status).toBe(200);
 
-    const mgrRev = await adminAgent.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/manager-review`).send({
+    const bmRev = await adminAgent.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/branch-endorse`).send({
       approve: true,
       note: 'ok note',
       reasonCode: 'policy',
     });
-    expect(mgrRev.status).toBe(200);
+    expect(bmRev.status).toBe(200);
+
+    const gmRev = await adminAgent.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/gm-hr-review`).send({
+      approve: true,
+      note: 'ok note',
+      reasonCode: 'policy',
+    });
+    expect(gmRev.status).toBe(200);
 
     const finAgent = request.agent(app);
     await loginAs(finAgent, 'finance.manager', 'Finance@123');
@@ -1980,7 +2428,7 @@ describe('Zarewa API', () => {
       password: 'Staff@123456',
       roleKey: 'viewer',
       workspaceDepartment: 'hr',
-      branchId: 'BR-KAD',
+      branchId: 'BR-KD',
       employeeNo: `EMP-EXC-${Date.now()}`,
       jobTitle: 'Tester',
       department: 'Operations',
@@ -1993,7 +2441,7 @@ describe('Zarewa API', () => {
 
     // Mark a late day in March 2026.
     const roll = await adminAgent.post('/api/hr/daily-roll').send({
-      branchId: 'BR-KAD',
+      branchId: 'BR-KD',
       dayIso: '2026-03-03',
       rows: [{ userId: staffUserId, status: 'late' }],
       notes: 'Late day',
@@ -2034,12 +2482,18 @@ describe('Zarewa API', () => {
       reasonCode: 'policy',
     });
     expect(hrRev.status).toBe(200);
-    const mgr = await hr.patch(`/api/hr/requests/${encodeURIComponent(reqId)}/manager-review`).send({
+    const bm = await hr.patch(`/api/hr/requests/${encodeURIComponent(reqId)}/branch-endorse`).send({
       approve: true,
       note: 'ok note',
       reasonCode: 'policy',
     });
-    expect(mgr.status).toBe(200);
+    expect(bm.status).toBe(200);
+    const gm = await hr.patch(`/api/hr/requests/${encodeURIComponent(reqId)}/gm-hr-review`).send({
+      approve: true,
+      note: 'ok note',
+      reasonCode: 'policy',
+    });
+    expect(gm.status).toBe(200);
 
     // Recompute should waive the late-day deduction.
     const rec2 = await adminAgent.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/recompute`).send({});
@@ -2150,5 +2604,111 @@ describe('Zarewa API', () => {
       expect(lines.body.ok).toBe(true);
       expect(Array.isArray(lines.body.lines)).toBe(true);
     }
+  });
+
+  it('GET /api/accounting/costing-snapshot, fixed-assets CRUD, standard-costs PUT', async () => {
+    const signedAgent = request.agent(app);
+    await loginAs(signedAgent);
+    const snap = await signedAgent.get('/api/accounting/costing-snapshot');
+    expect(snap.status).toBe(200);
+    expect(snap.body.ok).toBe(true);
+    expect(Array.isArray(snap.body.rows)).toBe(true);
+
+    const create = await signedAgent.post('/api/accounting/fixed-assets').send({
+      name: 'API test asset',
+      category: 'it',
+      branchId: 'BR-KD',
+      acquisitionDateIso: '2025-06-01',
+      costNgn: 500_000,
+      salvageNgn: 0,
+      usefulLifeMonths: 60,
+    });
+    expect(create.status).toBe(201);
+    expect(create.body.ok).toBe(true);
+    const id = create.body.asset.id;
+
+    const list = await signedAgent.get('/api/accounting/fixed-assets');
+    expect(list.status).toBe(200);
+    expect(list.body.assets.some((a) => a.id === id)).toBe(true);
+
+    const patch = await signedAgent.patch(`/api/accounting/fixed-assets/${encodeURIComponent(id)}`).send({
+      notes: 'Updated via API test',
+    });
+    expect(patch.status).toBe(200);
+    expect(patch.body.ok).toBe(true);
+
+    const productId = snap.body.rows[0]?.productId;
+    expect(productId).toBeTruthy();
+    const put = await signedAgent.put(`/api/accounting/standard-costs/${encodeURIComponent(productId)}`).send({
+      standardMaterialCostNgnPerKg: 1250,
+      effectiveFromIso: '2025-01-01',
+    });
+    expect(put.status).toBe(200);
+    expect(put.body.ok).toBe(true);
+
+    const stm = await signedAgent.get('/api/accounting/statements-pack?periodKey=2026-01');
+    expect(stm.status).toBe(200);
+    expect(stm.body.ok).toBe(true);
+    expect(stm.body.profitAndLoss).toBeTruthy();
+    expect(stm.body.balanceSheet).toBeTruthy();
+
+    const depPrev = await signedAgent.get('/api/accounting/depreciation-preview?periodKey=2026-01');
+    expect(depPrev.status).toBe(200);
+    expect(depPrev.body.ok).toBe(true);
+    expect(Array.isArray(depPrev.body.rows)).toBe(true);
+
+    const recon = await signedAgent.get('/api/accounting/reconciliation-pack?periodKey=2026-01');
+    expect(recon.status).toBe(200);
+    expect(recon.body.ok).toBe(true);
+    expect(recon.body).toHaveProperty('salesReceiptsPostedNgn');
+
+    const cf = await signedAgent.get('/api/accounting/cash-flow?periodKey=2026-01');
+    expect(cf.status).toBe(200);
+    expect(cf.body.ok).toBe(true);
+    expect(Array.isArray(cf.body.rows)).toBe(true);
+  });
+
+  it('POST /api/inventory/stone-receipt, accessory-receipt, ensure-stone-product; GET /api/pricing/resolve', async () => {
+    const stone = await agent.post('/api/inventory/stone-receipt').send({
+      designLabel: 'Milano',
+      colourLabel: 'Black',
+      gaugeLabel: '0.40mm',
+      metresReceived: 12,
+    });
+    expect(stone.status).toBe(200);
+    expect(stone.body.ok).toBe(true);
+    expect(String(stone.body.productId || '')).toMatch(/^STONE-/);
+
+    const acc = await agent.post('/api/inventory/accessory-receipt').send({
+      productID: 'ACC-TAPPING-SCREW-PCS',
+      qtyReceived: 100,
+    });
+    expect(acc.status).toBe(200);
+    expect(acc.body.ok).toBe(true);
+
+    const pr = await agent.get('/api/pricing/resolve').query({
+      quoteItemId: 'SQI-001',
+      gaugeId: 'GAU-003',
+      colourId: 'COL-001',
+      materialTypeId: 'MAT-001',
+      profileId: 'PROF-001',
+    });
+    expect(pr.status).toBe(200);
+    expect(pr.body.ok).toBe(true);
+    expect(Number(pr.body.result?.unitPriceNgn || 0)).toBeGreaterThan(0);
+
+    const ens = await agent.post('/api/inventory/ensure-stone-product').send({
+      designLabel: 'Bond',
+      colourLabel: 'Red',
+      gaugeLabel: '0.45mm',
+    });
+    expect(ens.status).toBe(200);
+    expect(ens.body.ok).toBe(true);
+    expect(String(ens.body.productId || '')).toMatch(/^STONE-/);
+
+    const csvExport = await agent.get('/api/pricing/price-list/export.csv');
+    expect(csvExport.status).toBe(200);
+    expect(String(csvExport.headers['content-type'] || '')).toMatch(/csv/i);
+    expect(csvExport.text).toMatch(/gauge_key/);
   });
 });

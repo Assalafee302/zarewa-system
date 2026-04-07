@@ -23,6 +23,7 @@ import { seedAuthUsers } from './auth.js';
 import { seedMasterData } from './masterData.js';
 import { seedProductionLineDemo } from './seedProductionLineDemo.js';
 import { seedHrIfEmpty } from './hrOps.js';
+import { isEmptySeedMode, seedEmptyClientMinimal } from './emptySeed.js';
 
 /**
  * Idempotent seed: fills empty tables. Safe on existing DBs after migrations.
@@ -31,6 +32,12 @@ import { seedHrIfEmpty } from './hrOps.js';
 export function seedEverything(db) {
   seedAuthUsers(db);
   seedMasterData(db);
+
+  if (isEmptySeedMode()) {
+    seedEmptyClientMinimal(db);
+    seedHrIfEmpty(db);
+    return;
+  }
 
   const custCount = db.prepare('SELECT COUNT(*) AS c FROM customers').get().c;
   if (custCount === 0) {
@@ -381,18 +388,21 @@ export function seedEverything(db) {
 
   const crmCount = db.prepare(`SELECT COUNT(*) AS c FROM customer_crm_interactions`).get().c;
   if (crmCount === 0) {
-    db.prepare(
-      `INSERT INTO customer_crm_interactions (id, customer_id, at_iso, kind, title, detail, created_by_name, branch_id) VALUES (?,?,?,?,?,?,?,?)`
-    ).run(
-      'CRM-DEMO-1',
-      'CUS-001',
-      '2026-03-28T09:30:00.000Z',
-      'call',
-      'Gauge follow-up',
-      'Confirmed interest in 0.45 HMB for April delivery window.',
-      'Auwal Idris',
-      DEFAULT_BRANCH_ID
-    );
+    const demoCustomer = db.prepare(`SELECT 1 FROM customers WHERE customer_id = ?`).get('CUS-001');
+    if (demoCustomer) {
+      db.prepare(
+        `INSERT INTO customer_crm_interactions (id, customer_id, at_iso, kind, title, detail, created_by_name, branch_id) VALUES (?,?,?,?,?,?,?,?)`
+      ).run(
+        'CRM-DEMO-1',
+        'CUS-001',
+        '2026-03-28T09:30:00.000Z',
+        'call',
+        'Gauge follow-up',
+        'Confirmed interest in 0.45 HMB for April delivery window.',
+        'Auwal Idris',
+        DEFAULT_BRANCH_ID
+      );
+    }
   }
 
   seedProductionLineDemo(db);

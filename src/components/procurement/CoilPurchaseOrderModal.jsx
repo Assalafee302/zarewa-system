@@ -5,8 +5,9 @@ import { ProcurementFormSection } from './ProcurementFormSection';
 
 const inputClass =
   'w-full bg-white border border-slate-200 rounded-lg py-2 px-3 text-xs font-semibold text-[#134e4a] outline-none focus:ring-2 focus:ring-[#134e4a]/15';
-const inputClassLg =
-  'w-full bg-white border border-slate-200 rounded-lg py-2.5 px-3 min-h-[2.75rem] text-sm font-semibold text-[#134e4a] outline-none focus:ring-2 focus:ring-[#134e4a]/15';
+/** Taller / roomier controls for coil line rows so values and option text stay readable. */
+const lineFieldClass =
+  'w-full bg-white border border-slate-200 rounded-lg py-3 px-3.5 min-h-[3.25rem] text-sm font-semibold text-[#134e4a] outline-none focus:ring-2 focus:ring-[#134e4a]/15';
 const labelClass =
   'text-[9px] font-semibold text-slate-400 uppercase tracking-wide ml-0.5 mb-1 block';
 
@@ -31,7 +32,13 @@ const FALLBACK_COLOURS = [
   { name: 'Zinc Grey', abbreviation: 'ZG' },
 ];
 
+function newRowUid() {
+  return `row-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
 const emptyLine = () => ({
+  rowUid: newRowUid(),
+  existingLineKey: '',
   materialKind: '',
   color: '',
   gauge: '',
@@ -46,8 +53,16 @@ const emptyLine = () => ({
  *   onClose: () => void;
  *   suppliers: { supplierID: string; name: string }[];
  *   masterData?: object;
+ *   editDraft?: null | {
+ *     poID: string;
+ *     supplierID: string;
+ *     orderDateISO: string;
+ *     expectedDeliveryISO: string;
+ *     lines: { lineKey: string; materialKind: string; color: string; gauge: string; kg: number | string; meters?: number | string | null; pricePerKg: number | string }[];
+ *   };
  *   onSubmit: (payload: object) => void | Promise<boolean | void>;
  *   onQuickAddSupplier: () => void;
+ *   editApprovalSlot?: React.ReactNode;
  * }} props
  */
 export default function CoilPurchaseOrderModal({
@@ -55,8 +70,10 @@ export default function CoilPurchaseOrderModal({
   onClose,
   suppliers,
   masterData = null,
+  editDraft = null,
   onSubmit,
   onQuickAddSupplier,
+  editApprovalSlot = null,
 }) {
   const [supplierID, setSupplierID] = useState('');
   const [orderDate, setOrderDate] = useState(() => new Date().toISOString().slice(0, 10));
@@ -64,16 +81,39 @@ export default function CoilPurchaseOrderModal({
   const [lines, setLines] = useState([emptyLine()]);
   const [formError, setFormError] = useState('');
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+  const editPoId = editDraft?.poID ?? '';
+
   useEffect(() => {
     if (!isOpen) return;
+    if (editPoId && editDraft) {
+      setSupplierID(editDraft.supplierID || '');
+      setOrderDate(editDraft.orderDateISO || new Date().toISOString().slice(0, 10));
+      setExpectedDelivery(editDraft.expectedDeliveryISO || '');
+      const incoming = Array.isArray(editDraft.lines) ? editDraft.lines : [];
+      setLines(
+        incoming.length
+          ? incoming.map((l) => ({
+              rowUid: l.lineKey || newRowUid(),
+              existingLineKey: l.lineKey || '',
+              materialKind: l.materialKind || '',
+              color: l.color || '',
+              gauge: l.gauge || '',
+              kg: l.kg != null && l.kg !== '' ? String(l.kg) : '',
+              meters: l.meters != null && l.meters !== '' ? String(l.meters) : '',
+              pricePerKg: l.pricePerKg != null && l.pricePerKg !== '' ? String(l.pricePerKg) : '',
+            }))
+          : [emptyLine()]
+      );
+      setFormError('');
+      return;
+    }
     setSupplierID('');
     setOrderDate(new Date().toISOString().slice(0, 10));
     setExpectedDelivery('');
     setLines([emptyLine()]);
     setFormError('');
-  }, [isOpen]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+  }, [isOpen, editPoId, editDraft]);
+   
 
   const lineTotals = useMemo(() => {
     return lines.map((l) => {
@@ -147,8 +187,12 @@ export default function CoilPurchaseOrderModal({
         if (!productID) return null;
         const conv = conversionForLine(l);
         const m = l.meters ? Number(l.meters) : null;
+        const lineKey =
+          typeof l.existingLineKey === 'string' && l.existingLineKey.trim()
+            ? l.existingLineKey.trim()
+            : `L${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`;
         return {
-          lineKey: `L${Date.now()}-${i}`,
+          lineKey,
           productID,
           color,
           gauge,
@@ -167,6 +211,7 @@ export default function CoilPurchaseOrderModal({
       return;
     }
     const payload = {
+      ...(editPoId ? { poID: editPoId } : {}),
       supplierID,
       supplierName: sup?.name ?? '',
       orderDateISO: orderDate,
@@ -185,10 +230,12 @@ export default function CoilPurchaseOrderModal({
 
   return (
     <ModalFrame isOpen={isOpen} onClose={onClose}>
-      <div className="z-modal-panel max-w-[min(100%,52rem)] w-full max-h-[min(92vh,900px)] flex flex-col mx-auto">
+      <div className="z-modal-panel max-w-[min(100%,min(96vw,64rem))] w-full max-h-[min(92vh,900px)] flex flex-col mx-auto">
         <div className="px-5 py-4 border-b border-slate-200 flex justify-between items-center bg-white shrink-0">
           <div>
-            <h2 className="text-lg font-bold text-[#134e4a]">New coil purchase</h2>
+            <h2 className="text-lg font-bold text-[#134e4a]">
+              {editPoId ? 'Edit coil purchase' : 'New coil purchase'}
+            </h2>
             <p className="text-[9px] font-semibold text-slate-400 uppercase tracking-widest mt-0.5">
               Material · colour · gauge · kg · metres · conversion · ₦/kg — coil # at GRN
             </p>
@@ -284,135 +331,154 @@ export default function CoilPurchaseOrderModal({
               transit → inventory → production.
             </p>
 
-            <div className="grid grid-cols-12 gap-1.5 mb-2 px-1 text-[8px] font-semibold text-slate-400 uppercase tracking-wider items-end">
-              <div className="col-span-12 sm:col-span-1 text-center sm:pb-2"> </div>
-              <div className="col-span-6 sm:col-span-2">Material</div>
-              <div className="col-span-6 sm:col-span-2">Colour</div>
-              <div className="col-span-6 sm:col-span-2">Gauge</div>
-              <div className="col-span-4 sm:col-span-1">Kg</div>
-              <div className="col-span-4 sm:col-span-1">Metres</div>
-              <div className="col-span-4 sm:col-span-1">kg/m</div>
-              <div className="col-span-4 sm:col-span-1">₦/kg</div>
-              <div className="col-span-4 sm:col-span-1 text-right">Line ₦</div>
-              <div className="col-span-8 sm:col-span-1" />
-            </div>
+            <div className="overflow-x-auto -mx-1 px-1 sm:mx-0 sm:px-0 [scrollbar-gutter:stable]">
+              {/* sm+ grid: 1 + 2 + 2 + 2 + 1+1+1+1 + 1 + 1 = 12; min width gives each column enough room for data */}
+              <div className="hidden sm:grid sm:grid-cols-12 gap-2 mb-2 min-w-[56rem] px-1 text-[9px] font-semibold text-slate-400 uppercase tracking-wider items-end">
+                <div className="col-span-1 text-center pb-2" aria-hidden />
+                <div className="col-span-2 min-w-0">Material</div>
+                <div className="col-span-2 min-w-0">Colour</div>
+                <div className="col-span-2 min-w-0">Gauge</div>
+                <div className="col-span-1 min-w-0">Kg</div>
+                <div className="col-span-1 min-w-0">Metres</div>
+                <div className="col-span-1 min-w-0">kg/m</div>
+                <div className="col-span-1 min-w-0">₦/kg</div>
+                <div className="col-span-1 min-w-0 text-right">Line ₦</div>
+                <div className="col-span-1 min-w-0" aria-hidden />
+              </div>
 
-            <div className="space-y-3">
-              {lines.map((l, idx) => {
-                const conv = conversionForLine(l);
-                return (
-                  <div
-                    key={idx}
-                    className="grid grid-cols-12 gap-2 items-end border border-slate-100 rounded-lg p-3 bg-white/90"
-                  >
+              <div className="space-y-3 min-w-0">
+                {lines.map((l, idx) => {
+                  const conv = conversionForLine(l);
+                  return (
                     <div
-                      className="col-span-12 sm:col-span-1 flex items-center justify-center sm:pb-2"
-                      title={`Coil line ${idx + 1}`}
+                      key={l.rowUid}
+                      className="grid grid-cols-1 gap-3 border border-slate-100 rounded-xl p-4 bg-white/90 w-full max-w-full sm:grid-cols-12 sm:gap-x-2 sm:gap-y-2 sm:items-end sm:min-w-[56rem]"
                     >
-                      <Package className="text-[#134e4a]/70 shrink-0" size={22} strokeWidth={1.75} />
-                    </div>
-                    <div className="col-span-6 sm:col-span-2">
-                      <select
-                        value={l.materialKind}
-                        onChange={(e) => setLine(idx, { materialKind: e.target.value })}
-                        className={`${inputClassLg} appearance-none`}
-                      >
-                        <option value="">Material *</option>
-                        {MATERIAL_OPTS.map((o) => (
-                          <option key={o.value} value={o.value}>
-                            {o.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="col-span-6 sm:col-span-2">
-                      <select
-                        value={l.color}
-                        onChange={(e) => setLine(idx, { color: e.target.value })}
-                        className={`${inputClassLg} appearance-none`}
-                      >
-                        <option value="">Colour</option>
-                        {colourOptions.map((colour) => (
-                          <option key={colour.id} value={colour.name}>
-                            {colour.abbreviation ? `${colour.name} (${colour.abbreviation})` : colour.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="col-span-6 sm:col-span-2">
-                      <select
-                        value={l.gauge}
-                        onChange={(e) => setLine(idx, { gauge: e.target.value })}
-                        className={`${inputClassLg} appearance-none`}
-                      >
-                        <option value="">Gauge</option>
-                        {gaugeOptions.map((gauge) => (
-                          <option key={gauge.id} value={gauge.label}>
-                            {gauge.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="col-span-4 sm:col-span-1">
-                      <input
-                        type="number"
-                        min="0"
-                        step="any"
-                        inputMode="decimal"
-                        value={l.kg}
-                        onChange={(e) => setLine(idx, { kg: e.target.value })}
-                        className={`${inputClass} tabular-nums`}
-                        placeholder="kg"
-                      />
-                    </div>
-                    <div className="col-span-4 sm:col-span-1">
-                      <input
-                        type="number"
-                        min="0"
-                        step="any"
-                        inputMode="decimal"
-                        value={l.meters}
-                        onChange={(e) => setLine(idx, { meters: e.target.value })}
-                        className={`${inputClass} tabular-nums`}
-                        placeholder="m"
-                      />
-                    </div>
-                    <div className="col-span-4 sm:col-span-1">
+                      <div className="flex items-center gap-2 text-[10px] font-semibold text-slate-500 sm:hidden border-b border-slate-100 pb-2 -mt-0.5">
+                        <Package className="text-[#134e4a]/70 shrink-0" size={20} strokeWidth={1.75} />
+                        <span>Coil line {idx + 1}</span>
+                      </div>
                       <div
-                        className={`${inputClass} tabular-nums bg-slate-50 text-slate-600 flex items-center min-h-[2.25rem]`}
-                        title="kg ÷ metres"
+                        className="hidden sm:flex sm:col-span-1 items-center justify-center sm:pb-2 min-w-0"
+                        title={`Coil line ${idx + 1}`}
                       >
-                        {conv != null ? conv : '—'}
+                        <Package className="text-[#134e4a]/70 shrink-0" size={22} strokeWidth={1.75} />
+                      </div>
+                      <div className="min-w-0 sm:col-span-2">
+                        <label className={`${labelClass} sm:hidden`}>Material *</label>
+                        <select
+                          value={l.materialKind}
+                          onChange={(e) => setLine(idx, { materialKind: e.target.value })}
+                          className={`${lineFieldClass} appearance-none min-w-0 max-w-full`}
+                        >
+                          <option value="">Material *</option>
+                          {MATERIAL_OPTS.map((o) => (
+                            <option key={o.value} value={o.value}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="min-w-0 sm:col-span-2">
+                        <label className={`${labelClass} sm:hidden`}>Colour</label>
+                        <select
+                          value={l.color}
+                          onChange={(e) => setLine(idx, { color: e.target.value })}
+                          className={`${lineFieldClass} appearance-none min-w-0 max-w-full`}
+                        >
+                          <option value="">Colour</option>
+                          {colourOptions.map((colour) => (
+                            <option key={colour.id} value={colour.name}>
+                              {colour.abbreviation ? `${colour.name} (${colour.abbreviation})` : colour.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="min-w-0 sm:col-span-2">
+                        <label className={`${labelClass} sm:hidden`}>Gauge</label>
+                        <select
+                          value={l.gauge}
+                          onChange={(e) => setLine(idx, { gauge: e.target.value })}
+                          className={`${lineFieldClass} appearance-none min-w-0 max-w-full`}
+                        >
+                          <option value="">Gauge</option>
+                          {gaugeOptions.map((gauge) => (
+                            <option key={gauge.id} value={gauge.label}>
+                              {gauge.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="min-w-0 sm:col-span-1">
+                        <label className={`${labelClass} sm:hidden`}>Kg</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          inputMode="decimal"
+                          value={l.kg}
+                          onChange={(e) => setLine(idx, { kg: e.target.value })}
+                          className={`${lineFieldClass} tabular-nums min-w-0 max-w-full`}
+                          placeholder="kg"
+                        />
+                      </div>
+                      <div className="min-w-0 sm:col-span-1">
+                        <label className={`${labelClass} sm:hidden`}>Metres</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          inputMode="decimal"
+                          value={l.meters}
+                          onChange={(e) => setLine(idx, { meters: e.target.value })}
+                          className={`${lineFieldClass} tabular-nums min-w-0 max-w-full`}
+                          placeholder="m"
+                        />
+                      </div>
+                      <div className="min-w-0 sm:col-span-1">
+                        <label className={`${labelClass} sm:hidden`}>kg/m</label>
+                        <div
+                          className={`${lineFieldClass} tabular-nums bg-slate-50 text-slate-600 flex items-center min-w-0 px-3 overflow-x-auto`}
+                          title="kg ÷ metres"
+                        >
+                          {conv != null ? conv : '—'}
+                        </div>
+                      </div>
+                      <div className="min-w-0 sm:col-span-1">
+                        <label className={`${labelClass} sm:hidden`}>₦/kg</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          inputMode="decimal"
+                          value={l.pricePerKg}
+                          onChange={(e) => setLine(idx, { pricePerKg: e.target.value })}
+                          className={`${lineFieldClass} tabular-nums min-w-0 max-w-full`}
+                          placeholder="₦/kg"
+                        />
+                      </div>
+                      <div className="flex flex-wrap items-center justify-between gap-2 min-w-0 sm:col-span-1 sm:block sm:text-right">
+                        <p className="text-sm font-bold text-[#134e4a] tabular-nums py-1 sm:py-0 break-all text-right leading-snug">
+                          <span className="sm:hidden text-[9px] font-semibold text-slate-400 uppercase mr-1">
+                            Line ₦
+                          </span>
+                          ₦{lineTotals[idx].toLocaleString()}
+                        </p>
+                      </div>
+                      <div className="flex justify-end min-w-0 sm:col-span-1 sm:justify-end sm:pb-0.5">
+                        <button
+                          type="button"
+                          onClick={() => removeRow(idx)}
+                          className="p-2 text-slate-300 hover:text-red-500 rounded-lg shrink-0"
+                          aria-label="Remove line"
+                        >
+                          <Trash2 size={16} />
+                        </button>
                       </div>
                     </div>
-                    <div className="col-span-4 sm:col-span-1">
-                      <input
-                        type="number"
-                        min="0"
-                        step="any"
-                        inputMode="decimal"
-                        value={l.pricePerKg}
-                        onChange={(e) => setLine(idx, { pricePerKg: e.target.value })}
-                        className={`${inputClass} tabular-nums`}
-                        placeholder="₦/kg"
-                      />
-                    </div>
-                    <div className="col-span-4 sm:col-span-1 text-right text-xs font-bold text-[#134e4a] tabular-nums py-2">
-                      ₦{lineTotals[idx].toLocaleString()}
-                    </div>
-                    <div className="col-span-8 sm:col-span-1 flex justify-end">
-                      <button
-                        type="button"
-                        onClick={() => removeRow(idx)}
-                        className="p-2 text-slate-300 hover:text-red-500 rounded-lg"
-                        aria-label="Remove line"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
 
             <div className="mt-4 flex flex-wrap justify-between items-center gap-3 pt-4 border-t border-slate-200">
@@ -433,6 +499,8 @@ export default function CoilPurchaseOrderModal({
             </p>
           ) : null}
 
+          {editApprovalSlot ? <div className="mt-2 shrink-0">{editApprovalSlot}</div> : null}
+
           <div className="flex justify-end gap-2 pt-4 border-t border-slate-200 mt-auto">
             <button
               type="button"
@@ -445,7 +513,7 @@ export default function CoilPurchaseOrderModal({
               type="submit"
               className="bg-[#134e4a] text-white px-5 py-2.5 rounded-lg text-[9px] font-semibold uppercase tracking-wide shadow-sm hover:brightness-105 flex items-center gap-2"
             >
-              <Save size={14} /> Save purchase order
+              <Save size={14} /> {editPoId ? 'Save changes' : 'Save purchase order'}
             </button>
           </div>
         </form>
