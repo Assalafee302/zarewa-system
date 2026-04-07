@@ -47,6 +47,12 @@ import {
   assertCustomerLedgerPostingBranch,
   resolveBootstrapBranchScope,
 } from './branchScope.js';
+import {
+  assertCuttingListIdInWorkspace,
+  assertCuttingListRowInWorkspace,
+  assertProductIdInWorkspace,
+  assertProductionJobIdInWorkspace,
+} from './workspaceBranchGuards.js';
 import { sendIdempotentReplayIfAny, storeIdempotentSuccess } from './idempotency.js';
 import { DEFAULT_BRANCH_ID, getBranch, listBranches } from './branches.js';
 import {
@@ -121,10 +127,20 @@ import {
   priceListItemsToCsv,
   upsertPriceListItem,
 } from './pricingOps.js';
+import { workspaceQuickSearch } from './workspaceSearchOps.js';
 import { insertLedgerRows } from './writeOps.js';
 import { resolveQuotedUnitPrice } from './pricingResolve.js';
 import { ensureStoneProduct } from './stoneInventory.js';
 import * as write from './writeOps.js';
+import {
+  createInterBranchLoan,
+  getInterBranchLoan,
+  interBranchLoanBalances,
+  listInterBranchLoans,
+  mdApproveInterBranchLoan,
+  mdRejectInterBranchLoan,
+  recordInterBranchLoanRepayment,
+} from './interBranchLoanOps.js';
 import {
   listGlAccounts,
   listGlActivityLines,
@@ -1365,136 +1381,20 @@ export function registerHttpApi(app, db) {
   );
 
   /**
-   * Permission-aware quick search (customers, quotes, receipts, POs, suppliers, cutting lists, coils).
+   * Permission-aware quick search (SQL LIMIT per category): CRM, sales docs, procurement, ops,
+   * refunds, product SKUs, HR directory.
    */
   app.get('/api/workspace/search', requireAuth, (req, res) => {
     try {
+      if (String(req.user?.roleKey || '').toLowerCase() === 'ceo') {
+        return res.status(403).json({ ok: false, error: 'Workspace search is not available for the executive role.' });
+      }
       const raw = String(req.query.q ?? '').trim();
       const limit = Math.min(40, Math.max(1, parseInt(String(req.query.limit ?? '20'), 10) || 20));
       if (raw.length < 2) {
         return res.json({ ok: true, results: [] });
       }
-      const q = raw.toLowerCase();
-      const branchScope = resolveBootstrapBranchScope(req);
-      const results = [];
-      const push = (row) => {
-        if (results.length < limit) results.push(row);
-      };
-
-      const perm = (p) => userHasPermission(req.user, '*') || userHasPermission(req.user, p);
-
-      if (perm('sales.view') || perm('customers.manage')) {
-        for (const c of listCustomers(db, branchScope)) {
-          if (results.length >= limit) break;
-          const blob = `${c.customerID} ${c.name} ${c.phoneNumber || ''} ${c.email || ''} ${c.companyName || ''}`.toLowerCase();
-          if (blob.includes(q)) {
-            push({
-              kind: 'customer',
-              id: c.customerID,
-              label: c.name,
-              sublabel: c.customerID,
-              path: `/customers/${encodeURIComponent(c.customerID)}`,
-            });
-          }
-        }
-      }
-
-      if (perm('quotations.manage') || perm('sales.view')) {
-        for (const row of listQuotations(db, branchScope)) {
-          if (results.length >= limit) break;
-          const blob = `${row.id} ${row.customerName || ''} ${row.customerID || ''} ${row.projectName || ''}`.toLowerCase();
-          if (blob.includes(q)) {
-            push({
-              kind: 'quotation',
-              id: row.id,
-              label: row.id,
-              sublabel: row.customerName,
-              path: '/sales',
-              state: { globalSearchQuery: row.id, focusSalesTab: 'quotations' },
-            });
-          }
-        }
-      }
-
-      if (perm('receipts.post') || perm('finance.view') || perm('sales.view')) {
-        for (const row of listSalesReceipts(db, branchScope)) {
-          if (results.length >= limit) break;
-          const blob = `${row.id} ${row.customer || ''} ${row.customerID || ''} ${row.quotationRef || ''}`.toLowerCase();
-          if (blob.includes(q)) {
-            push({
-              kind: 'receipt',
-              id: row.id,
-              label: row.id,
-              sublabel: row.customer,
-              path: '/sales',
-              state: { globalSearchQuery: row.id, focusSalesTab: 'receipts' },
-            });
-          }
-        }
-      }
-
-      if (perm('procurement.view') || perm('purchase_orders.manage')) {
-        for (const row of listPurchaseOrders(db, branchScope)) {
-          if (results.length >= limit) break;
-          const blob = `${row.poID} ${row.supplierName || ''} ${row.supplierID || ''}`.toLowerCase();
-          if (blob.includes(q)) {
-            push({
-              kind: 'purchase_order',
-              id: row.poID,
-              label: row.poID,
-              sublabel: row.supplierName,
-              path: '/procurement',
-              state: { focusTab: 'purchases' },
-            });
-          }
-        }
-        for (const s of listSuppliers(db, branchScope)) {
-          if (results.length >= limit) break;
-          const blob = `${s.supplierID} ${s.name || ''} ${s.city || ''}`.toLowerCase();
-          if (blob.includes(q)) {
-            push({
-              kind: 'supplier',
-              id: s.supplierID,
-              label: s.name,
-              sublabel: s.supplierID,
-              path: `/procurement/suppliers/${encodeURIComponent(s.supplierID)}`,
-            });
-          }
-        }
-      }
-
-      if (perm('operations.view') || perm('production.manage')) {
-        for (const row of listCuttingLists(db, branchScope)) {
-          if (results.length >= limit) break;
-          const blob = `${row.id} ${row.customer || ''} ${row.customerID || ''} ${row.quotationRef || ''}`.toLowerCase();
-          if (blob.includes(q)) {
-            push({
-              kind: 'cutting_list',
-              id: row.id,
-              label: row.id,
-              sublabel: row.customer,
-              path: '/operations',
-              state: { focusOpsTab: 'production', highlightCuttingListId: row.id },
-            });
-          }
-        }
-        for (const row of listCoilLots(db, branchScope)) {
-          if (results.length >= limit) break;
-          const blob = `${row.coilNo || ''} ${row.productID || ''} ${row.poID || ''} ${row.supplierName || ''} ${
-            row.colour || ''
-          } ${row.gaugeLabel || ''}`.toLowerCase();
-          if (blob.includes(q)) {
-            push({
-              kind: 'coil',
-              id: row.coilNo,
-              label: row.coilNo,
-              sublabel: `${row.colour || '—'} · ${row.gaugeLabel || '—'} · ${row.productID || ''}`,
-              path: `/operations/coils/${encodeURIComponent(row.coilNo)}`,
-            });
-          }
-        }
-      }
-
+      const results = workspaceQuickSearch(db, req, raw, limit);
       return res.json({ ok: true, results });
     } catch (e) {
       console.error(e);
@@ -1730,6 +1630,9 @@ export function registerHttpApi(app, db) {
   app.patch('/api/cutting-lists/:id', requirePermission(['sales.manage', 'operations.manage']), (req, res) => {
     try {
       const cid = req.params.id;
+      const cl0 = getCuttingList(db, cid);
+      const bg = assertCuttingListRowInWorkspace(req, cl0);
+      if (!bg.ok) return res.status(bg.status).json({ ok: false, error: bg.error });
       return handlePatchWithEditApproval(res, db, req.user, req.body || {}, 'cutting_list', cid, (stripped) => {
         const r = write.updateCuttingList(db, cid, stripped || {});
         if (!r.ok) return r;
@@ -1762,6 +1665,8 @@ export function registerHttpApi(app, db) {
     requirePermission('production.release'),
     (req, res) => {
       try {
+        const hg = assertCuttingListIdInWorkspace(db, req, req.params.id);
+        if (!hg.ok) return res.status(hg.status).json({ ok: false, error: hg.error });
         const r = write.clearCuttingListProductionHold(db, req.params.id, req.user);
         if (!r.ok) return res.status(400).json(r);
         const cuttingList = getCuttingList(db, req.params.id);
@@ -1781,6 +1686,8 @@ export function registerHttpApi(app, db) {
         const clId = req.params.id;
         const cl = getCuttingList(db, clId);
         if (!cl) return res.status(404).json({ ok: false, error: 'Cutting list not found.' });
+        const rg = assertCuttingListRowInWorkspace(req, cl);
+        if (!rg.ok) return res.status(rg.status).json({ ok: false, error: rg.error });
         if (cl.productionRegistered) {
           return res.status(400).json({
             ok: false,
@@ -1814,6 +1721,8 @@ export function registerHttpApi(app, db) {
 
   app.get('/api/cutting-lists/:id/production/coil-allocations', requirePermission('production.manage'), (req, res) => {
     try {
+      const wg = assertCuttingListIdInWorkspace(db, req, req.params.id);
+      if (!wg.ok) return res.status(wg.status).json({ ok: false, error: wg.error });
       const jobId = resolveCuttingListProductionJob(db, req.params.id);
       if (!jobId) {
         return res.status(404).json({ ok: false, error: 'No production run for this cutting list.' });
@@ -1828,6 +1737,8 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/cutting-lists/:id/production/allocations', requirePermission('production.manage'), (req, res) => {
     try {
+      const wg = assertCuttingListIdInWorkspace(db, req, req.params.id);
+      if (!wg.ok) return res.status(wg.status).json({ ok: false, error: wg.error });
       let jobId = resolveCuttingListProductionJob(db, req.params.id);
       if (!jobId) jobId = productionJobIdForCuttingList(db, req.params.id);
       if (!jobId) {
@@ -1846,6 +1757,8 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/cutting-lists/:id/production/start', requirePermission('production.manage'), (req, res) => {
     try {
+      const wg = assertCuttingListIdInWorkspace(db, req, req.params.id);
+      if (!wg.ok) return res.status(wg.status).json({ ok: false, error: wg.error });
       const jobId = resolveCuttingListProductionJob(db, req.params.id);
       if (!jobId) {
         return res.status(404).json({ ok: false, error: 'No production run for this cutting list.' });
@@ -1860,6 +1773,8 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/cutting-lists/:id/production/complete', requirePermission('production.manage'), (req, res) => {
     try {
+      const wg = assertCuttingListIdInWorkspace(db, req, req.params.id);
+      if (!wg.ok) return res.status(wg.status).json({ ok: false, error: wg.error });
       const jobId = resolveCuttingListProductionJob(db, req.params.id);
       if (!jobId) {
         return res.status(404).json({ ok: false, error: 'No production run for this cutting list.' });
@@ -1874,6 +1789,8 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/cutting-lists/:id/production/conversion-preview', requirePermission('production.manage'), (req, res) => {
     try {
+      const wg = assertCuttingListIdInWorkspace(db, req, req.params.id);
+      if (!wg.ok) return res.status(wg.status).json({ ok: false, error: wg.error });
       const jobId = resolveCuttingListProductionJob(db, req.params.id);
       if (!jobId) {
         return res.status(404).json({ ok: false, error: 'No production run for this cutting list.' });
@@ -1888,6 +1805,12 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/production-jobs', requirePermission('production.manage'), (req, res) => {
     try {
+      const clId = String((req.body || {}).cuttingListId ?? '').trim();
+      if (!clId) {
+        return res.status(400).json({ ok: false, error: 'cuttingListId is required to create a production job.' });
+      }
+      const cg = assertCuttingListIdInWorkspace(db, req, clId);
+      if (!cg.ok) return res.status(cg.status).json({ ok: false, error: cg.error });
       const r = write.insertProductionJob(db, req.body || {}, req.workspaceBranchId || DEFAULT_BRANCH_ID);
       res.status(r.ok ? 201 : 400).json(r);
     } catch (e) {
@@ -1899,6 +1822,8 @@ export function registerHttpApi(app, db) {
   app.patch('/api/production-jobs/:jobId/status', requirePermission('production.manage'), (req, res) => {
     try {
       const jid = req.params.jobId;
+      const jg = assertProductionJobIdInWorkspace(db, req, jid);
+      if (!jg.ok) return res.status(jg.status).json({ ok: false, error: jg.error });
       return handlePatchWithEditApproval(res, db, req.user, req.body || {}, 'production_job', jid, (stripped) =>
         write.setProductionJobStatus(db, jid, stripped?.status)
       );
@@ -1910,6 +1835,8 @@ export function registerHttpApi(app, db) {
 
   app.get('/api/production-jobs/:jobId/coil-allocations', requirePermission('production.manage'), (req, res) => {
     try {
+      const jg = assertProductionJobIdInWorkspace(db, req, req.params.jobId);
+      if (!jg.ok) return res.status(jg.status).json({ ok: false, error: jg.error });
       const job = db.prepare(`SELECT job_id FROM production_jobs WHERE job_id = ?`).get(req.params.jobId);
       if (!job) return res.status(404).json({ ok: false, error: 'Production job not found.' });
       const allocations = listProductionJobCoilsForJob(db, req.params.jobId);
@@ -1922,6 +1849,8 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/production-jobs/:jobId/allocations', requirePermission('production.manage'), (req, res) => {
     try {
+      const jg = assertProductionJobIdInWorkspace(db, req, req.params.jobId);
+      if (!jg.ok) return res.status(jg.status).json({ ok: false, error: jg.error });
       const r = saveProductionJobAllocations(db, req.params.jobId, req.body?.allocations || [], {
         actor: req.user,
         append: Boolean(req.body?.append),
@@ -1935,6 +1864,8 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/production-jobs/:jobId/start', requirePermission('production.manage'), (req, res) => {
     try {
+      const jg = assertProductionJobIdInWorkspace(db, req, req.params.jobId);
+      if (!jg.ok) return res.status(jg.status).json({ ok: false, error: jg.error });
       const r = startProductionJob(db, req.params.jobId, req.body || {}, { actor: req.user });
       res.status(r.ok ? 200 : 400).json(r);
     } catch (e) {
@@ -1945,6 +1876,8 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/production-jobs/:jobId/complete', requirePermission('production.manage'), (req, res) => {
     try {
+      const jg = assertProductionJobIdInWorkspace(db, req, req.params.jobId);
+      if (!jg.ok) return res.status(jg.status).json({ ok: false, error: jg.error });
       const r = completeProductionJob(db, req.params.jobId, req.body || {}, { actor: req.user });
       res.status(r.ok ? 200 : 400).json(r);
     } catch (e) {
@@ -1955,6 +1888,8 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/production-jobs/:jobId/conversion-preview', requirePermission('production.manage'), (req, res) => {
     try {
+      const jg = assertProductionJobIdInWorkspace(db, req, req.params.jobId);
+      if (!jg.ok) return res.status(jg.status).json({ ok: false, error: jg.error });
       const r = previewProductionConversion(db, req.params.jobId, req.body || {});
       res.status(r.ok ? 200 : 400).json(r);
     } catch (e) {
@@ -1970,6 +1905,8 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/production-jobs/:jobId/return-to-planned', requirePermission(returnToPlannedPerms), (req, res) => {
     try {
+      const jg = assertProductionJobIdInWorkspace(db, req, req.params.jobId);
+      if (!jg.ok) return res.status(jg.status).json({ ok: false, error: jg.error });
       const r = returnProductionJobToPlanned(db, req.params.jobId, req.body || {}, { actor: req.user });
       res.status(r.ok ? 200 : 400).json(r);
     } catch (e) {
@@ -1983,6 +1920,8 @@ export function registerHttpApi(app, db) {
     requirePermission(productionCorrectionPerms),
     (req, res) => {
       try {
+        const jg = assertProductionJobIdInWorkspace(db, req, req.params.jobId);
+        if (!jg.ok) return res.status(jg.status).json({ ok: false, error: jg.error });
         const r = applyProductionCompletionAdjustment(db, req.params.jobId, req.body || {}, { actor: req.user });
         res.status(r.ok ? 200 : 400).json(r);
       } catch (e) {
@@ -1995,6 +1934,8 @@ export function registerHttpApi(app, db) {
   app.patch('/api/production-jobs/:jobId/manager-review-signoff', requirePermission(managerReviewSignoffPerms), (req, res) => {
     try {
       const jid = req.params.jobId;
+      const jg = assertProductionJobIdInWorkspace(db, req, jid);
+      if (!jg.ok) return res.status(jg.status).json({ ok: false, error: jg.error });
       return handlePatchWithEditApproval(res, db, req.user, req.body || {}, 'production_job', jid, (stripped) =>
         signOffProductionManagerReview(db, jid, stripped || {}, { actor: req.user })
       );
@@ -2007,6 +1948,8 @@ export function registerHttpApi(app, db) {
   app.patch('/api/cutting-lists/:id/production/manager-review-signoff', requirePermission(managerReviewSignoffPerms), (req, res) => {
     try {
       const clid = req.params.id;
+      const wg = assertCuttingListIdInWorkspace(db, req, clid);
+      if (!wg.ok) return res.status(wg.status).json({ ok: false, error: wg.error });
       let jobId = resolveCuttingListProductionJob(db, clid);
       if (!jobId) jobId = productionJobIdForCuttingList(db, clid);
       if (!jobId) {
@@ -2023,6 +1966,11 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/deliveries', requirePermission('deliveries.manage'), (req, res) => {
     try {
+      const clid = String((req.body || {}).cuttingListId ?? '').trim();
+      if (clid) {
+        const dg = assertCuttingListIdInWorkspace(db, req, clid);
+        if (!dg.ok) return res.status(dg.status).json({ ok: false, error: dg.error });
+      }
       const r = write.insertDelivery(db, req.body || {}, req.workspaceBranchId || DEFAULT_BRANCH_ID);
       res.status(r.ok ? 201 : 400).json(r);
     } catch (e) {
@@ -2144,6 +2092,8 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/inventory/adjust', requirePermission('inventory.adjust'), (req, res) => {
     const { productID, type, qty, reasonCode, note, dateISO, acknowledgeCoilSkuDrift } = req.body || {};
+    const pg = assertProductIdInWorkspace(db, req, productID);
+    if (!pg.ok) return res.status(pg.status).json({ ok: false, error: pg.error });
     if (String(type) === 'Decrease' && productID && !acknowledgeCoilSkuDrift) {
       const n = write.countCoilLotsForProductInWorkspace(db, productID, req.workspaceBranchId);
       if (n > 0) {
@@ -2162,12 +2112,21 @@ export function registerHttpApi(app, db) {
 
   app.post('/api/inventory/transfer-to-production', requirePermission('production.manage'), (req, res) => {
     const { productID, qty, productionOrderId, dateISO } = req.body || {};
+    const pg = assertProductIdInWorkspace(db, req, productID);
+    if (!pg.ok) return res.status(pg.status).json({ ok: false, error: pg.error });
     const r = write.transferToProduction(db, productID, qty, productionOrderId, dateISO);
     res.status(r.ok ? 200 : 400).json(r);
   });
 
   app.post('/api/inventory/finished-goods', requirePermission('production.manage'), (req, res) => {
     const { productID, qty, unitPriceNgn, productionOrderId, dateISO, wipRelease, extras } = req.body || {};
+    const pg = assertProductIdInWorkspace(db, req, productID);
+    if (!pg.ok) return res.status(pg.status).json({ ok: false, error: pg.error });
+    const ws = wipRelease?.wipSourceProductID?.trim?.();
+    if (ws) {
+      const sg = assertProductIdInWorkspace(db, req, ws);
+      if (!sg.ok) return res.status(sg.status).json({ ok: false, error: sg.error });
+    }
     const r = write.receiveFinishedGoods(
       db,
       productID,
@@ -2300,6 +2259,84 @@ export function registerHttpApi(app, db) {
       res.status(400).json({ ok: false, error: String(e.message || e) });
     }
   });
+
+  app.get('/api/inter-branch-loans', requirePermission('finance.view'), (req, res) => {
+    try {
+      const branchScope = resolveBootstrapBranchScope(req);
+      res.json({
+        ok: true,
+        loans: listInterBranchLoans(db, branchScope),
+        balances: interBranchLoanBalances(db, branchScope),
+      });
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  app.get('/api/inter-branch-loans/:loanId', requirePermission('finance.view'), (req, res) => {
+    try {
+      const branchScope = resolveBootstrapBranchScope(req);
+      const r = getInterBranchLoan(db, String(req.params.loanId || '').trim(), branchScope);
+      res.status(r.ok ? 200 : r.error === 'Loan not found.' ? 404 : 403).json(r.ok ? { ok: true, ...r } : r);
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  app.post(
+    '/api/inter-branch-loans',
+    requirePermission(['treasury.manage', 'finance.post']),
+    (req, res) => {
+      try {
+        const r = createInterBranchLoan(db, req.body || {}, req.user);
+        res.status(r.ok ? 201 : 400).json(r);
+      } catch (e) {
+        console.error(e);
+        res.status(400).json({ ok: false, error: String(e.message || e) });
+      }
+    }
+  );
+
+  app.post('/api/inter-branch-loans/:loanId/md-approve', requirePermission('inter_branch_loan.md_approve'), (req, res) => {
+    try {
+      const r = mdApproveInterBranchLoan(db, String(req.params.loanId || '').trim(), req.user);
+      res.status(r.ok ? 200 : 400).json(r);
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  app.post('/api/inter-branch-loans/:loanId/md-reject', requirePermission('inter_branch_loan.md_approve'), (req, res) => {
+    try {
+      const r = mdRejectInterBranchLoan(db, String(req.params.loanId || '').trim(), req.body || {}, req.user);
+      res.status(r.ok ? 200 : 400).json(r);
+    } catch (e) {
+      console.error(e);
+      res.status(400).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  app.post(
+    '/api/inter-branch-loans/:loanId/repay',
+    requirePermission(['treasury.manage', 'finance.pay']),
+    (req, res) => {
+      try {
+        const r = recordInterBranchLoanRepayment(
+          db,
+          String(req.params.loanId || '').trim(),
+          req.body || {},
+          req.user
+        );
+        res.status(r.ok ? 200 : 400).json(r);
+      } catch (e) {
+        console.error(e);
+        res.status(400).json({ ok: false, error: String(e.message || e) });
+      }
+    }
+  );
 
   app.post('/api/expenses', requirePermission('finance.post'), (req, res) => {
     try {

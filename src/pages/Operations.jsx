@@ -563,10 +563,26 @@ const Operations = () => {
   };
 
   useEffect(() => {
-    const t = location.state?.focusOpsTab;
+    const st = location.state || {};
+    const t = st.focusOpsTab;
+    const invSku = String(st.opsInventorySkuQuery || '').trim();
+
+    if (t === 'inventory') {
+      setActiveTab('inventory');
+      if (invSku) {
+        const p = invSku.toUpperCase();
+        if (p.startsWith('STONE-')) setStockReceiveKind('stone');
+        else if (p.startsWith('ACC-')) setStockReceiveKind('accessory');
+        else setStockReceiveKind('coil');
+        setCoilLiveSearch(invSku);
+      }
+      navigate(location.pathname, { replace: true, state: {} });
+      return;
+    }
+
     if (t !== 'deliveries' && t !== 'production') return;
     setActiveTab(t);
-    const highlightId = String(location.state?.highlightCuttingListId || '').trim();
+    const highlightId = String(st.highlightCuttingListId || '').trim();
     if (t === 'production' && highlightId) setSearchQuery(highlightId);
     navigate(location.pathname, { replace: true, state: {} });
   }, [location.state, location.pathname, navigate]);

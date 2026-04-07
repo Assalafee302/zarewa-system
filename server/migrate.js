@@ -621,6 +621,7 @@ export function runMigrations(db) {
   migrateTimestampStyleDocumentIds(db);
   migrateCoilMaterialOps(db);
   migrateWorkflowExtensions(db);
+  migrateWipBalancesBranchComposite(db);
   migratePrd101ToCoilAlu(db);
   migrateMaterialTypeLabels(db);
   migrateProcurementCoilMaterials(db);
@@ -635,6 +636,80 @@ export function runMigrations(db) {
   migrateStoneCoatedAndPricingArch(db);
   migrateProcurementOrderKind(db);
   migrateHrExcellence2026(db);
+  migrateWorkspaceSearchIndexes(db);
+  migrateInterBranchLoans(db);
+}
+
+/** Inter-branch treasury lending (MD-approved disbursement + repayment history). */
+function migrateInterBranchLoans(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS inter_branch_loans (
+      loan_id TEXT PRIMARY KEY,
+      created_at_iso TEXT NOT NULL,
+      created_by_user_id TEXT,
+      created_by_name TEXT,
+      lender_branch_id TEXT NOT NULL,
+      borrower_branch_id TEXT NOT NULL,
+      principal_ngn INTEGER NOT NULL,
+      repaid_ngn INTEGER NOT NULL DEFAULT 0,
+      from_treasury_account_id INTEGER NOT NULL,
+      to_treasury_account_id INTEGER NOT NULL,
+      date_iso TEXT NOT NULL,
+      reference TEXT,
+      repayment_plan_json TEXT,
+      status TEXT NOT NULL,
+      proposed_note TEXT,
+      md_approved_at_iso TEXT,
+      md_approved_by_user_id TEXT,
+      md_approved_by_name TEXT,
+      md_rejected_at_iso TEXT,
+      md_reject_note TEXT,
+      treasury_batch_id TEXT,
+      executed_at_iso TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_inter_branch_loans_branches
+      ON inter_branch_loans(lender_branch_id, borrower_branch_id, status);
+    CREATE TABLE IF NOT EXISTS inter_branch_loan_repayments (
+      id TEXT PRIMARY KEY,
+      loan_id TEXT NOT NULL,
+      posted_at_iso TEXT NOT NULL,
+      amount_ngn INTEGER NOT NULL,
+      from_treasury_account_id INTEGER NOT NULL,
+      to_treasury_account_id INTEGER NOT NULL,
+      treasury_batch_id TEXT,
+      note TEXT,
+      created_by_user_id TEXT,
+      created_by_name TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_inter_branch_loan_repayments_loan
+      ON inter_branch_loan_repayments(loan_id, posted_at_iso);
+  `);
+}
+
+/** Branch equality filters for workspace quick search (after branch_id columns exist). */
+function migrateWorkspaceSearchIndexes(db) {
+  const hasBranchCol = (table) => {
+    try {
+      return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === 'branch_id');
+    } catch {
+      return false;
+    }
+  };
+  const ensure = (indexName, table) => {
+    if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`).get(table)) return;
+    if (!hasBranchCol(table)) return;
+    db.exec(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${table}(branch_id)`);
+  };
+  ensure('idx_ws_customers_branch', 'customers');
+  ensure('idx_ws_quotations_branch', 'quotations');
+  ensure('idx_ws_sales_receipts_branch', 'sales_receipts');
+  ensure('idx_ws_purchase_orders_branch', 'purchase_orders');
+  ensure('idx_ws_suppliers_branch', 'suppliers');
+  ensure('idx_ws_cutting_lists_branch', 'cutting_lists');
+  ensure('idx_ws_coil_lots_branch', 'coil_lots');
+  ensure('idx_ws_customer_refunds_branch', 'customer_refunds');
+  ensure('idx_ws_products_branch', 'products');
+  ensure('idx_ws_hr_staff_profiles_branch', 'hr_staff_profiles');
 }
 
 /** Coil vs stone-metre vs accessory PO classification for dashboards. */
@@ -1719,6 +1794,46 @@ function migrateBranches(db) {
   `);
 }
 
+/**
+ * Scope WIP by branch (matches products.branch_id; empty string = shared catalogue SKUs).
+ * Idempotent: skips when composite primary key (branch_id, product_id) already exists.
+ */
+function migrateWipBalancesBranchComposite(db) {
+  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='wip_balances'`).get()) return;
+  const cols = db.prepare(`PRAGMA table_info(wip_balances)`).all();
+  const colSet = new Set(cols.map((c) => c.name));
+  const pkCols = cols.filter((c) => c.pk).map((c) => c.name);
+  const hasCompositePk =
+    colSet.has('branch_id') && pkCols.includes('branch_id') && pkCols.includes('product_id');
+  if (hasCompositePk) return;
+
+  db.transaction(() => {
+    if (!colSet.has('branch_id')) {
+      db.exec(`ALTER TABLE wip_balances ADD COLUMN branch_id TEXT NOT NULL DEFAULT ''`);
+    }
+    const allWip = db.prepare(`SELECT rowid, product_id FROM wip_balances`).all();
+    for (const w of allWip) {
+      const p = db.prepare(`SELECT branch_id FROM products WHERE product_id = ?`).get(w.product_id);
+      const bid = p ? String(p.branch_id ?? '').trim() : '';
+      db.prepare(`UPDATE wip_balances SET branch_id = ? WHERE rowid = ?`).run(bid, w.rowid);
+    }
+
+    db.exec(`DROP TABLE IF EXISTS wip_balances__new`);
+    db.exec(`CREATE TABLE wip_balances__new (
+      branch_id TEXT NOT NULL DEFAULT '',
+      product_id TEXT NOT NULL,
+      qty REAL NOT NULL DEFAULT 0,
+      PRIMARY KEY (branch_id, product_id)
+    )`);
+    db.exec(`
+      INSERT OR REPLACE INTO wip_balances__new (branch_id, product_id, qty)
+      SELECT TRIM(COALESCE(branch_id,'')), product_id, qty FROM wip_balances
+    `);
+    db.exec(`DROP TABLE wip_balances`);
+    db.exec(`ALTER TABLE wip_balances__new RENAME TO wip_balances`);
+  })();
+}
+
 /** Align setup material type names with product.material_type (Aluminium / Aluzinc). */
 function migrateMaterialTypeLabels(db) {
   if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='setup_material_types'`).get()) {
@@ -1782,12 +1897,19 @@ function migratePrd101ToCoilAlu(db) {
       db.prepare(`UPDATE procurement_catalog SET product_id = 'COIL-ALU' WHERE product_id = 'PRD-101'`).run();
     }
 
-    const oldWip = db.prepare(`SELECT qty FROM wip_balances WHERE product_id = 'PRD-101'`).get();
-    if (oldWip) {
-      const newWip = db.prepare(`SELECT qty FROM wip_balances WHERE product_id = 'COIL-ALU'`).get();
-      const mergedWip = Number(newWip?.qty || 0) + Number(oldWip.qty || 0);
-      db.prepare(`DELETE FROM wip_balances WHERE product_id IN ('PRD-101', 'COIL-ALU')`).run();
-      db.prepare(`INSERT INTO wip_balances (product_id, qty) VALUES ('COIL-ALU', ?)`).run(mergedWip);
+    const prdWipRows = db.prepare(`SELECT branch_id, qty FROM wip_balances WHERE product_id = 'PRD-101'`).all();
+    for (const pr of prdWipRows) {
+      const br = String(pr.branch_id ?? '').trim();
+      const coilRow = db
+        .prepare(`SELECT qty FROM wip_balances WHERE product_id = 'COIL-ALU' AND branch_id = ?`)
+        .get(br);
+      const mergedWip = (Number(coilRow?.qty) || 0) + (Number(pr.qty) || 0);
+      db.prepare(`DELETE FROM wip_balances WHERE product_id = 'PRD-101' AND branch_id = ?`).run(br);
+      db.prepare(`DELETE FROM wip_balances WHERE product_id = 'COIL-ALU' AND branch_id = ?`).run(br);
+      db.prepare(`INSERT INTO wip_balances (branch_id, product_id, qty) VALUES (?, 'COIL-ALU', ?)`).run(
+        br,
+        mergedWip
+      );
     }
 
     db.prepare(`DELETE FROM products WHERE product_id = 'PRD-101'`).run();

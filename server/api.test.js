@@ -101,6 +101,23 @@ describe.sequential('Zarewa API', () => {
     expect(res.body.suggestedRoleByDepartment?.sales).toBe('sales_staff');
   });
 
+  it('GET /api/workspace/search returns 403 for ceo', async () => {
+    const ceoAgent = request.agent(app);
+    await loginAs(ceoAgent, 'ceo', 'Ceo@1234567890!');
+    const res = await ceoAgent.get('/api/workspace/search?q=CU');
+    expect(res.status).toBe(403);
+    expect(res.body.ok).toBe(false);
+  });
+
+  it('GET /api/workspace/search returns structured hits for admin', async () => {
+    const res = await agent.get('/api/workspace/search?q=musa&limit=10');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(Array.isArray(res.body.results)).toBe(true);
+    expect(res.body.results.length).toBeGreaterThan(0);
+    expect(res.body.results.some((r) => r.kind === 'customer')).toBe(true);
+  });
+
   it('GET /api/roles returns role catalog and permission keys for settings users', async () => {
     const signedAgent = request.agent(app);
     await loginAs(signedAgent);
@@ -922,7 +939,7 @@ describe.sequential('Zarewa API', () => {
     const boot = await agent.get('/api/bootstrap');
     const cl = boot.body.cuttingLists.find((row) => row.id === cutting.body.id);
     expect(cl.productionRegistered).toBe(true);
-    expect(cl.productionRegisterRef).toBe('');
+    expect(cl.productionRegisterRef).toBe(job.body.jobID);
   });
 
   it('POST /api/deliveries then confirm deducts finished goods stock once', async () => {

@@ -232,6 +232,8 @@ function AppShell() {
   const [headerSearch, setHeaderSearch] = useState('');
   const [searchHits, setSearchHits] = useState([]);
   const [searchBusy, setSearchBusy] = useState(false);
+  /** True when dropdown results came from cached snapshot (offline / API error), not live `/api/workspace/search`. */
+  const [searchFromCache, setSearchFromCache] = useState(false);
   const searchDebounceRef = useRef(null);
   const [notifOpen, setNotifOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -291,10 +293,12 @@ function AppShell() {
     if (q.length < 2) {
       setSearchHits([]);
       setSearchBusy(false);
+      setSearchFromCache(false);
       return undefined;
     }
     searchDebounceRef.current = window.setTimeout(async () => {
-      if (ws?.canMutate) {
+      if (ws?.apiOnline) {
+        setSearchFromCache(false);
         setSearchBusy(true);
         const { ok, data } = await apiFetch(
           `/api/workspace/search?q=${encodeURIComponent(q)}&limit=18`
@@ -305,6 +309,7 @@ function AppShell() {
           return;
         }
       }
+      setSearchFromCache(true);
       setSearchHits(
         searchWorkspaceSnapshot(ws?.snapshot, q, (p) => ws?.hasPermission?.(p), 18)
       );
@@ -336,6 +341,8 @@ function AppShell() {
       navigate('/sales', { state: { globalSearchQuery: q, focusSalesTab: 'quotations' } });
     } else if (lower.startsWith('rcp-') || lower.startsWith('rcpt')) {
       navigate('/sales', { state: { globalSearchQuery: q, focusSalesTab: 'receipts' } });
+    } else if (lower.startsWith('rf-')) {
+      navigate('/sales', { state: { globalSearchQuery: q, focusSalesTab: 'refund' } });
     } else {
       navigate('/sales', { state: { globalSearchQuery: q, focusSalesTab: 'customers' } });
     }
@@ -416,7 +423,7 @@ function AppShell() {
                     autoComplete="off"
                     aria-label="Global search"
                     aria-autocomplete="list"
-                    aria-expanded={searchHits.length > 0}
+                    aria-expanded={headerSearch.trim().length >= 2}
                     enterKeyHint="search"
                     className="z-toolbar-shell w-full min-h-12 py-3 pl-11 pr-4 sm:pl-12 sm:pr-14 text-base sm:text-[13px] font-medium outline-none transition focus:border-teal-300/50 focus:ring-4 focus:ring-teal-500/10"
                   />
@@ -429,27 +436,49 @@ function AppShell() {
                       {searchBusy ? (
                         <p className="px-3 py-2 text-[11px] text-gray-500">Searching…</p>
                       ) : searchHits.length === 0 ? (
-                        <p className="px-3 py-2 text-[11px] text-gray-500">No matches — Enter uses quick path (QT-/RCP-).</p>
+                        <div className="divide-y divide-amber-50">
+                          <p className="px-3 py-2 text-[11px] text-gray-500">
+                            No matches — Enter uses quick path (QT-/RCP-/RF-).
+                          </p>
+                          {searchFromCache ? (
+                            <p
+                              className="px-3 py-2 text-[10px] font-medium text-amber-950 bg-amber-50/90"
+                              role="status"
+                            >
+                              Cached workspace — empty results may be false negatives. Reconnect for live search.
+                            </p>
+                          ) : null}
+                        </div>
                       ) : (
-                        <ul className="divide-y divide-gray-100" role="listbox">
-                          {searchHits.map((hit) => (
-                            <li key={`${hit.kind}-${hit.id}`}>
-                              <button
-                                type="button"
-                                role="option"
-                                className="flex w-full flex-col items-start gap-0.5 px-3 py-3 text-left text-[12px] hover:bg-teal-50/80 sm:py-2"
-                                onMouseDown={(ev) => ev.preventDefault()}
-                                onClick={() => goSearchHit(hit)}
-                              >
-                                <span className="font-semibold text-[#134e4a]">{hit.label}</span>
-                                <span className="text-[10px] text-gray-500">
-                                  {hit.kind.replace(/_/g, ' ')}
-                                  {hit.sublabel ? ` · ${hit.sublabel}` : ''}
-                                </span>
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
+                        <>
+                          <ul className="divide-y divide-gray-100" role="listbox">
+                            {searchHits.map((hit) => (
+                              <li key={`${hit.kind}-${hit.id}`}>
+                                <button
+                                  type="button"
+                                  role="option"
+                                  className="flex w-full flex-col items-start gap-0.5 px-3 py-3 text-left text-[12px] hover:bg-teal-50/80 sm:py-2"
+                                  onMouseDown={(ev) => ev.preventDefault()}
+                                  onClick={() => goSearchHit(hit)}
+                                >
+                                  <span className="font-semibold text-[#134e4a]">{hit.label}</span>
+                                  <span className="text-[10px] text-gray-500">
+                                    {hit.kind.replace(/_/g, ' ')}
+                                    {hit.sublabel ? ` · ${hit.sublabel}` : ''}
+                                  </span>
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                          {searchFromCache ? (
+                            <p
+                              className="border-t border-amber-100 bg-amber-50/90 px-3 py-2 text-[10px] font-medium text-amber-950"
+                              role="status"
+                            >
+                              Cached workspace — results may be incomplete or outdated. Reconnect for live search.
+                            </p>
+                          ) : null}
+                        </>
                       )}
                     </div>
                   ) : null}
