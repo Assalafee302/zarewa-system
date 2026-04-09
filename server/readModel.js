@@ -735,8 +735,20 @@ export function listStockMovementsForProduct(db, productID, limit = 500) {
     }));
 }
 
-export function getWipByProduct(db) {
-  const rows = db.prepare(`SELECT * FROM wip_balances`).all();
+export function getWipByProduct(db, branchScope = 'ALL') {
+  const hasBb = hasColumn(db, 'wip_balances', 'branch_id');
+  let rows;
+  if (!hasBb) {
+    rows = db.prepare(`SELECT * FROM wip_balances`).all();
+  } else if (branchScope === 'ALL' || !branchScope) {
+    rows = db.prepare(`SELECT * FROM wip_balances`).all();
+  } else {
+    rows = db
+      .prepare(
+        `SELECT * FROM wip_balances WHERE branch_id = ? OR branch_id IS NULL OR TRIM(COALESCE(branch_id,'')) = ''`
+      )
+      .all(branchScope);
+  }
   const o = {};
   for (const r of rows) o[r.product_id] = r.qty;
   return o;

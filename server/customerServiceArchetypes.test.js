@@ -11,14 +11,14 @@
  * - Privileged corrections: receipt/advance reversals require finance.reverse (not everyday cashier roles).
  * - Traceability: production start without coil allocation is blocked (material accountability).
  * - Audit trail: finance roles can read audit_log after sensitive postings.
- * - Dual control on one database: sales raises refund; manager or finance approves; finance pays (staff never pays).
+ * - Dual control on one database: sales raises refund; branch manager, MD, finance (finance.approve), or admin approves; finance pays (staff never pays).
  * - Read-only boundary: sales cannot view audit_log; operations/procurement cannot sell or bank cash.
  * - Rejection gates: rejected refunds and payment requests cannot be paid out.
  * - Session: unauthenticated API calls are rejected before any business logic.
  *
  * These tests are live API exercises (in-memory DB each time), not UI flows.
  */
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import { createDatabase } from './db.js';
 import { createApp } from './app.js';
@@ -1479,6 +1479,17 @@ function buildArchetypes() {
 const ARCHETYPES = buildArchetypes();
 
 describe('Customer service archetypes (45 personalities)', () => {
+  beforeEach(() => {
+    // This suite uses fixed 2026-03-29 dates; freeze time to prevent quotations drifting into Expired
+    // and blocking updates (e.g. paidNgn patch used to satisfy cutting-list thresholds).
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-29T12:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   afterAll(() => {
     for (const db of openDbs) db.close();
     openDbs.length = 0;

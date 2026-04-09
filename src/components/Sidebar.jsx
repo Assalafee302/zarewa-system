@@ -94,7 +94,8 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
       icon: <ClipboardCheck size={18} />,
       label: 'Edit approvals',
       path: '/edit-approvals',
-      visible: ws?.canAccessModule?.('edit_approvals') ?? false,
+      // Edit approvals is embedded on the dashboard (not a standalone page).
+      visible: false,
       badgeCount: ws?.editApprovalsPendingCount ?? 0,
     },
     {

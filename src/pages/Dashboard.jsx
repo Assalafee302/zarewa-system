@@ -6,42 +6,18 @@ import {
   PlusCircle,
   FileText,
   Scissors,
-  AlertTriangle,
-  TrendingUp,
   Receipt,
   PackageCheck,
-  Activity,
-  BarChart3,
+  AlertTriangle,
   Banknote,
   Wallet,
-  LineChart as LineChartIcon,
-  PieChart as PieChartIcon,
-  Truck,
-  Download,
   ChevronRight,
-  Settings2,
   HelpCircle,
   Pencil,
   X,
   Trophy,
 } from 'lucide-react';
-import {
-  ResponsiveContainer,
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  BarChart,
-  Bar,
-  PieChart,
-  Pie,
-  Cell,
-  Legend,
-} from 'recharts';
 import { PageHeader, PageShell, ModalFrame } from '../components/layout';
-import { DashboardKpiStrip } from '../components/dashboard/DashboardKpiStrip';
 import WorkspaceShortcuts from '../components/WorkspaceShortcuts';
 import {
   formatNgn,
@@ -50,25 +26,16 @@ import { useInventory } from '../context/InventoryContext';
 import { useToast } from '../context/ToastContext';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { apiFetch } from '../lib/apiBase';
+import { EditSecondApprovalInline } from '../components/EditSecondApprovalInline';
 import { mergeDashboardPrefs, dashboardPrefsShallowEqual } from '../lib/dashboardPrefs';
 import { productionJobNeedsManagerReviewAttention } from '../lib/productionReview';
 import {
   buildPriceListSaveBody,
   spotPricesRowsFromMasterData,
 } from '../lib/spotPricesFromMasterData';
-import {
-  liveCashflowMonthly,
-  liveMetersSeries,
-  liveProductionAttributedSalesSeriesByMonth,
-  liveProductionAttributedSalesSeriesByWeek,
-  liveProductionPulse,
-  liveStockMix,
-  liveTopSalesPerformersByMaterial,
-} from '../lib/liveAnalytics';
+import { liveTopSalesPerformersByMaterial } from '../lib/liveAnalytics';
 import { refundOutstandingAmount } from '../lib/refundsStore';
-
-/** Monochrome teal scale — professional, print-safe */
-const PIE_COLORS = ['#134e4a', '#1a5c54', '#2d6d66', '#4a8079', '#64748b'];
+import EditApprovalsPanel from '../components/dashboard/EditApprovalsPanel';
 
 function attrsForProduct(p) {
   return (
@@ -86,6 +53,57 @@ function formatPerformerGauge(row) {
   return '—';
 }
 
+function CoilRequestAckRow({ request, ws, showToast }) {
+  const [aid, setAid] = useState('');
+  const acknowledge = async () => {
+    if (!ws?.canMutate) {
+      showToast('Reconnect to acknowledge — workspace is read-only.', { variant: 'info' });
+      return;
+    }
+    const { ok, data } = await apiFetch(`/api/coil-requests/${encodeURIComponent(request.id)}/acknowledge`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...(aid.trim() ? { editApprovalId: aid.trim() } : {}),
+      }),
+    });
+    if (!ok || !data?.ok) {
+      showToast(data?.error || 'Could not acknowledge request.', { variant: 'error' });
+      return;
+    }
+    setAid('');
+    await ws.refresh();
+  };
+  return (
+    <li className="p-4 flex flex-col sm:flex-row sm:items-center gap-3 justify-between">
+      <div className="min-w-0 text-[11px]">
+        <p className="font-semibold text-slate-900">
+          {request.gauge || '—'} mm · {request.colour || '—'} · {request.materialType || '—'}
+        </p>
+        <p className="text-slate-600 mt-1">
+          {request.requestedKg ? `${request.requestedKg} kg (approx.)` : 'Qty not specified'}
+          {request.note ? ` · ${request.note}` : ''}
+        </p>
+        <p className="text-[9px] text-slate-400 mt-1 font-mono">{request.id}</p>
+        <EditSecondApprovalInline
+          entityKind="coil_request"
+          entityId={request.id}
+          value={aid}
+          onChange={setAid}
+          className="mt-2"
+        />
+      </div>
+      <button
+        type="button"
+        onClick={() => void acknowledge()}
+        className="shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[10px] font-semibold uppercase text-slate-700 hover:bg-slate-50"
+      >
+        Acknowledge
+      </button>
+    </li>
+  );
+}
+
 const Dashboard = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -97,7 +115,7 @@ const Dashboard = () => {
   const [prefs, setPrefs] = useState(() => mergeDashboardPrefs());
   const [priceEditorOpen, setPriceEditorOpen] = useState(false);
   const [priceDraft, setPriceDraft] = useState([]);
-  const [salesTrendGranularity, setSalesTrendGranularity] = useState('month');
+  const [priceListEditAidById, setPriceListEditAidById] = useState({});
 
    
   useEffect(() => {
@@ -121,6 +139,7 @@ const Dashboard = () => {
 
   const openPriceEditor = useCallback(() => {
     setPriceDraft(spotPriceRows.map((r) => ({ ...r })));
+    setPriceListEditAidById({});
     setPriceEditorOpen(true);
   }, [spotPriceRows]);
 
@@ -137,11 +156,15 @@ const Dashboard = () => {
             unitPriceNgn: row.priceNgn,
             notes: row.note ?? '',
           });
+          const aid = String(priceListEditAidById[row.id] || '').trim();
           const { ok, data } = await apiFetch(
             `/api/setup/price-list/${encodeURIComponent(row.id)}`,
             {
               method: 'PATCH',
-              body: JSON.stringify(body),
+              body: JSON.stringify({
+                ...body,
+                ...(aid ? { editApprovalId: aid } : {}),
+              }),
             }
           );
           if (!ok || !data?.ok) {
@@ -150,13 +173,14 @@ const Dashboard = () => {
           }
         }
         await ws.refresh();
+        setPriceListEditAidById({});
         setPriceEditorOpen(false);
         showToast('Prices saved to setup (master data).');
       } catch (err) {
         showToast(String(err.message || err), { variant: 'error' });
       }
     },
-    [priceDraft, showToast, ws]
+    [priceDraft, priceListEditAidById, showToast, ws]
   );
 
   const goSalesAction = useCallback(
@@ -272,24 +296,6 @@ const Dashboard = () => {
       .slice(0, 2);
   }, [invProducts]);
 
-  const metersSeries = useMemo(() => liveMetersSeries(productionJobs, 6), [productionJobs]);
-  const metersCurrent = metersSeries[metersSeries.length - 1];
-  const metersPrev = metersSeries[metersSeries.length - 2];
-  const metersDeltaPct = useMemo(() => {
-    if (!metersPrev?.meters) return null;
-    return ((metersCurrent.meters - metersPrev.meters) / metersPrev.meters) * 100;
-  }, [metersCurrent, metersPrev]);
-
-  const salesByMonth = useMemo(
-    () => liveProductionAttributedSalesSeriesByMonth(quotations, productionJobs, 6),
-    [quotations, productionJobs]
-  );
-  const stockMix = useMemo(() => liveStockMix(invProducts), [invProducts]);
-  const cashflowMonthly = useMemo(
-    () => liveCashflowMonthly(receipts, expenses, 6, treasuryMovements),
-    [expenses, receipts, treasuryMovements]
-  );
-
   const dashboardAlerts = useMemo(() => {
     const pendingRefundPayouts = refunds.filter((x) => x.status === 'Approved' && refundOutstandingAmount(x) > 0);
     return [
@@ -382,19 +388,6 @@ const Dashboard = () => {
     transitPoCount,
   ]);
 
-  const salesTrendData = useMemo(
-    () =>
-      salesTrendGranularity === 'week'
-        ? liveProductionAttributedSalesSeriesByWeek(quotations, productionJobs, 8)
-        : salesByMonth,
-    [quotations, productionJobs, salesByMonth, salesTrendGranularity]
-  );
-
-  const pulse = useMemo(
-    () => liveProductionPulse(productionJobs, movements, wipByProduct, pendingCoilRequests),
-    [productionJobs, movements, pendingCoilRequests, wipByProduct]
-  );
-
   const productionMetrics = ws?.snapshot?.productionMetrics;
 
   const topCoilsRows = useMemo(
@@ -411,23 +404,9 @@ const Dashboard = () => {
             ? `${currentUserName}, here is the live sales, treasury, production, and inventory picture for today.`
             : 'Live sales, treasury, production, and inventory control in one view'
         }
-        toolbar={
-          <div className="flex flex-wrap items-center gap-2 justify-end w-full">
-            <button
-              type="button"
-              onClick={() => navigate('/settings')}
-              className="z-btn-secondary gap-2"
-              title="Customize visible tiles (saved in this browser)"
-            >
-              <Settings2 size={16} /> Preferences
-            </button>
-          </div>
-        }
       />
 
       <WorkspaceShortcuts />
-
-      <DashboardKpiStrip />
 
       {pendingCoilRequests.length > 0 ? (
         <section className="mb-8 rounded-xl border border-amber-200/80 bg-amber-50/40 shadow-sm overflow-hidden">
@@ -452,37 +431,7 @@ const Dashboard = () => {
             </div>
             <ul className="divide-y divide-amber-200/50 rounded-lg border border-amber-200/60 bg-white">
               {pendingCoilRequests.map((r) => (
-                <li
-                  key={r.id}
-                  className="p-4 flex flex-col sm:flex-row sm:items-center gap-3 justify-between"
-                >
-                  <div className="min-w-0 text-[11px]">
-                    <p className="font-semibold text-slate-900">
-                      {r.gauge || '—'} mm · {r.colour || '—'} · {r.materialType || '—'}
-                    </p>
-                    <p className="text-slate-600 mt-1">
-                      {r.requestedKg ? `${r.requestedKg} kg (approx.)` : 'Qty not specified'}
-                      {r.note ? ` · ${r.note}` : ''}
-                    </p>
-                    <p className="text-[9px] text-slate-400 mt-1 font-mono">{r.id}</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      if (!ws?.canMutate) {
-                        showToast('Reconnect to acknowledge — workspace is read-only.', { variant: 'info' });
-                        return;
-                      }
-                      await apiFetch(`/api/coil-requests/${encodeURIComponent(r.id)}/acknowledge`, {
-                        method: 'PATCH',
-                      });
-                      await ws.refresh();
-                    }}
-                    className="shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[10px] font-semibold uppercase text-slate-700 hover:bg-slate-50"
-                  >
-                    Acknowledge
-                  </button>
-                </li>
+                <CoilRequestAckRow key={r.id} request={r} ws={ws} showToast={showToast} />
               ))}
             </ul>
           </div>
@@ -551,52 +500,6 @@ const Dashboard = () => {
         </div>
       </section>
 
-      {prefs.showAlertBanner ? (
-        <section
-          className="mb-8 rounded-xl border border-slate-200/90 bg-white p-5 shadow-sm"
-          aria-label="Operational alerts"
-        >
-          <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-            <h3 className="text-xs font-semibold text-[#134e4a] uppercase tracking-widest flex items-center gap-2">
-              <AlertTriangle size={14} className="text-slate-500" />
-              Alerts & reminders
-            </h3>
-            <span className="text-[10px] font-medium text-slate-400 uppercase tracking-wide">
-              {ws?.apiOnline
-                ? 'Live operational feed'
-                : ws?.usingCachedData
-                  ? 'Cached feed — reconnect for live updates'
-                  : 'Connect API for live feed'}
-            </span>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
-            {dashboardAlerts.map((a) => (
-              <button
-                key={a.id}
-                type="button"
-                title={a.hint}
-                onClick={() => navigate(a.path, { state: a.state ?? {} })}
-                className={`text-left p-4 rounded-xl border border-slate-200 bg-white transition-all hover:border-slate-300 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/20 ${
-                  a.severity === 'danger'
-                    ? 'border-l-4 border-l-rose-600'
-                    : a.severity === 'warning'
-                      ? 'border-l-4 border-l-amber-500'
-                      : 'border-l-4 border-l-slate-300'
-                }`}
-              >
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-1">
-                  {a.type}
-                </p>
-                <p className="text-sm font-semibold text-slate-900">{a.title}</p>
-                <p className="text-[11px] text-slate-600 mt-1 leading-snug">{a.detail}</p>
-                <p className="text-[10px] font-semibold text-slate-500 mt-3 flex items-center gap-1">
-                  Take action <ChevronRight size={12} />
-                </p>
-              </button>
-            ))}
-          </div>
-        </section>
-      ) : null}
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
         <aside className="lg:col-span-1 space-y-6">
@@ -675,102 +578,7 @@ const Dashboard = () => {
         </aside>
 
         <div className="lg:col-span-3 space-y-8">
-          <section className="bg-white p-6 md:p-8 rounded-xl shadow-sm border border-slate-200/90 relative overflow-hidden">
-            <div className="absolute top-0 right-0 p-8 opacity-[0.04] pointer-events-none text-[#134e4a]">
-              <BarChart3 size={120} />
-            </div>
-            <div className="flex flex-wrap justify-between items-center gap-4 mb-6">
-              <div className="flex items-center gap-3 text-[#134e4a]">
-                <Activity size={20} strokeWidth={2} />
-                <h3 className="text-base font-bold uppercase tracking-wide text-slate-900">
-                  Production pulse
-                </h3>
-              </div>
-              <span className="text-[10px] font-semibold text-slate-600 bg-slate-100 px-3 py-1.5 rounded-md flex items-center gap-1.5 border border-slate-200 tabular-nums">
-                <TrendingUp size={14} className="text-slate-500" />
-                {metersDeltaPct == null ? 'Fresh baseline' : `${metersDeltaPct >= 0 ? '+' : ''}${metersDeltaPct.toFixed(1)}% vs prior month`}
-              </span>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <button
-                type="button"
-                onClick={() => navigate('/sales')}
-                title="Sales / dispatch context"
-                className="p-5 rounded-xl border border-slate-200 bg-slate-50/50 text-left hover:border-slate-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/20"
-              >
-                <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-2">
-                  Metres produced (7 days)
-                </p>
-                <p className="text-3xl font-bold tracking-tight text-[#134e4a] tabular-nums">
-                  {pulse.metresProduced7d.toLocaleString()}
-                  <span className="text-lg font-semibold text-slate-500 ml-1">m</span>
-                </p>
-                <p className="text-[9px] text-slate-500 mt-2">
-                  Actual metres from jobs completed in the last 7 days (production date).
-                </p>
-              </button>
-              <button
-                type="button"
-                onClick={() => navigate('/operations')}
-                title="Metres corrugated at the mill — line output before full dispatch"
-                className="p-5 rounded-xl border border-slate-200 bg-slate-50/50 text-left hover:border-slate-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/20"
-              >
-                <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-1">
-                  Mill output (7 days)
-                  <span
-                    role="button"
-                    tabIndex={0}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setMillHelpOpen(true);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setMillHelpOpen(true);
-                      }
-                    }}
-                    className="inline-flex rounded-full p-0.5 text-slate-400 hover:text-[#134e4a] hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/30 cursor-pointer"
-                    aria-label="What is mill output?"
-                    title="Explain this metric"
-                  >
-                    <HelpCircle size={14} />
-                  </span>
-                </p>
-                <p className="text-3xl font-bold tracking-tight text-[#134e4a] tabular-nums">
-                  {pulse.millOutput7d.toLocaleString()}
-                  <span className="text-lg font-semibold text-slate-500 ml-1">m</span>
-                </p>
-                <p className="text-[9px] text-slate-500 mt-2 leading-snug">
-                  Corrugated off the line; may differ from produced (completed jobs) while WIP is in yard.
-                </p>
-              </button>
-              <button
-                type="button"
-                onClick={() => navigate('/operations')}
-                title="Production queue"
-                className="p-5 rounded-xl border border-slate-200 bg-slate-50/50 text-left hover:border-slate-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/20"
-              >
-                <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-2">
-                  Active jobs
-                </p>
-                <p className="text-3xl font-bold tracking-tight text-[#134e4a] tabular-nums">
-                  {pulse.activeJobs}
-                </p>
-                <p className="text-[9px] text-slate-500 mt-2">Derived from WIP balances and open coil requests.</p>
-              </button>
-            </div>
-            {productionMetrics && productionMetrics.jobCount > 0 ? (
-              <p className="text-[10px] text-slate-600 mt-5 pt-4 border-t border-slate-100 leading-relaxed">
-                <span className="font-semibold text-slate-800">Production job rollup</span> (current workspace):{' '}
-                {productionMetrics.jobCount} job(s) · planned{' '}
-                {Math.round(Number(productionMetrics.totalPlannedMeters) || 0).toLocaleString()} m · actual recorded{' '}
-                {Math.round(Number(productionMetrics.totalActualMeters) || 0).toLocaleString()} m · completed actual{' '}
-                {Math.round(Number(productionMetrics.completedActualMeters) || 0).toLocaleString()} m
-              </p>
-            ) : null}
-          </section>
+          {ws?.canAccessModule?.('edit_approvals') ? <EditApprovalsPanel /> : null}
 
           <section className="bg-white p-6 md:p-8 rounded-xl border border-slate-200/90 shadow-sm">
             <div className="flex flex-col gap-4 mb-5">
@@ -878,164 +686,6 @@ const Dashboard = () => {
             )}
           </section>
 
-          {prefs.showCharts ? (
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
-              <section className="bg-white p-6 rounded-xl border border-slate-200/90 shadow-sm">
-                <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-                  <div className="flex items-center gap-2 text-slate-800">
-                    <LineChartIcon size={18} className="text-[#134e4a]" />
-                    <h3 className="text-xs font-semibold uppercase tracking-widest text-slate-700">
-                      Sales trend (produced)
-                    </h3>
-                  </div>
-                  <div
-                    className="inline-flex rounded-lg border border-slate-200 p-0.5 bg-slate-50"
-                    role="group"
-                    aria-label="Sales trend by production completion date"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => setSalesTrendGranularity('week')}
-                      className={`px-3 py-1.5 rounded-md text-[9px] font-semibold uppercase tracking-wide transition-all ${
-                        salesTrendGranularity === 'week'
-                          ? 'bg-[#134e4a] text-white'
-                          : 'text-slate-500 hover:text-slate-800'
-                      }`}
-                    >
-                      By week
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSalesTrendGranularity('month')}
-                      className={`px-3 py-1.5 rounded-md text-[9px] font-semibold uppercase tracking-wide transition-all ${
-                        salesTrendGranularity === 'month'
-                          ? 'bg-[#134e4a] text-white'
-                          : 'text-slate-500 hover:text-slate-800'
-                      }`}
-                    >
-                      By month
-                    </button>
-                  </div>
-                </div>
-                <div
-                  className="h-64 w-full"
-                  title="₦ from quotations when production completes in each period; split by actual metres per job."
-                >
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={salesTrendData} margin={{ top: 8, right: 12, left: 4, bottom: 8 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                      <XAxis
-                        dataKey="period"
-                        tick={{ fontSize: 10, fill: '#64748b' }}
-                        tickLine={false}
-                        axisLine={{ stroke: '#e2e8f0' }}
-                        interval="preserveStartEnd"
-                      />
-                      <YAxis
-                        tick={{ fontSize: 10, fill: '#64748b' }}
-                        tickFormatter={(v) => `${(v / 1e6).toFixed(1)}M`}
-                        width={40}
-                        tickLine={false}
-                        axisLine={false}
-                      />
-                      <Tooltip
-                        formatter={(value) => [formatNgn(value), 'Sales (produced)']}
-                        labelFormatter={(l) => l}
-                        contentStyle={{
-                          borderRadius: 8,
-                          border: '1px solid #e2e8f0',
-                          fontSize: 12,
-                        }}
-                        labelStyle={{ fontWeight: 600 }}
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="amountNgn"
-                        stroke="#134e4a"
-                        strokeWidth={2}
-                        dot={{ fill: '#134e4a', r: 3, strokeWidth: 0 }}
-                        activeDot={{ r: 5, fill: '#134e4a' }}
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              </section>
-
-              <section className="bg-white p-6 rounded-xl border border-slate-200/90 shadow-sm">
-                <div className="flex items-center gap-2 mb-4 text-slate-800">
-                  <PieChartIcon size={18} className="text-[#134e4a]" />
-                  <h3 className="text-xs font-semibold uppercase tracking-widest text-slate-700">
-                    Stock mix (shape of yard)
-                  </h3>
-                </div>
-                <div className="h-64 w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={stockMix}
-                        dataKey="value"
-                        nameKey="name"
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={52}
-                        outerRadius={78}
-                        paddingAngle={2}
-                      >
-                        {stockMix.map((_, i) => (
-                          <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} stroke="#fff" strokeWidth={1} />
-                        ))}
-                      </Pie>
-                      <Tooltip
-                        formatter={(v, name) => [`${v}`, name]}
-                        contentStyle={{ borderRadius: 12, border: '1px solid #e2e8f0' }}
-                      />
-                      <Legend wrapperStyle={{ fontSize: 11, color: '#475569' }} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-              </section>
-
-              <section className="bg-white p-6 rounded-xl border border-slate-200/90 shadow-sm xl:col-span-2">
-                <div className="flex items-center gap-2 mb-4 text-slate-800">
-                  <BarChart3 size={18} className="text-[#134e4a]" />
-                  <h3 className="text-xs font-semibold uppercase tracking-widest text-slate-700">
-                    Income vs expense (NGN millions)
-                  </h3>
-                </div>
-                <div className="h-64 w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart
-                      data={cashflowMonthly}
-                      margin={{ top: 8, right: 12, left: 4, bottom: 8 }}
-                    >
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                      <XAxis
-                        dataKey="month"
-                        tick={{ fontSize: 10, fill: '#64748b' }}
-                        tickLine={false}
-                        axisLine={{ stroke: '#e2e8f0' }}
-                      />
-                      <YAxis
-                        tick={{ fontSize: 10, fill: '#64748b' }}
-                        tickFormatter={(v) => `₦${v}M`}
-                        width={44}
-                        tickLine={false}
-                        axisLine={false}
-                      />
-                      <Tooltip
-                        formatter={(v) => [`₦${v}M`, '']}
-                        contentStyle={{ borderRadius: 8, border: '1px solid #e2e8f0' }}
-                      />
-                      <Legend wrapperStyle={{ fontSize: 11, color: '#475569' }} />
-                      <Bar dataKey="income" fill="#134e4a" name="Income" radius={[4, 4, 0, 0]} />
-                      <Bar dataKey="expense" fill="#cbd5e1" name="Expense" radius={[4, 4, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </section>
-            </div>
-          ) : null}
-
           <div className="grid grid-cols-1 gap-8">
             <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-200/90">
               <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-6">
@@ -1106,42 +756,6 @@ const Dashboard = () => {
         </div>
       </div>
 
-      {prefs.showReportsStrip ? (
-        <section className="z-soft-panel mt-10 p-6">
-          <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
-            <h3 className="text-xs font-black text-[#134e4a] uppercase tracking-widest flex items-center gap-2">
-              <Download size={16} />
-              Reports & exports
-            </h3>
-            <button
-              type="button"
-              onClick={() => navigate('/reports')}
-              className="text-[10px] font-semibold text-[#134e4a] uppercase tracking-wider hover:underline"
-              title="Full reports library"
-            >
-              Open reports
-            </button>
-          </div>
-          <p className="text-xs text-gray-500 max-w-2xl mb-4">
-            Download sales, inventory, purchase, and financial statements as PDF, Excel, or CSV when the export
-            service is connected.
-          </p>
-          <div className="flex flex-wrap gap-3">
-            {['Sales summary', 'Inventory valuation', 'Purchase history', 'P&L snapshot'].map((label) => (
-              <button
-                key={label}
-                type="button"
-                onClick={() => navigate('/reports')}
-                className="z-btn-secondary text-[10px] uppercase tracking-wide"
-                title="Configure export in Reports"
-              >
-                <Truck size={14} className="opacity-70" /> {label}
-              </button>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
       <ModalFrame isOpen={priceEditorOpen} onClose={() => setPriceEditorOpen(false)}>
         <div className="z-modal-panel max-w-2xl max-h-[90vh] overflow-hidden flex flex-col p-0">
           <div className="flex items-center justify-between gap-4 border-b border-gray-100 px-6 py-4 shrink-0">
@@ -1211,6 +825,19 @@ const Dashboard = () => {
                           )
                         }
                         className="w-full rounded-xl border border-gray-200 bg-white py-2 px-3 text-sm font-black text-[#134e4a] outline-none focus:ring-2 focus:ring-[#134e4a]/15 tabular-nums"
+                      />
+                    </div>
+                    <div className="sm:col-span-12">
+                      <EditSecondApprovalInline
+                        entityKind="setup_record"
+                        entityId={`price-list:${row.id}`}
+                        value={priceListEditAidById[row.id] || ''}
+                        onChange={(v) =>
+                          setPriceListEditAidById((prev) => ({
+                            ...prev,
+                            [row.id]: v,
+                          }))
+                        }
                       />
                     </div>
                   </div>

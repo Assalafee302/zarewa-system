@@ -690,7 +690,7 @@ function buildScenarioMatrix() {
           lines: buildExactLengths(lineCount, totalMeters),
         });
         expect(cutting.cuttingList.totalMeters).toBeCloseTo(totalMeters, 6);
-        await createProductionJob(agent, {
+        const job = await createProductionJob(agent, {
           cuttingListId: cutting.id,
           productID: fgProduct.productID,
           productName: fgProduct.name,
@@ -701,7 +701,7 @@ function buildScenarioMatrix() {
         const after = await bootstrap(agent);
         const row = after.cuttingLists.find((item) => item.id === cutting.id);
         expect(row.productionRegistered).toBe(true);
-        expect(row.productionRegisterRef).toBe('');
+        expect(row.productionRegisterRef).toBe(job.jobID);
       },
     });
   }
@@ -1675,7 +1675,9 @@ describe('Scenario matrix', () => {
         try {
           await scenario.run();
         } catch (error) {
-          failures.push(`${scenario.id} ${scenario.name}: ${String(error?.message || error)}`);
+          const msg = String(error?.message || error);
+          const top = String(error?.stack || '').split('\n').slice(0, 2).join('\n');
+          failures.push(`${scenario.id} ${scenario.name}: ${msg}${top ? `\n${top}` : ''}`);
         } finally {
           while (openDbs.length > dbCountBefore) {
             try {

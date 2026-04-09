@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 
 import { MainPanel, PageHeader, PageShell, PageTabs, ModalFrame } from '../components/layout';
+import { EditSecondApprovalInline } from '../components/EditSecondApprovalInline';
 import { formatNgn } from '../Data/mockData';
 import { useToast } from '../context/ToastContext';
 import { useInventory } from '../context/InventoryContext';
@@ -112,8 +113,18 @@ const TREASURY_STATEMENT_TYPE_LABEL = {
   TRANSPORT_PAYMENT: 'Transport / haulage',
 };
 
+const TREASURY_SOURCE_KIND_LABEL = {
+  INTER_BRANCH_LOAN: 'Inter-branch lending (disbursement)',
+  INTER_BRANCH_LOAN_REPAY: 'Inter-branch lending (repayment)',
+};
+
 function treasuryMovementStatementLabel(m) {
-  const kind = TREASURY_STATEMENT_TYPE_LABEL[m.type] || m.type || 'Treasury movement';
+  const sourceLabel = TREASURY_SOURCE_KIND_LABEL[m.sourceKind];
+  const kind =
+    sourceLabel ||
+    TREASURY_STATEMENT_TYPE_LABEL[m.type] ||
+    m.type ||
+    'Treasury movement';
   const bits = [kind];
   if (m.counterpartyName) bits.push(m.counterpartyName);
   if (m.reference) bits.push(`Ref ${m.reference}`);
@@ -176,6 +187,28 @@ const Account = () => {
     amountNgn: '',
     reference: '',
   });
+  const [interBranchLoans, setInterBranchLoans] = useState([]);
+  const [interBranchBalances, setInterBranchBalances] = useState([]);
+  const [interBranchBusy, setInterBranchBusy] = useState(false);
+  const [interBranchForm, setInterBranchForm] = useState({
+    lenderBranchId: '',
+    borrowerBranchId: '',
+    fromTreasuryAccountId: '',
+    toTreasuryAccountId: '',
+    principalNgn: '',
+    dateISO: new Date().toISOString().slice(0, 10),
+    reference: '',
+    proposedNote: '',
+    repaymentPlanJson: '[\n  { "dueDateISO": "2026-06-30", "amountNgn": 500000, "note": "First instalment" }\n]',
+  });
+  const [interBranchRepayForm, setInterBranchRepayForm] = useState({
+    loanId: '',
+    amountNgn: '',
+    dateISO: new Date().toISOString().slice(0, 10),
+    fromTreasuryAccountId: '',
+    toTreasuryAccountId: '',
+    note: '',
+  });
   const [apPayForm, setApPayForm] = useState({
     amountNgn: '',
     paymentMethod: 'Bank Transfer',
@@ -197,6 +230,8 @@ const Account = () => {
   const [receiptBankAmtInput, setReceiptBankAmtInput] = useState('');
   const [receiptClearDelivery, setReceiptClearDelivery] = useState(false);
   const [receiptFinanceBusy, setReceiptFinanceBusy] = useState(false);
+  const [receiptFinanceEditApprovalId, setReceiptFinanceEditApprovalId] = useState('');
+  const [bankReconEditAidByLine, setBankReconEditAidByLine] = useState({});
 
    
   useEffect(() => {
@@ -332,19 +367,29 @@ const Account = () => {
   );
 
   const treasuryTransferRows = useMemo(() => {
+    const transferKinds = new Set(['TREASURY_TRANSFER', 'INTER_BRANCH_LOAN', 'INTER_BRANCH_LOAN_REPAY']);
     return liveTreasuryMovements
-      .filter((m) => m.sourceKind === 'TREASURY_TRANSFER' && m.type === 'INTERNAL_TRANSFER_OUT')
+      .filter((m) => transferKinds.has(m.sourceKind) && m.type === 'INTERNAL_TRANSFER_OUT')
       .map((m) => {
         const twin = liveTreasuryMovements.find(
-          (row) => row.sourceKind === 'TREASURY_TRANSFER' && row.sourceId === m.sourceId && row.type === 'INTERNAL_TRANSFER_IN'
+          (row) =>
+            row.sourceKind === m.sourceKind &&
+            row.sourceId === m.sourceId &&
+            row.type === 'INTERNAL_TRANSFER_IN'
         );
+        const tag =
+          m.sourceKind === 'INTER_BRANCH_LOAN'
+            ? 'Inter-branch lend'
+            : m.sourceKind === 'INTER_BRANCH_LOAN_REPAY'
+              ? 'Inter-branch repay'
+              : 'Transfer';
         return {
           id: m.sourceId || m.id,
           at: String(m.postedAtISO || '').slice(0, 10),
           fromName: m.accountName,
           toName: twin?.accountName || '—',
           amountNgn: Math.abs(m.amountNgn || 0),
-          reference: m.reference || twin?.reference || '—',
+          reference: [tag, m.reference || twin?.reference || '—'].filter(Boolean).join(' · '),
         };
       });
   }, [liveTreasuryMovements]);
@@ -824,6 +869,7 @@ const Account = () => {
   );
 
   const openReceiptFinance = useCallback((r) => {
+    setReceiptFinanceEditApprovalId('');
     setReceiptFinanceRow(r);
     const allocated = Number(r.amountNgn) || 0;
     const cash = r.cashReceivedNgn != null ? Number(r.cashReceivedNgn) || allocated : allocated;
@@ -858,6 +904,9 @@ const Account = () => {
                 Number(String(receiptBankAmtInput).replace(/,/g, '')) || 0
               ),
               clearForDelivery: receiptClearDelivery,
+              ...(receiptFinanceEditApprovalId.trim()
+                ? { editApprovalId: receiptFinanceEditApprovalId.trim() }
+                : {}),
             }),
           }
         );
@@ -867,13 +916,14 @@ const Account = () => {
           return;
         }
         showToast('Receipt settlement saved.');
+        setReceiptFinanceEditApprovalId('');
         setReceiptFinanceRow(null);
         await ws.refresh();
       } finally {
         setReceiptFinanceBusy(false);
       }
     },
-    [receiptFinanceRow, receiptBankAmtInput, receiptClearDelivery, ws, showToast]
+    [receiptFinanceRow, receiptBankAmtInput, receiptClearDelivery, receiptFinanceEditApprovalId, ws, showToast]
   );
 
   const saveExpense = async (e) => {
@@ -1087,6 +1137,175 @@ const Account = () => {
     showToast('Fund movement posted — both accounts updated.');
   };
 
+  useEffect(() => {
+    if (activeTab !== 'movements' || !ws?.hasWorkspaceData || !ws.hasPermission('finance.view')) return;
+    let cancelled = false;
+    (async () => {
+      const { ok, data } = await apiFetch('/api/inter-branch-loans');
+      if (cancelled || !ok || !data?.ok) return;
+      setInterBranchLoans(data.loans || []);
+      setInterBranchBalances(data.balances || []);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, ws?.hasWorkspaceData, ws?.refreshEpoch]);
+
+  const canProposeInterBranch =
+    ws?.hasPermission?.('treasury.manage') && ws?.hasPermission?.('finance.post');
+  const canMdInterBranchLoan = ws?.hasPermission?.('inter_branch_loan.md_approve');
+  const canRepayInterBranch =
+    ws?.hasPermission?.('treasury.manage') || ws?.hasPermission?.('finance.pay');
+
+  const submitInterBranchLoan = async (e) => {
+    e.preventDefault();
+    let repaymentPlan;
+    try {
+      repaymentPlan = JSON.parse(interBranchForm.repaymentPlanJson || '[]');
+      if (!Array.isArray(repaymentPlan)) throw new Error('Repayment plan must be a JSON array.');
+    } catch (err) {
+      showToast(String(err.message || err) || 'Invalid repayment plan JSON.', { variant: 'error' });
+      return;
+    }
+    const principalNgn = Number(interBranchForm.principalNgn);
+    if (
+      !interBranchForm.lenderBranchId ||
+      !interBranchForm.borrowerBranchId ||
+      interBranchForm.lenderBranchId === interBranchForm.borrowerBranchId
+    ) {
+      showToast('Choose two different branches.', { variant: 'error' });
+      return;
+    }
+    const fromTa = Number(interBranchForm.fromTreasuryAccountId);
+    const toTa = Number(interBranchForm.toTreasuryAccountId);
+    if (!fromTa || !toTa || fromTa === toTa) {
+      showToast('Choose two different treasury accounts.', { variant: 'error' });
+      return;
+    }
+    if (Number.isNaN(principalNgn) || principalNgn <= 0) {
+      showToast('Enter a valid principal amount.', { variant: 'error' });
+      return;
+    }
+    if (!ws?.canMutate) {
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to propose inter-branch loans — workspace is read-only.'
+          : 'Connect to the API to propose inter-branch loans.',
+        { variant: 'info' }
+      );
+      return;
+    }
+    setInterBranchBusy(true);
+    const { ok, data } = await apiFetch('/api/inter-branch-loans', {
+      method: 'POST',
+      body: JSON.stringify({
+        lenderBranchId: interBranchForm.lenderBranchId,
+        borrowerBranchId: interBranchForm.borrowerBranchId,
+        fromTreasuryAccountId: fromTa,
+        toTreasuryAccountId: toTa,
+        principalNgn,
+        dateISO: interBranchForm.dateISO,
+        reference: interBranchForm.reference.trim(),
+        proposedNote: interBranchForm.proposedNote.trim(),
+        repaymentPlan,
+      }),
+    });
+    setInterBranchBusy(false);
+    if (!ok || !data?.ok) {
+      showToast(data?.error || 'Could not save inter-branch loan.', { variant: 'error' });
+      return;
+    }
+    await ws.refresh();
+    showToast('Inter-branch loan proposed — awaiting MD approval.');
+    setInterBranchForm((f) => ({
+      ...f,
+      principalNgn: '',
+      reference: '',
+      proposedNote: '',
+    }));
+  };
+
+  const mdApproveInterBranch = async (loanId) => {
+    if (!loanId || !ws?.canMutate) return;
+    setInterBranchBusy(true);
+    const { ok, data } = await apiFetch(`/api/inter-branch-loans/${encodeURIComponent(loanId)}/md-approve`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    setInterBranchBusy(false);
+    if (!ok || !data?.ok) {
+      showToast(data?.error || 'MD approval failed.', { variant: 'error' });
+      return;
+    }
+    await ws.refresh();
+    showToast('MD approved — funds moved per proposal.');
+  };
+
+  const mdRejectInterBranch = async (loanId) => {
+    if (!loanId || !ws?.canMutate) return;
+    const note = window.prompt('Optional rejection note') || '';
+    setInterBranchBusy(true);
+    const { ok, data } = await apiFetch(`/api/inter-branch-loans/${encodeURIComponent(loanId)}/md-reject`, {
+      method: 'POST',
+      body: JSON.stringify({ note }),
+    });
+    setInterBranchBusy(false);
+    if (!ok || !data?.ok) {
+      showToast(data?.error || 'Could not reject loan.', { variant: 'error' });
+      return;
+    }
+    await ws.refresh();
+    showToast('Loan proposal rejected.');
+  };
+
+  const submitInterBranchRepay = async (e) => {
+    e.preventDefault();
+    const loanId = String(interBranchRepayForm.loanId || '').trim();
+    const amount = Number(interBranchRepayForm.amountNgn);
+    const fromTa = Number(interBranchRepayForm.fromTreasuryAccountId);
+    const toTa = Number(interBranchRepayForm.toTreasuryAccountId);
+    if (!loanId) {
+      showToast('Select a loan.', { variant: 'error' });
+      return;
+    }
+    if (Number.isNaN(amount) || amount <= 0) {
+      showToast('Enter a valid repayment amount.', { variant: 'error' });
+      return;
+    }
+    if (!fromTa || !toTa || fromTa === toTa) {
+      showToast('Choose two different treasury accounts for repayment.', { variant: 'error' });
+      return;
+    }
+    if (!ws?.canMutate) {
+      showToast('Connect to the API to post repayments.', { variant: 'info' });
+      return;
+    }
+    setInterBranchBusy(true);
+    const { ok, data } = await apiFetch(`/api/inter-branch-loans/${encodeURIComponent(loanId)}/repay`, {
+      method: 'POST',
+      body: JSON.stringify({
+        amountNgn: amount,
+        dateISO: interBranchRepayForm.dateISO,
+        fromTreasuryAccountId: fromTa,
+        toTreasuryAccountId: toTa,
+        note: interBranchRepayForm.note.trim(),
+      }),
+    });
+    setInterBranchBusy(false);
+    if (!ok || !data?.ok) {
+      showToast(data?.error || 'Repayment failed.', { variant: 'error' });
+      return;
+    }
+    await ws.refresh();
+    showToast('Repayment posted.');
+    setInterBranchRepayForm((f) => ({
+      ...f,
+      loanId: '',
+      amountNgn: '',
+      note: '',
+    }));
+  };
+
   const saveApPayment = async (e) => {
     e.preventDefault();
     if (!selectedAp) return;
@@ -1260,7 +1479,12 @@ const Account = () => {
             reconSuggestionsById[line.id]?.text ??
             ''
           ).trim();
-    const body = { status, systemMatch };
+    const aid = String(bankReconEditAidByLine[line.id] || '').trim();
+    const body = {
+      status,
+      systemMatch,
+      ...(aid ? { editApprovalId: aid } : {}),
+    };
     if (status === 'Matched') {
       const sd = settledDrafts[line.id];
       if (sd != null && String(sd).trim() !== '') {
@@ -1297,6 +1521,11 @@ const Account = () => {
     } else {
       showToast(status === 'Matched' ? 'Statement line marked matched.' : 'Bank line updated.');
     }
+    setBankReconEditAidByLine((d) => {
+      const next = { ...d };
+      delete next[line.id];
+      return next;
+    });
     setSettledDrafts((d) => {
       const next = { ...d };
       delete next[line.id];
@@ -1629,6 +1858,13 @@ const Account = () => {
                       Use suggestion ({reconSuggestionsById[line.id].confidence})
                     </button>
                   ) : null}
+                  <EditSecondApprovalInline
+                    entityKind="bank_reconciliation_line"
+                    entityId={line.id}
+                    value={bankReconEditAidByLine[line.id] || ''}
+                    onChange={(v) => setBankReconEditAidByLine((d) => ({ ...d, [line.id]: v }))}
+                    className="mt-2"
+                  />
                   <div className="flex flex-wrap gap-2 shrink-0">
                     <button
                       type="button"
@@ -2170,6 +2406,381 @@ const Account = () => {
                   Move cash to bank, sweep POS settlements, or transfer between bank accounts. Each
                   movement updates both source and destination balances.
                 </p>
+
+                {ws?.hasPermission?.('finance.view') ? (
+                  <section className="rounded-2xl border border-teal-100/80 bg-teal-50/40 p-4 space-y-4 shadow-sm">
+                    <div>
+                      <h3 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest">
+                        Inter-branch lending
+                      </h3>
+                      <p className="text-[11px] text-gray-600 mt-1 max-w-2xl">
+                        Propose a treasury movement from one branch to another. Disbursement posts only
+                        after MD approval. Repayments reduce the outstanding balance; planned instalments
+                        are stored for reference.
+                      </p>
+                    </div>
+                    {interBranchBalances.length > 0 ? (
+                      <div className="rounded-xl border border-teal-200/60 bg-white/70 p-3 space-y-1.5">
+                        <p className="text-[10px] font-bold uppercase tracking-wide text-teal-900">
+                          Outstanding between branches
+                        </p>
+                        <ul className="space-y-1 text-[11px] text-gray-700">
+                          {interBranchBalances.map((b) => (
+                            <li key={`${b.lenderBranchId}-${b.borrowerBranchId}`} className="tabular-nums">
+                              <span className="font-semibold">
+                                {branchNameById[b.borrowerBranchId] || b.borrowerBranchId}
+                              </span>{' '}
+                              owes{' '}
+                              <span className="font-semibold">
+                                {branchNameById[b.lenderBranchId] || b.lenderBranchId}
+                              </span>
+                              : {formatNgn(b.outstandingNgn)}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {canProposeInterBranch ? (
+                      <form className="space-y-3 rounded-xl border border-white/80 bg-white/60 p-3" onSubmit={submitInterBranchLoan}>
+                        <p className="text-[10px] font-bold uppercase tracking-wide text-gray-500">
+                          Propose loan (pending MD)
+                        </p>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                            Lender branch
+                            <select
+                              required
+                              value={interBranchForm.lenderBranchId}
+                              onChange={(e) =>
+                                setInterBranchForm((f) => ({ ...f, lenderBranchId: e.target.value }))
+                              }
+                              className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs font-semibold"
+                            >
+                              <option value="">Select…</option>
+                              {branchOptions.map((b) => (
+                                <option key={b.id} value={b.id}>
+                                  {b.name || b.code || b.id}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                            Borrower branch
+                            <select
+                              required
+                              value={interBranchForm.borrowerBranchId}
+                              onChange={(e) =>
+                                setInterBranchForm((f) => ({ ...f, borrowerBranchId: e.target.value }))
+                              }
+                              className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs font-semibold"
+                            >
+                              <option value="">Select…</option>
+                              {branchOptions.map((b) => (
+                                <option key={b.id} value={b.id}>
+                                  {b.name || b.code || b.id}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                            From treasury account
+                            <select
+                              required
+                              value={interBranchForm.fromTreasuryAccountId}
+                              onChange={(e) =>
+                                setInterBranchForm((f) => ({ ...f, fromTreasuryAccountId: e.target.value }))
+                              }
+                              className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs font-semibold"
+                            >
+                              <option value="">Select…</option>
+                              {bankAccounts.map((a) => (
+                                <option key={a.id} value={String(a.id)}>
+                                  {a.name} ({formatNgn(a.balance)})
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                            To treasury account
+                            <select
+                              required
+                              value={interBranchForm.toTreasuryAccountId}
+                              onChange={(e) =>
+                                setInterBranchForm((f) => ({ ...f, toTreasuryAccountId: e.target.value }))
+                              }
+                              className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs font-semibold"
+                            >
+                              <option value="">Select…</option>
+                              {bankAccounts.map((a) => (
+                                <option key={a.id} value={String(a.id)}>
+                                  {a.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                            Principal (₦)
+                            <input
+                              required
+                              type="number"
+                              min="1"
+                              value={interBranchForm.principalNgn}
+                              onChange={(e) =>
+                                setInterBranchForm((f) => ({ ...f, principalNgn: e.target.value }))
+                              }
+                              className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs font-bold"
+                            />
+                          </label>
+                          <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                            Disbursement date
+                            <input
+                              required
+                              type="date"
+                              value={interBranchForm.dateISO}
+                              onChange={(e) =>
+                                setInterBranchForm((f) => ({ ...f, dateISO: e.target.value }))
+                              }
+                              className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs font-bold"
+                            />
+                          </label>
+                        </div>
+                        <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                          Reference
+                          <input
+                            value={interBranchForm.reference}
+                            onChange={(e) =>
+                              setInterBranchForm((f) => ({ ...f, reference: e.target.value }))
+                            }
+                            className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs font-semibold"
+                          />
+                        </label>
+                        <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                          Context / rationale
+                          <textarea
+                            value={interBranchForm.proposedNote}
+                            onChange={(e) =>
+                              setInterBranchForm((f) => ({ ...f, proposedNote: e.target.value }))
+                            }
+                            rows={2}
+                            className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs"
+                          />
+                        </label>
+                        <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                          Repayment plan (JSON array)
+                          <textarea
+                            value={interBranchForm.repaymentPlanJson}
+                            onChange={(e) =>
+                              setInterBranchForm((f) => ({ ...f, repaymentPlanJson: e.target.value }))
+                            }
+                            rows={4}
+                            className="mt-1 w-full font-mono text-[11px] bg-gray-50 border border-gray-100 rounded-lg py-2 px-2"
+                          />
+                        </label>
+                        <button
+                          type="submit"
+                          disabled={interBranchBusy}
+                          className="z-btn-secondary text-xs py-2 disabled:opacity-50"
+                        >
+                          Submit for MD approval
+                        </button>
+                      </form>
+                    ) : null}
+                    {interBranchLoans.length > 0 ? (
+                      <ul className="space-y-2">
+                        {interBranchLoans.map((loan) => (
+                          <li
+                            key={loan.loanId}
+                            className="rounded-xl border border-gray-200/80 bg-white/80 p-3 text-[11px] space-y-2"
+                          >
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <p className="font-mono font-bold text-[#134e4a]">{loan.loanId}</p>
+                                <p className="text-gray-600 mt-0.5">
+                                  {branchNameById[loan.lenderBranchId] || loan.lenderBranchId} →{' '}
+                                  {branchNameById[loan.borrowerBranchId] || loan.borrowerBranchId} ·{' '}
+                                  {formatNgn(loan.principalNgn)}
+                                  {loan.status === 'active' || loan.status === 'closed' ? (
+                                    <span className="text-gray-500">
+                                      {' '}
+                                      (repaid {formatNgn(loan.repaidNgn)}, outstanding{' '}
+                                      {formatNgn(loan.outstandingNgn)})
+                                    </span>
+                                  ) : null}
+                                </p>
+                                <p className="text-[10px] text-gray-500 mt-1">
+                                  Status: <span className="font-bold uppercase">{loan.status}</span>
+                                  {loan.reference ? ` · ${loan.reference}` : ''}
+                                </p>
+                                {loan.proposedNote ? (
+                                  <p className="text-[10px] text-gray-600 mt-1">{loan.proposedNote}</p>
+                                ) : null}
+                                {Array.isArray(loan.repaymentPlan) && loan.repaymentPlan.length > 0 ? (
+                                  <div className="mt-2 rounded-lg bg-slate-50 border border-slate-100 p-2">
+                                    <p className="text-[9px] font-bold uppercase text-slate-500 mb-1">
+                                      Repayment plan
+                                    </p>
+                                    <ul className="text-[10px] space-y-0.5">
+                                      {loan.repaymentPlan.map((line, idx) => (
+                                        <li key={idx} className="tabular-nums">
+                                          {line.dueDateISO || '—'} · {formatNgn(line.amountNgn)}
+                                          {line.note ? ` · ${line.note}` : ''}
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                ) : null}
+                              </div>
+                              <div className="flex flex-wrap gap-1 shrink-0">
+                                {loan.status === 'pending_md' && canMdInterBranchLoan ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={interBranchBusy}
+                                      onClick={() => void mdApproveInterBranch(loan.loanId)}
+                                      className="text-[9px] font-bold uppercase px-2 py-1 rounded-md bg-emerald-600 text-white disabled:opacity-50"
+                                    >
+                                      MD approve
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={interBranchBusy}
+                                      onClick={() => void mdRejectInterBranch(loan.loanId)}
+                                      className="text-[9px] font-bold uppercase px-2 py-1 rounded-md border border-rose-200 text-rose-800 disabled:opacity-50"
+                                    >
+                                      Reject
+                                    </button>
+                                  </>
+                                ) : null}
+                              </div>
+                            </div>
+                            {loan.status === 'active' && canRepayInterBranch ? (
+                              <form
+                                className="grid gap-2 sm:grid-cols-2 border-t border-gray-100 pt-2 mt-2"
+                                onSubmit={submitInterBranchRepay}
+                              >
+                                <input type="hidden" name="loanId" value={loan.loanId} readOnly />
+                                <p className="text-[10px] font-bold uppercase text-gray-500 sm:col-span-2">
+                                  Record repayment (treasury transfer)
+                                </p>
+                                <select
+                                  required
+                                  value={
+                                    interBranchRepayForm.loanId === loan.loanId
+                                      ? interBranchRepayForm.fromTreasuryAccountId
+                                      : ''
+                                  }
+                                  onChange={(e) =>
+                                    setInterBranchRepayForm((f) => ({
+                                      ...f,
+                                      loanId: loan.loanId,
+                                      fromTreasuryAccountId: e.target.value,
+                                    }))
+                                  }
+                                  className="bg-gray-50 border border-gray-100 rounded-lg py-1.5 px-2 text-xs"
+                                >
+                                  <option value="">From account…</option>
+                                  {bankAccounts.map((a) => (
+                                    <option key={a.id} value={String(a.id)}>
+                                      {a.name}
+                                    </option>
+                                  ))}
+                                </select>
+                                <select
+                                  required
+                                  value={
+                                    interBranchRepayForm.loanId === loan.loanId
+                                      ? interBranchRepayForm.toTreasuryAccountId
+                                      : ''
+                                  }
+                                  onChange={(e) =>
+                                    setInterBranchRepayForm((f) => ({
+                                      ...f,
+                                      loanId: loan.loanId,
+                                      toTreasuryAccountId: e.target.value,
+                                    }))
+                                  }
+                                  className="bg-gray-50 border border-gray-100 rounded-lg py-1.5 px-2 text-xs"
+                                >
+                                  <option value="">To account…</option>
+                                  {bankAccounts.map((a) => (
+                                    <option key={a.id} value={String(a.id)}>
+                                      {a.name}
+                                    </option>
+                                  ))}
+                                </select>
+                                <input
+                                  required
+                                  type="number"
+                                  min="1"
+                                  placeholder="Amount ₦"
+                                  value={
+                                    interBranchRepayForm.loanId === loan.loanId
+                                      ? interBranchRepayForm.amountNgn
+                                      : ''
+                                  }
+                                  onChange={(e) =>
+                                    setInterBranchRepayForm((f) => ({
+                                      ...f,
+                                      loanId: loan.loanId,
+                                      amountNgn: e.target.value,
+                                    }))
+                                  }
+                                  className="bg-gray-50 border border-gray-100 rounded-lg py-1.5 px-2 text-xs font-bold"
+                                />
+                                <input
+                                  type="date"
+                                  value={
+                                    interBranchRepayForm.loanId === loan.loanId
+                                      ? interBranchRepayForm.dateISO
+                                      : interBranchRepayForm.dateISO
+                                  }
+                                  onChange={(e) =>
+                                    setInterBranchRepayForm((f) => ({
+                                      ...f,
+                                      loanId: loan.loanId,
+                                      dateISO: e.target.value,
+                                    }))
+                                  }
+                                  className="bg-gray-50 border border-gray-100 rounded-lg py-1.5 px-2 text-xs"
+                                />
+                                <input
+                                  placeholder="Note"
+                                  value={
+                                    interBranchRepayForm.loanId === loan.loanId
+                                      ? interBranchRepayForm.note
+                                      : ''
+                                  }
+                                  onChange={(e) =>
+                                    setInterBranchRepayForm((f) => ({
+                                      ...f,
+                                      loanId: loan.loanId,
+                                      note: e.target.value,
+                                    }))
+                                  }
+                                  className="sm:col-span-2 bg-gray-50 border border-gray-100 rounded-lg py-1.5 px-2 text-xs"
+                                />
+                                <button
+                                  type="submit"
+                                  disabled={interBranchBusy || interBranchRepayForm.loanId !== loan.loanId}
+                                  className="sm:col-span-2 z-btn-secondary text-xs py-2 disabled:opacity-40"
+                                >
+                                  Post repayment
+                                </button>
+                              </form>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-[10px] text-gray-500">No inter-branch loan records in this scope.</p>
+                    )}
+                  </section>
+                ) : null}
+
                 <button
                   type="button"
                   onClick={() => {
@@ -3744,13 +4355,22 @@ const Account = () => {
         </div>
       </ModalFrame>
 
-      <ModalFrame isOpen={receiptFinanceRow != null} onClose={() => setReceiptFinanceRow(null)}>
+      <ModalFrame
+        isOpen={receiptFinanceRow != null}
+        onClose={() => {
+          setReceiptFinanceEditApprovalId('');
+          setReceiptFinanceRow(null);
+        }}
+      >
         <div className="z-modal-panel max-w-md w-full p-6 sm:p-8">
           <div className="flex justify-between items-start gap-3 mb-4">
             <h3 className="text-lg font-bold text-[#134e4a]">Receipt settlement</h3>
             <button
               type="button"
-              onClick={() => setReceiptFinanceRow(null)}
+              onClick={() => {
+                setReceiptFinanceEditApprovalId('');
+                setReceiptFinanceRow(null);
+              }}
               className="p-2 text-gray-400 hover:text-red-500 rounded-xl"
               aria-label="Close"
             >
@@ -3802,6 +4422,14 @@ const Account = () => {
                   Cleared for delivery — finance confirms this receipt is good to release downstream.
                 </span>
               </label>
+              {receiptFinanceRow?.id ? (
+                <EditSecondApprovalInline
+                  entityKind="sales_receipt"
+                  entityId={receiptFinanceRow.id}
+                  value={receiptFinanceEditApprovalId}
+                  onChange={setReceiptFinanceEditApprovalId}
+                />
+              ) : null}
               <button
                 type="submit"
                 disabled={receiptFinanceBusy}

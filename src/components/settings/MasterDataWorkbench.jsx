@@ -3,6 +3,7 @@ import { LayoutGrid, Pencil, Plus, Save, Search, Trash2, X } from 'lucide-react'
 import { ModalFrame } from '../layout';
 import { apiFetch } from '../../lib/apiBase';
 import { useToast } from '../../context/ToastContext';
+import { EditSecondApprovalInline } from '../EditSecondApprovalInline';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { APP_DATA_TABLE_PAGE_SIZE, useAppTablePaging } from '../../lib/appDataTable';
 import { AppTablePager } from '../ui/AppDataTable';
@@ -154,6 +155,7 @@ function SetupCollectionCard({
   const ws = useWorkspace();
   const { show: showToast } = useToast();
   const [editingId, setEditingId] = useState('');
+  const [setupEditApprovalId, setSetupEditApprovalId] = useState('');
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState(() => emptyForm(fields));
 
@@ -171,11 +173,13 @@ function SetupCollectionCard({
 
   const resetForm = () => {
     setEditingId('');
+    setSetupEditApprovalId('');
     setForm(emptyForm(fields));
   };
 
   const startEdit = (row) => {
     setEditingId(row.id);
+    setSetupEditApprovalId('');
     setForm(formFromRow(fields, row));
   };
 
@@ -191,9 +195,13 @@ function SetupCollectionCard({
     const path = editingId
       ? `/api/setup/${encodeURIComponent(kind)}/${encodeURIComponent(editingId)}`
       : `/api/setup/${encodeURIComponent(kind)}`;
+    const patchBody =
+      method === 'PATCH' && String(setupEditApprovalId || '').trim()
+        ? { ...body, editApprovalId: String(setupEditApprovalId).trim() }
+        : body;
     const { ok, data } = await apiFetch(path, {
       method,
-      body: JSON.stringify(body),
+      body: JSON.stringify(method === 'PATCH' ? patchBody : body),
     });
     setSaving(false);
     if (!ok || !data?.ok) {
@@ -255,6 +263,16 @@ function SetupCollectionCard({
             {renderFieldInput(field, form[field.key], (value) => applyChange(field, value), saving)}
           </div>
         ))}
+        {editingId ? (
+          <div className="md:col-span-2">
+            <EditSecondApprovalInline
+              entityKind="setup_record"
+              entityId={`${kind}:${editingId}`}
+              value={setupEditApprovalId}
+              onChange={setSetupEditApprovalId}
+            />
+          </div>
+        ) : null}
         <div className="md:col-span-2 flex flex-wrap justify-end gap-1.5 pt-1">
           {editingId ? (
             <button type="button" onClick={resetForm} className="z-btn-secondary !px-3 !py-1.5 !text-[10px] gap-1">

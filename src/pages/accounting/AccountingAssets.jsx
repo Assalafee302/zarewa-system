@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Download, Plus, Pencil, Ban } from 'lucide-react';
 import { ModalFrame } from '../../components/layout/ModalFrame';
+import { EditSecondApprovalInline } from '../../components/EditSecondApprovalInline';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { apiFetch } from '../../lib/apiBase';
 import { downloadCsv } from '../../lib/csvDownload';
@@ -57,6 +58,7 @@ export default function AccountingAssets() {
   const [error, setError] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
+  const [fixedAssetEditApprovalId, setFixedAssetEditApprovalId] = useState('');
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
   const [disposeId, setDisposeId] = useState(null);
@@ -90,6 +92,7 @@ export default function AccountingAssets() {
 
   const openEdit = (a) => {
     setEditingId(a.id);
+    setFixedAssetEditApprovalId('');
     setForm({
       name: a.name,
       category: a.category,
@@ -121,7 +124,11 @@ export default function AccountingAssets() {
     };
     const path = editingId ? `/api/accounting/fixed-assets/${encodeURIComponent(editingId)}` : '/api/accounting/fixed-assets';
     const method = editingId ? 'PATCH' : 'POST';
-    const { ok, data } = await apiFetch(path, { method, body: JSON.stringify(body) });
+    const payload =
+      method === 'PATCH' && String(fixedAssetEditApprovalId || '').trim()
+        ? { ...body, editApprovalId: String(fixedAssetEditApprovalId).trim() }
+        : body;
+    const { ok, data } = await apiFetch(path, { method, body: JSON.stringify(payload) });
     setSaving(false);
     if (!ok || !data?.ok) {
       setError(data?.error || 'Save failed.');
@@ -442,10 +449,21 @@ export default function AccountingAssets() {
                 onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
               />
             </label>
+            {editingId ? (
+              <EditSecondApprovalInline
+                entityKind="fixed_asset"
+                entityId={editingId}
+                value={fixedAssetEditApprovalId}
+                onChange={setFixedAssetEditApprovalId}
+              />
+            ) : null}
             <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
-                onClick={() => setModalOpen(false)}
+                onClick={() => {
+                  setModalOpen(false);
+                  setFixedAssetEditApprovalId('');
+                }}
                 className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-bold text-slate-700"
               >
                 Cancel

@@ -1908,13 +1908,14 @@ export function adjustStock(db, productID, type, qty, reasonCode, note, dateISO)
 export function transferToProduction(db, productID, qty, productionOrderId, dateISO) {
   const q = Number(qty);
   if (Number.isNaN(q) || q <= 0) return { ok: false, error: 'Invalid quantity.' };
-  const p = db.prepare(`SELECT stock_level FROM products WHERE product_id = ?`).get(productID);
+  const p = db.prepare(`SELECT stock_level, branch_id FROM products WHERE product_id = ?`).get(productID);
   if (!p || p.stock_level < q) return { ok: false, error: 'Insufficient stock in store.' };
+  const wipBranch = String(p.branch_id ?? '').trim();
   db.prepare(`UPDATE products SET stock_level = stock_level - ? WHERE product_id = ?`).run(q, productID);
   db.prepare(
-    `INSERT INTO wip_balances (product_id, qty) VALUES (?, ?)
-     ON CONFLICT(product_id) DO UPDATE SET qty = wip_balances.qty + excluded.qty`
-  ).run(productID, q);
+    `INSERT INTO wip_balances (branch_id, product_id, qty) VALUES (?,?,?)
+     ON CONFLICT(branch_id, product_id) DO UPDATE SET qty = wip_balances.qty + excluded.qty`
+  ).run(wipBranch, productID, q);
   appendMovementTx(db, {
     type: 'TRANSFER_TO_PRODUCTION',
     productID,
@@ -1943,13 +1944,15 @@ export function receiveFinishedGoods(
 
   if (src) {
     const wq = Number(wqRaw);
-    const wrow = db.prepare(`SELECT qty FROM wip_balances WHERE product_id = ?`).get(src);
+    const srcProd = db.prepare(`SELECT branch_id FROM products WHERE product_id = ?`).get(src);
+    const wipBranch = String(srcProd?.branch_id ?? '').trim();
+    const wrow = db.prepare(`SELECT qty FROM wip_balances WHERE product_id = ? AND branch_id = ?`).get(src, wipBranch);
     const cur = wrow?.qty || 0;
     if (Number.isNaN(wq) || wq <= 0) {
       return { ok: false, error: 'Enter WIP consumed for the selected source.' };
     }
     if (wq > cur) return { ok: false, error: `Insufficient WIP on ${src}.` };
-    db.prepare(`UPDATE wip_balances SET qty = qty - ? WHERE product_id = ?`).run(wq, src);
+    db.prepare(`UPDATE wip_balances SET qty = qty - ? WHERE product_id = ? AND branch_id = ?`).run(wq, src, wipBranch);
     appendMovementTx(db, {
       type: 'WIP_CONSUMED',
       productID: src,
@@ -3738,7 +3741,7 @@ export function insertProductionJob(db, payload, branchFallback = DEFAULT_BRANCH
         `UPDATE cutting_lists
          SET production_registered = 1, production_register_ref = ?, status = ?
          WHERE id = ?`
-      ).run('', 'Waiting', cuttingListId);
+      ).run(jobID, 'Waiting', cuttingListId);
     }
   })();
 
@@ -3756,18 +3759,14 @@ export function setProductionJobStatus(db, jobID, status) {
   if (nextStatus === 'Completed') {
     return { ok: false, error: 'Use the completion flow with coil readings to finish this job.' };
   }
-  const completedAtISO = nextStatus === 'Completed' ? new Date().toISOString() : null;
   db.transaction(() => {
     db.prepare(`UPDATE production_jobs SET status = ?, completed_at_iso = ? WHERE job_id = ?`).run(
       nextStatus,
-      completedAtISO,
+      null,
       jobID
     );
     if (row.cutting_list_id) {
-      db.prepare(`UPDATE cutting_lists SET status = ? WHERE id = ?`).run(
-        nextStatus === 'Completed' ? 'Finished' : 'In production',
-        row.cutting_list_id
-      );
+      db.prepare(`UPDATE cutting_lists SET status = ? WHERE id = ?`).run('In production', row.cutting_list_id);
     }
   })();
   return { ok: true };

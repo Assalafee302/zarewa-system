@@ -134,7 +134,7 @@ export function buildBootstrap(db, opts = {}) {
     purchaseOrders: procOk ? listPurchaseOrders(db, branchScope) : [],
     coilLots: coilMovOk ? listCoilLots(db, branchScope) : [],
     movements: coilMovOk ? listStockMovements(db, branchScope) : [],
-    wipByProduct: opsOk ? getWipByProduct(db) : {},
+    wipByProduct: opsOk ? getWipByProduct(db, branchScope) : {},
     deliveries: opsOk ? listDeliveries(db, branchScope) : [],
     receipts: salesOk
       ? enrichSalesReceiptRowsWithCashFromLedger(listSalesReceipts(db, branchScope), ledgerRows)

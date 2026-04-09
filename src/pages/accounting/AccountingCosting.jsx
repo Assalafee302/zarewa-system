@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Download, SlidersHorizontal } from 'lucide-react';
 import { ModalFrame } from '../../components/layout/ModalFrame';
+import { EditSecondApprovalInline } from '../../components/EditSecondApprovalInline';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { apiFetch } from '../../lib/apiBase';
 import { downloadCsv } from '../../lib/csvDownload';
@@ -30,6 +31,7 @@ export default function AccountingCosting() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [editRow, setEditRow] = useState(null);
+  const [standardCostEditApprovalId, setStandardCostEditApprovalId] = useState('');
   const [form, setForm] = useState({
     standardMaterialCostNgnPerKg: '',
     standardOverheadNgnPerM: '',
@@ -62,6 +64,7 @@ export default function AccountingCosting() {
 
   const openEdit = (r) => {
     setEditRow(r);
+    setStandardCostEditApprovalId('');
     setForm({
       standardMaterialCostNgnPerKg:
         r.standardMaterialCostNgnPerKg != null ? String(r.standardMaterialCostNgnPerKg) : '',
@@ -116,9 +119,12 @@ export default function AccountingCosting() {
       effectiveFromIso: form.effectiveFromIso,
       notes: form.notes.trim(),
     };
+    const payload = String(standardCostEditApprovalId || '').trim()
+      ? { ...body, editApprovalId: String(standardCostEditApprovalId).trim() }
+      : body;
     const { ok, data } = await apiFetch(`/api/accounting/standard-costs/${encodeURIComponent(editRow.productId)}`, {
       method: 'PUT',
-      body: JSON.stringify(body),
+      body: JSON.stringify(payload),
     });
     setSaving(false);
     if (!ok || !data?.ok) {
@@ -126,6 +132,7 @@ export default function AccountingCosting() {
       return;
     }
     setEditRow(null);
+    setStandardCostEditApprovalId('');
     void load();
   };
 
@@ -298,10 +305,21 @@ export default function AccountingCosting() {
                     onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
                   />
                 </label>
+                {editRow?.productId ? (
+                  <EditSecondApprovalInline
+                    entityKind="standard_cost"
+                    entityId={editRow.productId}
+                    value={standardCostEditApprovalId}
+                    onChange={setStandardCostEditApprovalId}
+                  />
+                ) : null}
                 <div className="flex justify-end gap-2 pt-2">
                   <button
                     type="button"
-                    onClick={() => setEditRow(null)}
+                    onClick={() => {
+                      setEditRow(null);
+                      setStandardCostEditApprovalId('');
+                    }}
                     className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-bold text-slate-700"
                   >
                     Cancel

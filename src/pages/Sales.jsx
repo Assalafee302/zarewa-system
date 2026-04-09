@@ -259,6 +259,7 @@ const Sales = () => {
   const [showArchivedQuotations, setShowArchivedQuotations] = useState(false);
   const salesRole = loadSalesWorkspaceRole(ws?.session?.user?.roleKey);
   const salesRoleLabel = ws?.session?.user?.roleLabel ?? SALES_ROLE_LABELS[salesRole] ?? salesRole;
+  /** Branch manager & MD hold refunds.approve; finance holds finance.approve; admin has *. */
   const canApproveRefunds = ws?.hasPermission?.('refunds.approve') || ws?.hasPermission?.('finance.approve');
 
   const bumpLedger = useCallback(() => setLedgerNonce((n) => n + 1), []);
@@ -845,9 +846,14 @@ const Sales = () => {
     const path = isEdit
       ? `/api/cutting-lists/${encodeURIComponent(payload.id)}`
       : '/api/cutting-lists';
+    const { editApprovalId: cuttingAid, ...cuttingBody } = payload;
+    const body =
+      isEdit && String(cuttingAid || '').trim()
+        ? { ...cuttingBody, editApprovalId: String(cuttingAid).trim() }
+        : cuttingBody;
     const { ok, data } = await apiFetch(path, {
       method: isEdit ? 'PATCH' : 'POST',
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
     });
     if (!ok || !data?.ok) {
       return { ok: false, error: data?.error || 'Could not save cutting list.' };

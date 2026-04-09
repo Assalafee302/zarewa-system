@@ -303,7 +303,7 @@ export function WorkspaceProvider({ children }) {
       return;
     }
     void refreshEditApprovalsPending();
-    const t = setInterval(() => void refreshEditApprovalsPending(), 60000);
+    const t = setInterval(() => void refreshEditApprovalsPending(), 45000);
     return () => clearInterval(t);
   }, [status, refreshEditApprovalsPending, refreshEpoch]);
 

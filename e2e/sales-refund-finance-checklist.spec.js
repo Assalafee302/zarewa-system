@@ -73,6 +73,53 @@ test.describe('Focused checklist — Sales, Refund, Finance', () => {
     await expect(page.getByRole('heading', { name: 'Refund payout' })).toBeHidden({ timeout: 20_000 });
   });
 
+  test('Refund: pending request → MD approves in Sales → Finance posts payout', async ({ page }) => {
+    test.setTimeout(180_000);
+
+    await signInViaApi(page, 'sales.staff', 'Sales@123');
+    const { refundID } = await seedPaidQuotationAndPendingRefund(page);
+    await signOutViaApi(page);
+
+    await signInViaApi(page, 'md', 'Md@1234567890!');
+    await page.goto('/sales');
+    await page.getByRole('tab', { name: 'Refunds' }).click();
+    await page.getByPlaceholder(/search id, customer, date/i).fill(refundID);
+    const row = page.locator('li').filter({ hasText: refundID });
+    await expect(row.first()).toBeVisible({ timeout: 20_000 });
+    await row.first().locator('button[aria-haspopup="menu"]').click();
+    await page.getByRole('menuitem', { name: 'Edit' }).click();
+
+    await expect(page.getByRole('heading', { name: 'Refund Approval' })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('region', { name: /approver verification checklist/i })).toBeVisible();
+    await page.getByRole('button', { name: 'Approve' }).click();
+    await page.getByPlaceholder(/why was this decided/i).fill('E2E MD approval');
+    const saveDecision = page.getByRole('button', { name: 'Save Decision' });
+    const waitDecision = page.waitForResponse(
+      (r) => r.url().includes(`/api/refunds/${encodeURIComponent(refundID)}/decision`) && r.request().method() === 'POST',
+      { timeout: 25_000 }
+    );
+    await Promise.all([saveDecision.click(), waitDecision]);
+    await expect(page.getByRole('heading', { name: 'Refund Approval' })).toBeHidden({ timeout: 20_000 });
+    await signOutViaApi(page);
+
+    await signInViaApi(page, 'finance.manager', 'Finance@123');
+    await page.goto('/accounts');
+    await expect(page.getByRole('heading', { name: /finance & accounts/i })).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText(/Customer refunds — approved, awaiting payout/i)).toBeVisible({
+      timeout: 20_000,
+    });
+    await page.getByRole('button', { name: 'Record pay' }).first().click();
+    await expect(page.getByRole('heading', { name: 'Refund payout' })).toBeVisible();
+    await page.getByPlaceholder(/e\.g\. Hauwa/i).fill('Playwright MD path payout');
+    const postPayout = page.getByRole('button', { name: 'Post refund payout' });
+    const waitPay = page.waitForResponse(
+      (r) => r.url().includes(`/api/refunds/${encodeURIComponent(refundID)}/pay`) && r.request().method() === 'POST',
+      { timeout: 25_000 }
+    );
+    await Promise.all([postPayout.click(), waitPay]);
+    await expect(page.getByRole('heading', { name: 'Refund payout' })).toBeHidden({ timeout: 20_000 });
+  });
+
   test('Finance: treasury, payables, expenses & requests, and audit tabs load', async ({ page }) => {
     await signInViaApi(page, 'finance.manager', 'Finance@123');
     await page.goto('/accounts');

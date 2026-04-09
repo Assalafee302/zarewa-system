@@ -33,6 +33,7 @@ import { formatNgn } from '../Data/mockData';
 import { receiptCashReceivedNgn } from '../lib/salesReceiptsList';
 import { effectiveManagerTargetsPerMonth, mergeDashboardPrefs } from '../lib/dashboardPrefs';
 import { userCanApproveEditMutationsClient } from '../lib/editApprovalUi';
+import { EditSecondApprovalInline } from '../components/EditSecondApprovalInline';
 import {
   buildManagementQueuesFromSnapshot,
   buildManagerSnapshotsFromWorkspace,
@@ -452,6 +453,8 @@ const ManagerDashboard = () => {
   const [inboxSearch, setInboxSearch] = useState('');
   const [activeTab, setActiveTab] = useState('clearance');
   const [editApprovalPending, setEditApprovalPending] = useState([]);
+  const [conversionSignoffRemark, setConversionSignoffRemark] = useState('');
+  const [conversionSignoffEditApprovalId, setConversionSignoffEditApprovalId] = useState('');
   const [showStockRequest, setShowStockRequest] = useState(false);
   const [showAttendanceModal, setShowAttendanceModal] = useState(false);
   const [attDayIso, setAttDayIso] = useState(() => ymdLocal());
@@ -819,6 +822,11 @@ const ManagerDashboard = () => {
     setActiveTab('edit_approvals');
   }, [searchParams, ws?.session?.user?.roleKey, ws?.permissions]);
 
+  useEffect(() => {
+    setConversionSignoffRemark('');
+    setConversionSignoffEditApprovalId('');
+  }, [selectedIntel?.kind, selectedIntel?.jobId]);
+
   /** If URL opened before queues loaded, merge customer row when data arrives. */
   useEffect(() => {
     if (selectedIntel?.kind !== 'quotation') return;
@@ -1039,14 +1047,22 @@ const ManagerDashboard = () => {
 
   const handleConversionSignoff = async () => {
     if (selectedIntel?.kind !== 'conversion') return;
-    const remark = window.prompt('Sign-off remark (at least 3 characters)');
-    if (!remark || remark.trim().length < 3) return;
+    const remark = conversionSignoffRemark.trim();
+    if (remark.length < 3) {
+      showToast('Enter a sign-off remark (at least 3 characters).', { variant: 'error' });
+      return;
+    }
     setDecisionBusy(true);
     const { ok, data } = await apiFetch(
       `/api/production-jobs/${encodeURIComponent(selectedIntel.jobId)}/manager-review-signoff`,
       {
         method: 'PATCH',
-        body: JSON.stringify({ remark: remark.trim() }),
+        body: JSON.stringify({
+          remark,
+          ...(conversionSignoffEditApprovalId.trim()
+            ? { editApprovalId: conversionSignoffEditApprovalId.trim() }
+            : {}),
+        }),
       }
     );
     setDecisionBusy(false);
@@ -1055,6 +1071,8 @@ const ManagerDashboard = () => {
       return;
     }
     showToast('Conversion review signed off.', { variant: 'success' });
+    setConversionSignoffRemark('');
+    setConversionSignoffEditApprovalId('');
     await fetchData();
     await (ws.refresh?.() ?? Promise.resolve());
     setSelectedIntel(null);
@@ -2072,6 +2090,27 @@ const ManagerDashboard = () => {
                     <p className="text-[10px] text-white/45 leading-relaxed">
                       Confirms you have reviewed High/Low conversion or the open manager review for this completed job.
                     </p>
+                    <label className="block text-[9px] font-black uppercase tracking-widest text-white/50">
+                      Remark
+                      <textarea
+                        value={conversionSignoffRemark}
+                        onChange={(e) => setConversionSignoffRemark(e.target.value)}
+                        rows={2}
+                        placeholder="e.g. Variance reviewed — approved to close."
+                        className="mt-1 w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-[11px] text-white placeholder:text-white/35 outline-none focus:ring-2 focus:ring-violet-400/40"
+                      />
+                    </label>
+                    {selectedIntel.jobId ? (
+                      <div className="rounded-xl border border-amber-400/40 bg-amber-950/40 p-2">
+                        <EditSecondApprovalInline
+                          entityKind="production_job"
+                          entityId={selectedIntel.jobId}
+                          value={conversionSignoffEditApprovalId}
+                          onChange={setConversionSignoffEditApprovalId}
+                          className="!border-amber-300/50 !bg-amber-950/60 !text-amber-50"
+                        />
+                      </div>
+                    ) : null}
                     <button
                       type="button"
                       disabled={decisionBusy}

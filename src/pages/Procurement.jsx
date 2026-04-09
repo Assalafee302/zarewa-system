@@ -239,7 +239,9 @@ const Procurement = () => {
   });
   const [agentForm, setAgentForm] = useState({ name: '', phone: '', region: '' });
   const [editingSupplierId, setEditingSupplierId] = useState(null);
+  const [supplierEditApprovalId, setSupplierEditApprovalId] = useState('');
   const [editingAgentId, setEditingAgentId] = useState(null);
+  const [agentEditApprovalId, setAgentEditApprovalId] = useState('');
   const [editingConversionId, setEditingConversionId] = useState(null);
 
   const [transportForm, setTransportForm] = useState({
@@ -409,6 +411,7 @@ const Procurement = () => {
 
   const openEditSupplier = (s) => {
     setEditingSupplierId(s.supplierID);
+    setSupplierEditApprovalId('');
     setSupplierForm({
       name: s.name || '',
       city: s.city && s.city !== '—' ? s.city : '',
@@ -421,12 +424,14 @@ const Procurement = () => {
 
   const openAgentModal = () => {
     setEditingAgentId(null);
+    setAgentEditApprovalId('');
     setAgentForm({ name: '', phone: '', region: '' });
     setShowAgentModal(true);
   };
 
   const openEditAgent = (a) => {
     setEditingAgentId(a.id);
+    setAgentEditApprovalId('');
     setAgentForm({
       name: a.name || '',
       phone: a.phone && a.phone !== '—' ? a.phone : '',
@@ -650,17 +655,21 @@ const Procurement = () => {
 
     if (ws?.canMutate) {
       if (editingSupplierId) {
+        const patch = {
+          name: supplierForm.name.trim(),
+          city,
+          paymentTerms: supplierForm.paymentTerms,
+          qualityScore: qScore,
+          notes,
+        };
+        if (String(supplierEditApprovalId || '').trim()) {
+          patch.editApprovalId = String(supplierEditApprovalId).trim();
+        }
         const { ok, data } = await apiFetch(
           `/api/suppliers/${encodeURIComponent(editingSupplierId)}`,
           {
             method: 'PATCH',
-            body: JSON.stringify({
-              name: supplierForm.name.trim(),
-              city,
-              paymentTerms: supplierForm.paymentTerms,
-              qualityScore: qScore,
-              notes,
-            }),
+            body: JSON.stringify(patch),
           }
         );
         if (!ok || !data?.ok) {
@@ -697,6 +706,7 @@ const Procurement = () => {
       notes: '',
     });
     setEditingSupplierId(null);
+    setSupplierEditApprovalId('');
     setShowSupplierModal(false);
     showToast(wasEditSupplier ? 'Supplier updated.' : 'Supplier saved.');
   };
@@ -731,15 +741,19 @@ const Procurement = () => {
 
     if (ws?.canMutate) {
       if (editingAgentId) {
+        const patch = {
+          name: agentForm.name.trim(),
+          phone,
+          region,
+        };
+        if (String(agentEditApprovalId || '').trim()) {
+          patch.editApprovalId = String(agentEditApprovalId).trim();
+        }
         const { ok, data } = await apiFetch(
           `/api/transport-agents/${encodeURIComponent(editingAgentId)}`,
           {
             method: 'PATCH',
-            body: JSON.stringify({
-              name: agentForm.name.trim(),
-              phone,
-              region,
-            }),
+            body: JSON.stringify(patch),
           }
         );
         if (!ok || !data?.ok) {
@@ -768,6 +782,7 @@ const Procurement = () => {
 
     setAgentForm({ name: '', phone: '', region: '' });
     setEditingAgentId(null);
+    setAgentEditApprovalId('');
     setShowAgentModal(false);
     showToast(wasEditAgent ? 'Agent updated.' : 'Agent registered.');
   };
@@ -2278,6 +2293,7 @@ const Procurement = () => {
         onClose={() => {
           setShowSupplierModal(false);
           setEditingSupplierId(null);
+          setSupplierEditApprovalId('');
         }}
       >
         <div className="z-modal-panel max-w-md p-8">
@@ -2290,6 +2306,7 @@ const Procurement = () => {
               onClick={() => {
                 setShowSupplierModal(false);
                 setEditingSupplierId(null);
+                setSupplierEditApprovalId('');
               }}
               className="p-2 text-slate-400"
             >
@@ -2349,6 +2366,14 @@ const Procurement = () => {
                 className="w-full bg-slate-50 border border-slate-200 rounded-xl py-3 px-4 text-sm"
               />
             </div>
+            {editingSupplierId ? (
+              <EditSecondApprovalInline
+                entityKind="supplier"
+                entityId={editingSupplierId}
+                value={supplierEditApprovalId}
+                onChange={setSupplierEditApprovalId}
+              />
+            ) : null}
             <button type="submit" className="z-btn-primary w-full justify-center py-3">
               {editingSupplierId ? 'Update supplier' : 'Save supplier'}
             </button>
@@ -2361,6 +2386,7 @@ const Procurement = () => {
         onClose={() => {
           setShowAgentModal(false);
           setEditingAgentId(null);
+          setAgentEditApprovalId('');
         }}
       >
         <div className="z-modal-panel max-w-md p-8">
@@ -2373,6 +2399,7 @@ const Procurement = () => {
               onClick={() => {
                 setShowAgentModal(false);
                 setEditingAgentId(null);
+                setAgentEditApprovalId('');
               }}
               className="p-2 text-slate-400"
             >
@@ -2399,6 +2426,14 @@ const Procurement = () => {
               onChange={(e) => setAgentForm((f) => ({ ...f, region: e.target.value }))}
               className="w-full rounded-xl border border-slate-200 py-3 px-4 text-sm"
             />
+            {editingAgentId ? (
+              <EditSecondApprovalInline
+                entityKind="transport_agent"
+                entityId={editingAgentId}
+                value={agentEditApprovalId}
+                onChange={setAgentEditApprovalId}
+              />
+            ) : null}
             <button type="submit" className="z-btn-primary w-full justify-center py-3">
               {editingAgentId ? 'Update agent' : 'Save agent'}
             </button>

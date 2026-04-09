@@ -2,7 +2,9 @@
 
 Refunds move money out of the business. Treat **server-suggested lines as starting points only**; approvers must confirm amounts against evidence and policy.
 
-Role separation is documented in [ACCESS_CONTROL.md](./ACCESS_CONTROL.md) (request → approve → pay).
+Role separation is documented in [ACCESS_CONTROL.md](./ACCESS_CONTROL.md) (**request** → **approve** → **pay**).
+
+**Who may approve:** branch manager (`refunds.approve`), Managing Director (`refunds.approve`), administrator (`*`), or finance roles that hold `finance.approve` (the decision endpoint accepts either permission). **Only finance** (treasury / `finance.pay`) should post the payout.
 
 ---
 
@@ -57,16 +59,16 @@ Escalate any mismatch before closing the period.
 
 ---
 
-## 4. Governance template (fill for your organisation)
+## 4. Governance (default baseline — tighten locally)
 
-| Topic | Local rule |
-|-------|------------|
-| Evidence required | e.g. WhatsApp + photo, signed credit note, manager call log |
-| Approval threshold | e.g. branch manager up to ₦X; above requires director |
-| Second pair of eyes | e.g. finance reviews all refunds > ₦Y |
-| Currency / rounding | NGN; whole naira unless policy says otherwise |
+| Topic | Baseline (adjust per branch) |
+|-------|------------------------------|
+| Evidence required | Reason notes in the refund modal are mandatory; attach or file photos, signed customer notes, or delivery/POD references for **Order cancellation**, **Transport/installation**, and **Substitution** cases. |
+| Who approves | **Branch manager** or **MD** for commercial sign-off; **admin** for break-glass; **finance** may also record approval where `finance.approve` is granted. Escalate to MD when amount exceeds your local cap (suggested: **₦500,000** single approval unless MD already acting). |
+| Second pair of eyes | **Finance** pays out only after approval; monthly sample: reconcile **all** refunds above **₦1,000,000** to bank/treasury. |
+| Currency / rounding | **NGN**, whole naira in UI; rounding follows system `roundMoney` rules. |
 
-Update [STAFF_APPROVALS.md](./STAFF_APPROVALS.md) if you formalise sign-off names.
+Document named signatories in [STAFF_APPROVALS.md](./STAFF_APPROVALS.md) if you need legal-style accountability.
 
 ---
 

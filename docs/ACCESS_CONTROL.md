@@ -28,8 +28,8 @@ The SPA loads a single snapshot. Row-level lists are **filtered by role** in `se
 
 - **Finance cross-branch posting** (`finance.cross_branch_post`): held by **finance manager** (and `admin` via `*`). Without it, ledger receipt/advance/apply-advance/refund-advance endpoints require the customer’s `branch_id` to match the signed-in user’s **current workspace branch** (prevents mis-booking when read scope is org-wide).
 - **CEO** (`ceo`): `exec.dashboard.view` and `dashboard.view` only — minimal exec UI; no `*` wildcard. The SPA routes CEOs to `/exec` and hides broad module nav that depended on `sales.view` / `finance.view`.
-- **Managing Director** (`md`): strategic approvals including `hr.payroll.md_approve`, `pricing.manage`, and `md.price_exception.approve`. **Not** on the normal refund approval path (`refunds.approve` is held by branch management).
-- **Branch manager** (role key still `sales_manager`): label and permissions updated for branch duties; **refund requests** use a different role (`refunds.request` removed here); refund **approval** stays with this role.
+- **Managing Director** (`md`): strategic approvals including `hr.payroll.md_approve`, `pricing.manage`, and `md.price_exception.approve`. **Customer refund approval** uses `refunds.approve` (same as branch manager) in addition to `finance.approve` on the decision endpoint.
+- **Branch manager** (role key still `sales_manager`): label and permissions updated for branch duties; holds `refunds.approve` for refund decisions alongside MD and **admin** (`*`).
 - **Receipt bank confirmation**: `PATCH /api/sales-receipts/:receiptId/bank-confirmation` with `{ confirmed: boolean }` — requires `finance.pay` or `receipts.post`; audited as `receipt.bank_confirmation`.
 - **Payroll**: draft runs record `md_approved_at_iso` / `md_approved_by_user_id` via `POST /api/hr/payroll-runs/:runId/md-approve` (permission `hr.payroll.md_approve`). HR cannot **lock** a draft until MD approval is recorded.
 - **Price list & production**: canonical rows in `price_list_items`; starting production can be blocked when a quotation is below list price until MD records a price exception (`PATCH /api/quotations/:id/md-price-exception` with `md.price_exception.approve`).
@@ -55,7 +55,7 @@ The SPA loads a single snapshot. Row-level lists are **filtered by role** in `se
 
 | Area | Who requests / creates | Who approves / confirms | Notes |
 |------|-------------------------|-------------------------|--------|
-| Customer refund | Sales-facing roles (`refunds.request`) | Branch manager (`refunds.approve`) | MD is not on the default refund approval path. Operational checklist: [REFUND_OPERATIONS.md](./REFUND_OPERATIONS.md). |
+| Customer refund | Sales-facing roles (`refunds.request`) | Branch manager or **MD** (`refunds.approve`), or **finance** (`finance.approve` on the same decision API), or **admin** (`*`) | Who acts first is organisational; segregation of duties still requires **Finance** to pay out (`finance.pay` / treasury). Operational checklist: [REFUND_OPERATIONS.md](./REFUND_OPERATIONS.md). |
 | Payment request / expense payout | Requesters per module | `finance.approve` / manager flows | Cashier / finance executes pay after approval. |
 | Payroll lock → export | HR (`hr.payroll.manage`) | MD sign-off (`hr.payroll.md_approve`) | Draft run must have `md_approved_at_iso` before lock (unless `admin` `*`). |
 | Below list price → production | — | MD (`md.price_exception.approve`) | Production start blocked until exception recorded on the quotation. |

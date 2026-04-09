@@ -37,7 +37,6 @@ import HrNextUatChecklist from './pages/hr/HrNextUatChecklist';
 import LoginScreen from './components/auth/LoginScreen';
 import ModuleRouteGuard from './components/ModuleRouteGuard';
 import ManagerDashboard from './pages/ManagerDashboard';
-import EditApprovalsPage from './pages/EditApprovalsPage';
 import ExecDashboard from './pages/ExecDashboard';
 import PriceListAdmin from './pages/PriceListAdmin';
 import AccountingRouteGuard from './components/AccountingRouteGuard';
@@ -58,6 +57,7 @@ import { useInventory } from './context/InventoryContext';
 import { useWorkspace } from './context/WorkspaceContext';
 import { ZAREWA_LOGO_SRC } from './Data/companyQuotation';
 import { BranchWorkspaceBar } from './components/layout/BranchWorkspaceBar';
+import { ModalFrame } from './components/layout';
 import { apiFetch } from './lib/apiBase';
 import { AiAssistantDock } from './components/AiAssistantDock';
 import { buildWorkspaceNotifications } from './lib/workspaceNotifications';
@@ -237,6 +237,7 @@ function AppShell() {
   const searchDebounceRef = useRef(null);
   const [notifOpen, setNotifOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
       return window.localStorage.getItem('zarewa.sidebarCollapsed') === '1';
@@ -593,10 +594,10 @@ function AppShell() {
                   ) : (
                     <button
                       type="button"
-                      onClick={() => navigate('/settings')}
+                      onClick={() => setProfileOpen(true)}
                       className="w-full min-w-0 text-left"
-                      title={`${userName} · ${userRole} — Open settings`}
-                      aria-label={`Signed in as ${userName}. Open settings.`}
+                      title={`${userName} · ${userRole} — Open profile`}
+                      aria-label={`Signed in as ${userName}. Open profile.`}
                     >
                       <p className="truncate text-[10px] font-black uppercase leading-none tracking-tighter text-[#134e4a]">
                         {userName}
@@ -611,6 +612,78 @@ function AppShell() {
             </div>
           </div>
         </div>
+
+        <ModalFrame
+          isOpen={profileOpen}
+          onClose={() => setProfileOpen(false)}
+          title="My profile"
+          description="Your app login profile details"
+        >
+          <div className="z-modal-panel w-full max-w-lg max-h-none shrink-0 overflow-visible flex-none p-6 sm:p-7">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <h2 className="text-base font-black text-slate-900">My profile</h2>
+                <p className="mt-1 text-xs text-slate-600">App login details (not HR employment records).</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setProfileOpen(false)}
+                className="z-btn-secondary !px-3 !py-2 !text-[11px]"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+              <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Name</p>
+              <p className="mt-1 text-sm font-black text-[#134e4a] break-words">
+                {ws?.session?.user?.displayName || '—'}
+              </p>
+
+              <p className="mt-3 text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Username</p>
+              <p className="mt-1 text-[12px] font-mono font-semibold text-slate-800 break-all">
+                {ws?.session?.user?.username || '—'}
+              </p>
+
+              <p className="mt-3 text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Role</p>
+              <p className="mt-1 text-[12px] font-semibold text-slate-800">
+                {ws?.session?.user?.roleLabel || ws?.session?.user?.roleKey || '—'}
+              </p>
+
+              {ws?.session?.user?.email ? (
+                <>
+                  <p className="mt-3 text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Email</p>
+                  <p className="mt-1 text-[12px] font-semibold text-slate-800 break-all">
+                    {ws.session.user.email}
+                  </p>
+                </>
+              ) : null}
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-2 justify-end">
+              <button
+                type="button"
+                className="z-btn-secondary !text-[11px]"
+                onClick={() => {
+                  setProfileOpen(false);
+                  navigate('/settings');
+                }}
+              >
+                Open settings
+              </button>
+              <button
+                type="button"
+                className="z-btn-primary !text-[11px]"
+                onClick={() => {
+                  setProfileOpen(false);
+                  navigate('/settings/security');
+                }}
+              >
+                Security
+              </button>
+            </div>
+          </div>
+        </ModalFrame>
 
         <main id="main-content" className="outline-none" tabIndex={-1}>
           <Routes>
@@ -727,7 +800,7 @@ function AppShell() {
               path="/edit-approvals"
               element={
                 <ModuleRouteGuard moduleKey="edit_approvals">
-                  <EditApprovalsPage />
+                  <Navigate to="/" replace />
                 </ModuleRouteGuard>
               }
             />

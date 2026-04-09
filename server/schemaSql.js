@@ -195,8 +195,10 @@ CREATE TABLE IF NOT EXISTS stock_movements (
 );
 
 CREATE TABLE IF NOT EXISTS wip_balances (
-  product_id TEXT PRIMARY KEY,
-  qty REAL NOT NULL DEFAULT 0
+  branch_id TEXT NOT NULL DEFAULT '',
+  product_id TEXT NOT NULL,
+  qty REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (branch_id, product_id)
 );
 
 CREATE TABLE IF NOT EXISTS deliveries (
@@ -604,6 +606,50 @@ CREATE TABLE IF NOT EXISTS treasury_movements (
 
 CREATE INDEX IF NOT EXISTS idx_treasury_movements_account ON treasury_movements(treasury_account_id);
 CREATE INDEX IF NOT EXISTS idx_treasury_movements_source ON treasury_movements(source_kind, source_id);
+
+CREATE TABLE IF NOT EXISTS inter_branch_loans (
+  loan_id TEXT PRIMARY KEY,
+  created_at_iso TEXT NOT NULL,
+  created_by_user_id TEXT,
+  created_by_name TEXT,
+  lender_branch_id TEXT NOT NULL,
+  borrower_branch_id TEXT NOT NULL,
+  principal_ngn INTEGER NOT NULL,
+  repaid_ngn INTEGER NOT NULL DEFAULT 0,
+  from_treasury_account_id INTEGER NOT NULL,
+  to_treasury_account_id INTEGER NOT NULL,
+  date_iso TEXT NOT NULL,
+  reference TEXT,
+  repayment_plan_json TEXT,
+  status TEXT NOT NULL,
+  proposed_note TEXT,
+  md_approved_at_iso TEXT,
+  md_approved_by_user_id TEXT,
+  md_approved_by_name TEXT,
+  md_rejected_at_iso TEXT,
+  md_reject_note TEXT,
+  treasury_batch_id TEXT,
+  executed_at_iso TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_inter_branch_loans_branches
+  ON inter_branch_loans(lender_branch_id, borrower_branch_id, status);
+
+CREATE TABLE IF NOT EXISTS inter_branch_loan_repayments (
+  id TEXT PRIMARY KEY,
+  loan_id TEXT NOT NULL,
+  posted_at_iso TEXT NOT NULL,
+  amount_ngn INTEGER NOT NULL,
+  from_treasury_account_id INTEGER NOT NULL,
+  to_treasury_account_id INTEGER NOT NULL,
+  treasury_batch_id TEXT,
+  note TEXT,
+  created_by_user_id TEXT,
+  created_by_name TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_inter_branch_loan_repayments_loan
+  ON inter_branch_loan_repayments(loan_id, posted_at_iso);
 
 CREATE TABLE IF NOT EXISTS expenses (
   expense_id TEXT PRIMARY KEY,

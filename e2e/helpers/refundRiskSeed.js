@@ -16,7 +16,8 @@ export async function seedOverpaidQuotation(page) {
     data: { name: customerName, phone, tier: 'Standard' },
   });
   expect(custRes.status(), await custRes.text()).toBe(201);
-  const { customerID } = await custRes.json();
+  const custBody = await custRes.json();
+  const customerID = custBody.customerID;
   expect(customerID).toBeTruthy();
 
   const qRes = await page.request.post('/api/quotations', {
@@ -48,5 +49,5 @@ export async function seedOverpaidQuotation(page) {
   });
   expect(rcRes.status(), await rcRes.text()).toBe(201);
 
-  return { customerID, quotationId };
+  return { customerID, quotationId, customerName };
 }

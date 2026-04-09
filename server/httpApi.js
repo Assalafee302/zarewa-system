@@ -105,9 +105,6 @@ import {
   listAuditLogNdjsonRows,
   listPeriodLocks,
   listCustomerCrmInteractions,
-  listSalesReceipts,
-  listPurchaseOrders,
-  listCuttingLists,
   listCoilLots,
   listStockMovementsForProduct,
   listProductionJobs,
@@ -714,6 +711,9 @@ export function registerHttpApi(app, db) {
 
       let nextBranch = String(row.current_branch_id || '').trim() || DEFAULT_BRANCH_ID;
       if (req.body?.currentBranchId != null && String(req.body.currentBranchId).trim()) {
+        if (!canUseAllBranchesRollup(req.user)) {
+          return res.status(403).json({ ok: false, error: 'Only Admin, MD, or CEO can change branch.' });
+        }
         const id = String(req.body.currentBranchId).trim();
         const br = getBranch(db, id);
         if (!br || !br.active) {

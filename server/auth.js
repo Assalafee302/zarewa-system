@@ -80,6 +80,7 @@ export const ROLE_DEFINITIONS = {
     label: 'Managing Director',
     // MD can view everything and use all-branches rollups, but should not have settings/admin write access by default.
     permissions: [
+      'hq.view_all_branches',
       'dashboard.view',
       'reports.view',
       'sales.view',
@@ -89,19 +90,21 @@ export const ROLE_DEFINITIONS = {
       'audit.view',
       'hr.directory.view',
       'hr.daily_roll.mark',
-      // Manager dashboard (/manager): quotation clearance / flags / production override, payment approvals, conversion sign-off; refunds approved by branch manager
+      // Manager dashboard (/manager): quotation clearance / flags / production override, payment approvals, conversion sign-off; refunds: same gate as branch manager (refunds.approve) plus finance.approve on API
       'quotations.manage',
       'finance.approve',
+      'refunds.approve',
       'production.release',
       'hr.payroll.md_approve',
       'pricing.manage',
       'md.price_exception.approve',
+      'inter_branch_loan.md_approve',
     ],
   },
   ceo: {
     label: 'Chief Executive Officer',
     // Read-only executive: org aggregates only (see GET /api/exec/summary); no line-level modules.
-    permissions: ['exec.dashboard.view', 'dashboard.view'],
+    permissions: ['hq.view_all_branches', 'exec.dashboard.view', 'dashboard.view'],
   },
   finance_manager: {
     label: 'Finance manager',
@@ -702,9 +705,29 @@ export function attachAuthContext(db) {
     const user = publicUserFromRow(row);
     req.user = user;
     const baseBranch = defaultBranchIdForDb(db);
-    const currentBranchId = String(row.current_branch_id || '').trim() || baseBranch;
+    let currentBranchId = String(row.current_branch_id || '').trim() || baseBranch;
     const rawViewAll = Number(row.view_all_branches) === 1;
     const viewAllBranches = rawViewAll && canUseAllBranchesRollup(user);
+
+    // Pin normal users to their assigned branch (from HR staff profile) when available.
+    // Only HQ roles (admin/md/ceo) may change branch via session workspace.
+    if (!canUseAllBranchesRollup(user)) {
+      try {
+        const prof = db
+          .prepare(`SELECT branch_id FROM hr_staff_profiles WHERE user_id = ?`)
+          .get(user.id);
+        const assigned = String(prof?.branch_id || '').trim();
+        if (assigned) {
+          const br = db.prepare(`SELECT id, active FROM branches WHERE id = ?`).get(assigned);
+          if (br?.id && Number(br.active) === 1) {
+            currentBranchId = assigned;
+          }
+        }
+      } catch {
+        /* If HR tables are absent on older DBs, fall back to session/default branch. */
+      }
+    }
+
     req.workspaceBranchId = currentBranchId;
     req.workspaceViewAll = viewAllBranches;
     req.session = {

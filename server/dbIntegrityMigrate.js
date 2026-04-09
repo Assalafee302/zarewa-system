@@ -331,7 +331,36 @@ function createReferentialTriggers(db) {
   }
 
   if (hasTable(db, 'wip_balances') && hasTable(db, 'products')) {
-    db.exec(`
+    dropTriggers(db, ['tr_wip_product_ins', 'tr_wip_product_upd']);
+    if (tableCols(db, 'wip_balances').has('branch_id')) {
+      db.exec(`
+    CREATE TRIGGER tr_wip_product_ins
+    BEFORE INSERT ON wip_balances
+    BEGIN
+      SELECT CASE
+        WHEN NOT EXISTS (
+          SELECT 1 FROM products p
+          WHERE p.product_id = NEW.product_id
+            AND TRIM(COALESCE(p.branch_id,'')) = TRIM(COALESCE(NEW.branch_id,''))
+        )
+        THEN RAISE(ABORT, 'wip_balances must match products.branch_id for this SKU')
+      END;
+    END;
+    CREATE TRIGGER tr_wip_product_upd
+    BEFORE UPDATE OF product_id, branch_id ON wip_balances
+    BEGIN
+      SELECT CASE
+        WHEN NOT EXISTS (
+          SELECT 1 FROM products p
+          WHERE p.product_id = NEW.product_id
+            AND TRIM(COALESCE(p.branch_id,'')) = TRIM(COALESCE(NEW.branch_id,''))
+        )
+        THEN RAISE(ABORT, 'wip_balances must match products.branch_id for this SKU')
+      END;
+    END;
+    `);
+    } else {
+      db.exec(`
     CREATE TRIGGER tr_wip_product_ins
     BEFORE INSERT ON wip_balances
     BEGIN
@@ -349,6 +378,7 @@ function createReferentialTriggers(db) {
       END;
     END;
     `);
+    }
   }
 
   if (hasTable(db, 'stock_movements') && hasTable(db, 'products')) {

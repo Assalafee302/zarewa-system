@@ -176,6 +176,31 @@ describe('Refund Security & Substitution Logic', () => {
     expect(approve.body.ok).toBe(true);
   });
 
+  it('managing director approves refund raised by sales (refunds.approve)', async () => {
+    const staff = request.agent(app);
+    await loginAs(staff, 'sales.staff', 'Sales@123');
+    const create = await staff.post('/api/refunds').send({
+      customerID: 'CUS-001',
+      customer: 'John Doe',
+      quotationRef: 'QT-RFS-PRICE-027',
+      reasonCategory: ['Calculation error'],
+      amountNgn: 100,
+      calculationLines: [{ label: 'Header vs lines', amountNgn: 100, category: 'Calculation error' }],
+    });
+    expect(create.status).toBe(201);
+    const refundID = create.body.refundID;
+
+    const md = request.agent(app);
+    await loginAs(md, 'md', 'Md@1234567890!');
+    const approve = await md.post(`/api/refunds/${refundID}/decision`).send({
+      status: 'Approved',
+      approvedAmountNgn: 100,
+      note: 'MD approval',
+    });
+    expect(approve.status).toBe(200);
+    expect(approve.body.ok).toBe(true);
+  });
+
   it('validates overpayment detection', async () => {
     const agent = request.agent(app);
     await loginAs(agent);

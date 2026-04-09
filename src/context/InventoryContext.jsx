@@ -446,11 +446,16 @@ export function InventoryProvider({ children }) {
   );
 
   const markPurchaseTransportPaid = useCallback(
-    async (poID) => {
+    async (poID, { editApprovalId } = {}) => {
       if (ws?.canMutate) {
         const { ok, data } = await apiFetch(
           `/api/purchase-orders/${encodeURIComponent(poID)}/transport-paid`,
-          { method: 'PATCH' }
+          {
+            method: 'PATCH',
+            body: JSON.stringify({
+              ...(editApprovalId ? { editApprovalId: String(editApprovalId).trim() } : {}),
+            }),
+          }
         );
         if (!ok || !data?.ok) {
           return { ok: false, error: data?.error || 'Could not mark transport paid.' };

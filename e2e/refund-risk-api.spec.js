@@ -28,12 +28,12 @@ test.describe('Refund risk — API behaviour', () => {
 
   test('duplicate refund same category on same quotation is rejected', async ({ page }) => {
     await signInViaApi(page, 'sales.staff', 'Sales@123');
-    const { customerID, quotationId } = await seedOverpaidQuotation(page);
+    const { customerID, quotationId, customerName } = await seedOverpaidQuotation(page);
     const headers = await csrfHeader(page);
 
     const payload = {
       customerID,
-      customer: 'E2E Dup',
+      customer: customerName,
       quotationRef: quotationId,
       amountNgn: 100,
       reasonCategory: ['Overpayment'],

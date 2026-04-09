@@ -22,6 +22,7 @@ import { apiFetch } from '../lib/apiBase';
 import { formatNgn } from '../Data/mockData';
 import { receiptCashReceivedNgn } from '../lib/salesReceiptsList';
 import CuttingListReportPrintView from './CuttingListReportPrintView';
+import { EditSecondApprovalInline } from './EditSecondApprovalInline';
 const LINE_TYPE_SET = new Set(['Roof', 'Flatsheet', 'Cladding']);
 
 const CATEGORIES = [
@@ -272,6 +273,12 @@ const CuttingListModal = ({
   const [clearingHold, setClearingHold] = useState(false);
   const [quoteSearch, setQuoteSearch] = useState('');
   const [showQuotePicker, setShowQuotePicker] = useState(false);
+  const [cuttingListEditApprovalId, setCuttingListEditApprovalId] = useState('');
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setCuttingListEditApprovalId('');
+  }, [isOpen, editData?.id]);
 
   const canRegisterProduction =
     ws?.hasPermission?.('sales.manage') ||
@@ -539,6 +546,9 @@ const CuttingListModal = ({
       lines: normalizedLines,
       totalMeters,
       ...(isCreate ? { holdForProductionApproval } : {}),
+      ...(!isCreate && cuttingListEditApprovalId.trim()
+        ? { editApprovalId: cuttingListEditApprovalId.trim() }
+        : {}),
     });
     setSaving(false);
     if (!result?.ok) {
@@ -986,6 +996,17 @@ const CuttingListModal = ({
             </p>
           </div>
         </div>
+
+        {editData?.id && !readOnly ? (
+          <div className="no-print px-5 py-3 border-t border-slate-200 bg-white shrink-0">
+            <EditSecondApprovalInline
+              entityKind="cutting_list"
+              entityId={editData.id}
+              value={cuttingListEditApprovalId}
+              onChange={setCuttingListEditApprovalId}
+            />
+          </div>
+        ) : null}
 
         <div className="no-print px-5 py-4 bg-[#134e4a] flex justify-between items-center text-white shrink-0 flex-wrap gap-3">
           <div>

@@ -26,6 +26,8 @@ const SAFE_TABLES = new Set([
   'gl_journal_lines',
   'audit_log',
   'approval_actions',
+  'inter_branch_loans',
+  'inter_branch_loan_repayments',
 ]);
 
 function assertSafeTable(table) {
@@ -267,6 +269,24 @@ export function nextGlJournalLineHumanId(db, branchId) {
 }
 
 /** Shared batch id for paired treasury transfer legs. */
+export function nextInterBranchLoanHumanId(db) {
+  return allocateHumanId(db, 'IBL', null, {
+    global: true,
+    table: 'inter_branch_loans',
+    idColumn: 'loan_id',
+    width: 5,
+  });
+}
+
+export function nextInterBranchLoanRepaymentHumanId(db) {
+  return allocateHumanId(db, 'IBLR', null, {
+    global: true,
+    table: 'inter_branch_loan_repayments',
+    idColumn: 'id',
+    width: 5,
+  });
+}
+
 export function nextTreasuryTransferBatchHumanId(db) {
   const fullYear = new Date().getFullYear();
   const yy = String(fullYear).slice(-2);
