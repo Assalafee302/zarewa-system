@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Box,
@@ -25,7 +25,10 @@ import { useInventory } from '../context/InventoryContext';
 import { useToast } from '../context/ToastContext';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { apiFetch } from '../lib/apiBase';
+import { APP_DATA_TABLE_PAGE_SIZE, useAppTablePaging } from '../lib/appDataTable';
+import { AppTablePager, AppTableWrap } from '../components/ui/AppDataTable';
 import { productionJobNeedsManagerReviewAttention } from '../lib/productionReview';
+import { procurementKindFromPo } from '../lib/procurementPoKind';
 
 /** Current kg on the coil (after production use); uses API fields when present. */
 function liveCoilWeightKg(lot) {
@@ -115,6 +118,24 @@ function transitPoSearchBlob(p) {
     .toLowerCase();
 }
 
+/** Matches server GRN default `CL-YY-####` (writeOps.postPurchaseOrderGrn). */
+const CL_COIL_NO_RE = /^CL-(\d{2})-(\d{1,6})$/i;
+
+function maxClSequenceForYear(coilLots, yy2, extraCoilNos = []) {
+  let max = 0;
+  for (const lot of coilLots || []) {
+    const m = String(lot.coilNo || '').trim().match(CL_COIL_NO_RE);
+    if (!m || m[1] !== yy2) continue;
+    max = Math.max(max, parseInt(m[2], 10));
+  }
+  for (const cn of extraCoilNos) {
+    const m = String(cn || '').trim().match(CL_COIL_NO_RE);
+    if (!m || m[1] !== yy2) continue;
+    max = Math.max(max, parseInt(m[2], 10));
+  }
+  return max;
+}
+
 function coilReceiptSearchBlob(c) {
   return [
     c.coilNo,
@@ -192,6 +213,7 @@ const Operations = () => {
   const [expandedReceivePoId, setExpandedReceivePoId] = useState(null);
   const [grnLines, setGrnLines] = useState([]);
   const [grnConversionOverride, setGrnConversionOverride] = useState(false);
+  const grnReceivePoIdRef = useRef('');
 
   const [coilRequestForm, setCoilRequestForm] = useState({
     rows: [{ gauge: '', colour: '', materialType: '', requestedKg: '' }],
@@ -238,6 +260,16 @@ const Operations = () => {
   const [transitSearch, setTransitSearch] = useState('');
   const [transitSort, setTransitSort] = useState('orderDesc');
   const [coilLiveSearch, setCoilLiveSearch] = useState('');
+  /** Stock management: filter in-transit POs and received stock panel (coil lots vs metre/unit SKUs). */
+  const [stockReceiveKind, setStockReceiveKind] = useState(() => /** @type {'coil'|'stone'|'accessory'} */ ('coil'));
+  const [productMovementModal, setProductMovementModal] = useState(null);
+  const [productMovementsLoading, setProductMovementsLoading] = useState(false);
+  const [productMovementsRows, setProductMovementsRows] = useState([]);
+  const productMovementsPage = useAppTablePaging(
+    productMovementsRows,
+    APP_DATA_TABLE_PAGE_SIZE,
+    productMovementModal?.productID
+  );
 
   const [coilMaterialTab, setCoilMaterialTab] = useState('split');
   const [coilMaterialSaving, setCoilMaterialSaving] = useState(false);
@@ -531,17 +563,37 @@ const Operations = () => {
   };
 
   useEffect(() => {
-    const t = location.state?.focusOpsTab;
+    const st = location.state || {};
+    const t = st.focusOpsTab;
+    const invSku = String(st.opsInventorySkuQuery || '').trim();
+
+    if (t === 'inventory') {
+      setActiveTab('inventory');
+      if (invSku) {
+        const p = invSku.toUpperCase();
+        if (p.startsWith('STONE-')) setStockReceiveKind('stone');
+        else if (p.startsWith('ACC-')) setStockReceiveKind('accessory');
+        else setStockReceiveKind('coil');
+        setCoilLiveSearch(invSku);
+      }
+      navigate(location.pathname, { replace: true, state: {} });
+      return;
+    }
+
     if (t !== 'deliveries' && t !== 'production') return;
     setActiveTab(t);
-    const highlightId = String(location.state?.highlightCuttingListId || '').trim();
+    const highlightId = String(st.highlightCuttingListId || '').trim();
     if (t === 'production' && highlightId) setSearchQuery(highlightId);
     navigate(location.pathname, { replace: true, state: {} });
   }, [location.state, location.pathname, navigate]);
 
   const transitOrdersAll = useMemo(
-    () => purchaseOrders.filter((p) => PO_RECEIVABLE_STATUSES.includes(p.status)),
-    [purchaseOrders]
+    () =>
+      purchaseOrders.filter(
+        (p) =>
+          PO_RECEIVABLE_STATUSES.includes(p.status) && procurementKindFromPo(p) === stockReceiveKind
+      ),
+    [purchaseOrders, stockReceiveKind]
   );
 
   const transitSearchNorm = transitSearch.trim().toLowerCase();
@@ -598,29 +650,135 @@ const Operations = () => {
     return coilLotsReceiptFiltered.slice(0, STOCK_SIDE_LIST_LIMIT);
   }, [coilLotsReceiptFiltered, coilLiveSearchNorm]);
 
+  const anyReceivablePo = useMemo(
+    () => purchaseOrders.some((p) => PO_RECEIVABLE_STATUSES.includes(p.status)),
+    [purchaseOrders]
+  );
+
+  const skuProductsLiveSorted = useMemo(() => {
+    if (stockReceiveKind === 'coil') return [];
+    const pred =
+      stockReceiveKind === 'stone'
+        ? (p) => /^STONE-/i.test(String(p.productID || ''))
+        : (p) => /^ACC-/i.test(String(p.productID || ''));
+    return [...inventoryRows]
+      .filter(pred)
+      .sort((a, b) => (Number(b.stockLevel) || 0) - (Number(a.stockLevel) || 0));
+  }, [inventoryRows, stockReceiveKind]);
+
+  const skuLiveSearchNorm = coilLiveSearch.trim().toLowerCase();
+  const skuProductsReceiptFiltered = useMemo(() => {
+    if (!skuLiveSearchNorm) return skuProductsLiveSorted;
+    return skuProductsLiveSorted.filter((p) => {
+      const blob = [p.productID, p.name, p.unit].filter(Boolean).join(' ').toLowerCase();
+      return blob.includes(skuLiveSearchNorm);
+    });
+  }, [skuProductsLiveSorted, skuLiveSearchNorm]);
+
+  const skuReceiptTruncated =
+    stockReceiveKind !== 'coil' && !skuLiveSearchNorm && skuProductsReceiptFiltered.length > STOCK_SIDE_LIST_LIMIT;
+  const skuProductsByReceipt = useMemo(() => {
+    if (stockReceiveKind === 'coil') return [];
+    if (skuLiveSearchNorm) return skuProductsReceiptFiltered;
+    return skuProductsReceiptFiltered.slice(0, STOCK_SIDE_LIST_LIMIT);
+  }, [stockReceiveKind, skuProductsReceiptFiltered, skuLiveSearchNorm]);
+
   useEffect(() => {
-    setGrnConversionOverride(false);
-    const po = purchaseOrders.find((p) => p.poID === receiveDraft.poID);
+    const pid = productMovementModal?.productID;
+    if (!pid) {
+      setProductMovementsRows([]);
+      return undefined;
+    }
+    let cancelled = false;
+    setProductMovementsLoading(true);
+    void (async () => {
+      const r = await apiFetch(
+        `/api/inventory/product-movements/${encodeURIComponent(pid)}?limit=500`
+      );
+      if (cancelled) return;
+      setProductMovementsLoading(false);
+      if (r.ok && r.data?.ok) setProductMovementsRows(Array.isArray(r.data.movements) ? r.data.movements : []);
+      else setProductMovementsRows([]);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [productMovementModal?.productID]);
+
+  useEffect(() => {
+    const poId = receiveDraft.poID;
+    if (grnReceivePoIdRef.current !== poId) {
+      grnReceivePoIdRef.current = poId;
+      setGrnConversionOverride(false);
+    }
+
+    const po = purchaseOrders.find((p) => p.poID === poId);
     if (!po) {
       setGrnLines([]);
       return;
     }
-    setGrnLines(
-      po.lines
-        .filter((l) => l.qtyOrdered > l.qtyReceived)
-        .map((l) => ({
+
+    const yy = String(new Date().getFullYear()).slice(-2);
+    const poKind = procurementKindFromPo(po);
+
+    setGrnLines((prev) => {
+      const openLines = po.lines.filter((l) => Number(l.qtyOrdered) > Number(l.qtyReceived));
+      const prevByKey = new Map(prev.map((r) => [r.lineKey, r]));
+      const numsInForm = prev.map((r) => r.coilNo).filter(Boolean);
+      let nextSeq = maxClSequenceForYear(coilLots, yy, numsInForm);
+
+      if (poKind === 'stone' || poKind === 'accessory') {
+        return openLines.map((l) => {
+          const remaining = Number(l.qtyOrdered) - Number(l.qtyReceived);
+          const old = prevByKey.get(l.lineKey);
+          return {
+            lineKey: l.lineKey,
+            productID: l.productID,
+            productName: l.productName,
+            color: l.color,
+            gauge: l.gauge,
+            remaining,
+            qtyReceived: old?.qtyReceived ?? '',
+            weightKg: '',
+            coilNo: '',
+            grnKind: poKind,
+          };
+        });
+      }
+
+      return openLines.map((l) => {
+        const remaining = Number(l.qtyOrdered) - Number(l.qtyReceived);
+        const old = prevByKey.get(l.lineKey);
+        if (old) {
+          return {
+            lineKey: l.lineKey,
+            productID: l.productID,
+            productName: l.productName,
+            color: l.color,
+            gauge: l.gauge,
+            remaining,
+            qtyReceived: old.qtyReceived,
+            weightKg: old.weightKg,
+            coilNo: old.coilNo,
+            grnKind: 'coil',
+          };
+        }
+        nextSeq += 1;
+        return {
           lineKey: l.lineKey,
           productID: l.productID,
           productName: l.productName,
           color: l.color,
           gauge: l.gauge,
-          remaining: l.qtyOrdered - l.qtyReceived,
+          remaining,
           qtyReceived: '',
           weightKg: '',
-          coilNo: '',
-        }))
-    );
-  }, [receiveDraft.poID, purchaseOrders]);
+          coilNo: `CL-${yy}-${String(nextSeq).padStart(4, '0')}`,
+          grnKind: 'coil',
+        };
+      });
+    });
+  }, [receiveDraft.poID, purchaseOrders, coilLots]);
 
   const applyTransitReceipt = async (e) => {
     e.preventDefault();
@@ -633,13 +791,13 @@ const Operations = () => {
         lineKey: row.lineKey,
         productID: row.productID,
         qtyReceived: Number(row.qtyReceived),
-        weightKg: row.weightKg,
-        coilNo: row.coilNo,
+        weightKg: row.grnKind === 'coil' ? row.weightKg : '',
+        coilNo: row.grnKind === 'coil' ? row.coilNo : '',
         location: receiveDraft.location,
       }))
       .filter((x) => x.qtyReceived > 0 && !Number.isNaN(x.qtyReceived));
     if (!entries.length) {
-      showToast('Enter receive qty (kg) for at least one open line.', { variant: 'error' });
+      showToast('Enter receive quantity for at least one open line.', { variant: 'error' });
       return;
     }
     const res = await confirmStoreReceipt(
@@ -810,7 +968,8 @@ const Operations = () => {
     showCoilRequest ||
     showCoilMaterial ||
     completeChecklistModal != null ||
-    productionTraceModal != null;
+    productionTraceModal != null ||
+    productMovementModal != null;
 
   useEffect(() => {
     if (activeTab !== 'inventory') return undefined;
@@ -1011,14 +1170,9 @@ const Operations = () => {
   return (
     <PageShell blurred={isAnyModalOpen || deliveriesShellBlur}>
       <PageHeader
-        eyebrow="Production"
         title="Store & production"
         subtitle="Receive in-transit coils into stock, adjustments, finished goods & coil requests — aligned with Sales / Procurement."
-        actions={
-          <div className="flex flex-wrap items-center gap-2 justify-end w-full lg:max-w-3xl">
-            <PageTabs tabs={opsTabs} value={activeTab} onChange={handleOpsTab} />
-          </div>
-        }
+        tabs={<PageTabs tabs={opsTabs} value={activeTab} onChange={handleOpsTab} />}
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 lg:gap-8">
@@ -1032,14 +1186,50 @@ const Operations = () => {
                 <Truck size={14} className="text-sky-700" />
                 Goods in transit — receive
               </h3>
+              <div
+                role="tablist"
+                aria-label="Purchase category"
+                className="flex flex-wrap gap-1 mb-2"
+              >
+                {[
+                  { id: 'coil', label: 'Coil' },
+                  { id: 'stone', label: 'Stone' },
+                  { id: 'accessory', label: 'Accessories' },
+                ].map((t) => {
+                  const active = stockReceiveKind === t.id;
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      onClick={() => setStockReceiveKind(t.id)}
+                      className={`px-2.5 py-1 rounded-md text-[9px] font-semibold uppercase tracking-wide transition-colors ${
+                        active
+                          ? 'bg-[#134e4a] text-white shadow-sm'
+                          : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      {t.label}
+                    </button>
+                  );
+                })}
+              </div>
               <p className="text-[10px] text-slate-500 leading-relaxed mb-3">
-                Store sees spec & quantities only (no amounts). Enter coil # and kg received; stock updates when you
-                confirm.
+                {stockReceiveKind === 'coil'
+                  ? 'Enter coil # and kg received; stock updates when you confirm.'
+                  : stockReceiveKind === 'stone'
+                    ? 'Enter metres received per line; stone stock is metre-based (no coil lots).'
+                    : 'Enter units received per line; accessory stock is count-based.'}
               </p>
-              {transitOrdersAll.length === 0 ? (
+              {!anyReceivablePo ? (
                 <p className="text-[10px] font-medium text-slate-400">Nothing on road or loading.</p>
               ) : transitOrdersSortedFiltered.length === 0 ? (
-                <p className="text-[10px] font-medium text-slate-400">No purchase orders match your search.</p>
+                <p className="text-[10px] font-medium text-slate-400">
+                  {transitSearch.trim()
+                    ? 'No purchase orders match your search.'
+                    : `No ${stockReceiveKind === 'coil' ? 'coil' : stockReceiveKind === 'stone' ? 'stone-coated' : 'accessory'} orders in receivable status — switch category or check Procurement.`}
+                </p>
               ) : (
                 <>
                   <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-2 mb-2 shrink-0">
@@ -1084,16 +1274,19 @@ const Operations = () => {
                   ) : null}
                   <ul className="space-y-1.5">
                   {transitOrders.map((p) => {
-                    const openKg = p.lines.reduce(
+                    const pk = procurementKindFromPo(p);
+                    const openQty = p.lines.reduce(
                       (sum, l) => sum + Math.max(0, Number(l.qtyOrdered) - Number(l.qtyReceived)),
                       0
                     );
+                    const openLabel =
+                      pk === 'stone' ? `${openQty.toLocaleString()} m open` : pk === 'accessory' ? `${openQty.toLocaleString()} units open` : `${openQty.toLocaleString()} kg open`;
                     const meta2 = [
                       p.status,
                       p.transportAgentName || null,
                       p.expectedDeliveryISO ? `ETA ${p.expectedDeliveryISO}` : null,
                       `${p.lines.length} line(s)`,
-                      `${openKg.toLocaleString()} kg open`,
+                      openLabel,
                     ]
                       .filter(Boolean)
                       .join(' · ');
@@ -1165,17 +1358,19 @@ const Operations = () => {
                               >
                                 <p className="text-[10px] font-bold text-[#134e4a]">{row.productName}</p>
                                 <p className="text-[9px] text-slate-500">
-                                  Max {row.remaining.toLocaleString()} kg
+                                  Max {row.remaining.toLocaleString()}{' '}
+                                  {row.grnKind === 'stone' ? 'm' : row.grnKind === 'accessory' ? 'units' : 'kg'}
                                 </p>
-                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                {row.grnKind === 'stone' || row.grnKind === 'accessory' ? (
                                   <div>
                                     <label className="text-[8px] font-bold text-slate-400 uppercase block mb-0.5">
-                                      Kg in
+                                      {row.grnKind === 'stone' ? 'Metres in' : 'Units in'}
                                     </label>
                                     <input
                                       type="number"
                                       min="0"
                                       max={row.remaining}
+                                      step={row.grnKind === 'stone' ? '0.01' : '1'}
                                       value={row.qtyReceived}
                                       onChange={(e) => {
                                         const v = e.target.value;
@@ -1186,45 +1381,69 @@ const Operations = () => {
                                       className="w-full rounded border border-slate-200 py-2 px-2 text-xs font-bold"
                                     />
                                   </div>
-                                  <div>
-                                    <label className="text-[8px] font-bold text-slate-400 uppercase block mb-0.5">
-                                      Wt kg
-                                    </label>
-                                    <input
-                                      type="number"
-                                      min="0"
-                                      step="0.01"
-                                      value={row.weightKg}
-                                      onChange={(e) => {
-                                        const v = e.target.value;
-                                        setGrnLines((prev) =>
-                                          prev.map((r, i) => (i === idx ? { ...r, weightKg: v } : r))
-                                        );
-                                      }}
-                                      className="w-full rounded border border-slate-200 py-2 px-2 text-xs font-bold"
-                                    />
+                                ) : (
+                                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                    <div>
+                                      <label className="text-[8px] font-bold text-slate-400 uppercase block mb-0.5">
+                                        Kg in
+                                      </label>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        max={row.remaining}
+                                        value={row.qtyReceived}
+                                        onChange={(e) => {
+                                          const v = e.target.value;
+                                          setGrnLines((prev) =>
+                                            prev.map((r, i) => (i === idx ? { ...r, qtyReceived: v } : r))
+                                          );
+                                        }}
+                                        className="w-full rounded border border-slate-200 py-2 px-2 text-xs font-bold"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="text-[8px] font-bold text-slate-400 uppercase block mb-0.5">
+                                        Wt kg
+                                      </label>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        step="0.01"
+                                        value={row.weightKg}
+                                        onChange={(e) => {
+                                          const v = e.target.value;
+                                          setGrnLines((prev) =>
+                                            prev.map((r, i) => (i === idx ? { ...r, weightKg: v } : r))
+                                          );
+                                        }}
+                                        className="w-full rounded border border-slate-200 py-2 px-2 text-xs font-bold"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="text-[8px] font-bold text-slate-400 uppercase block mb-0.5">
+                                        Coil #
+                                      </label>
+                                      <input
+                                        value={row.coilNo}
+                                        onChange={(e) => {
+                                          const v = e.target.value;
+                                          setGrnLines((prev) =>
+                                            prev.map((r, i) => (i === idx ? { ...r, coilNo: v } : r))
+                                          );
+                                        }}
+                                        placeholder="CL-YY-####"
+                                        title="Next free number suggested from existing coils; change if the shop-floor tag differs."
+                                        className="w-full rounded border border-slate-200 py-2 px-2 text-xs font-bold font-mono"
+                                      />
+                                    </div>
                                   </div>
-                                  <div>
-                                    <label className="text-[8px] font-bold text-slate-400 uppercase block mb-0.5">
-                                      Coil #
-                                    </label>
-                                    <input
-                                      value={row.coilNo}
-                                      onChange={(e) => {
-                                        const v = e.target.value;
-                                        setGrnLines((prev) =>
-                                          prev.map((r, i) => (i === idx ? { ...r, coilNo: v } : r))
-                                        );
-                                      }}
-                                      placeholder="Auto"
-                                      className="w-full rounded border border-slate-200 py-2 px-2 text-xs font-bold"
-                                    />
-                                  </div>
-                                </div>
+                                )}
                               </div>
                             ))
                           )}
-                          {grnLines.length > 0 && ws?.hasPermission?.('purchase_orders.manage') ? (
+                          {grnLines.length > 0 &&
+                          grnLines.some((r) => r.grnKind === 'coil') &&
+                          ws?.hasPermission?.('purchase_orders.manage') ? (
                             <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-amber-200 bg-amber-50/90 p-2.5 text-[10px] font-medium text-amber-950">
                               <input
                                 type="checkbox"
@@ -1262,18 +1481,146 @@ const Operations = () => {
               <div className="p-4 sm:p-6 flex flex-col">
                 <h3 className="text-[10px] font-semibold text-slate-600 uppercase tracking-widest mb-1 flex items-center gap-2">
                   <Scale size={14} className="text-[#134e4a]" />
-                  Received coils — live weight
+                  {stockReceiveKind === 'coil'
+                    ? 'Received coils — live weight'
+                    : stockReceiveKind === 'stone'
+                      ? 'Received stone — live metres'
+                      : 'Received accessories — live qty'}
                 </h3>
+                <div
+                  role="tablist"
+                  aria-label="Received stock category"
+                  className="flex flex-wrap gap-1 mb-2"
+                >
+                  {[
+                    { id: 'coil', label: 'Coil' },
+                    { id: 'stone', label: 'Stone' },
+                    { id: 'accessory', label: 'Accessories' },
+                  ].map((t) => {
+                    const active = stockReceiveKind === t.id;
+                    return (
+                      <button
+                        key={`rcvd-${t.id}`}
+                        type="button"
+                        role="tab"
+                        aria-selected={active}
+                        onClick={() => setStockReceiveKind(t.id)}
+                        className={`px-2.5 py-1 rounded-md text-[9px] font-semibold uppercase tracking-wide transition-colors ${
+                          active
+                            ? 'bg-[#134e4a] text-white shadow-sm'
+                            : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        {t.label}
+                      </button>
+                    );
+                  })}
+                </div>
                 <p className="text-[10px] text-slate-500 leading-relaxed mb-3">
-                  Every coil from store GRN. <strong>Current kg</strong> is the live weight left on the coil
-                  (after production has used material).
+                  {stockReceiveKind === 'coil'
+                    ? 'Every coil from store GRN. Current kg is the live weight left on the roll.'
+                    : stockReceiveKind === 'stone'
+                      ? 'Stone-coated SKUs (metres). Click a row for full in / out movement history.'
+                      : 'Accessory SKUs (units). Click a row for full in / out movement history.'}
                 </p>
-                {coilLotsReceiptSorted.length === 0 ? (
+                {stockReceiveKind === 'coil' ? (
+                  coilLotsReceiptSorted.length === 0 ? (
+                    <p className="text-[10px] font-medium text-slate-400">
+                      No coils yet — confirm a receipt in the panel on the left.
+                    </p>
+                  ) : coilLotsReceiptFiltered.length === 0 ? (
+                    <p className="text-[10px] font-medium text-slate-400">No coils match your search.</p>
+                  ) : (
+                    <>
+                      <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-2 mb-2 shrink-0">
+                        <label className="relative flex-1 min-w-[140px]">
+                          <Search
+                            size={12}
+                            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
+                            aria-hidden
+                          />
+                          <input
+                            type="search"
+                            value={coilLiveSearch}
+                            onChange={(e) => setCoilLiveSearch(e.target.value)}
+                            placeholder="Search coil, PO, colour…"
+                            className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-2 text-[10px] font-medium text-slate-800 placeholder:text-slate-400"
+                          />
+                        </label>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-[8px] font-bold uppercase tracking-wide text-slate-500 whitespace-nowrap">
+                            Sort
+                          </span>
+                          <select
+                            value={coilLiveSort}
+                            onChange={(e) => setCoilLiveSort(e.target.value)}
+                            className="rounded-lg border border-slate-200 bg-white py-1.5 px-2 text-[10px] font-semibold text-slate-700 min-w-0 max-w-full"
+                          >
+                            <option value="recent">Newest receipt</option>
+                            <option value="kgDesc">Current kg (high → low)</option>
+                            <option value="kgAsc">Current kg (low → high)</option>
+                            <option value="coilAsc">Coil no (A → Z)</option>
+                            <option value="gaugeAsc">Gauge</option>
+                            <option value="materialAsc">Material</option>
+                          </select>
+                        </div>
+                      </div>
+                      {coilsReceiptTruncated ? (
+                        <p className="text-[9px] text-slate-500 mb-1.5">
+                          Showing {STOCK_SIDE_LIST_LIMIT} of {coilLotsReceiptFiltered.length}. Search to find older coils.
+                        </p>
+                      ) : null}
+                      <ul className="space-y-1.5">
+                        {coilLotsByReceipt.map((c) => {
+                          const live = liveCoilWeightKg(c);
+                          const material = c.materialTypeName || c.productID || '—';
+                          const meta2 = [
+                            c.colour || null,
+                            c.gaugeLabel || null,
+                            c.poID ? `PO ${c.poID}` : null,
+                            c.receivedAtISO ? `Rcvd ${c.receivedAtISO}` : null,
+                            `${live.toLocaleString(undefined, { maximumFractionDigits: 2 })} kg current`,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ');
+                          return (
+                            <li key={`${c.coilNo}-${c.poID || ''}-${c.lineKey || ''}`}>
+                              <button
+                                type="button"
+                                onClick={() => navigate(`/operations/coils/${encodeURIComponent(c.coilNo)}`)}
+                                className="w-full text-left rounded-lg border border-slate-200/60 bg-white/40 py-1.5 px-2.5 shadow-sm backdrop-blur-md hover:bg-white/70 transition-colors group"
+                              >
+                                <div className="min-w-0 leading-tight">
+                                  <div className="flex items-center justify-between gap-2 min-w-0">
+                                    <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
+                                      {c.coilNo}
+                                      <span className="font-medium text-slate-600"> · {material}</span>
+                                    </p>
+                                    <span className="text-[8px] font-semibold uppercase tracking-wide text-sky-800 bg-sky-100 group-hover:bg-sky-200 px-2 py-1 rounded-md shrink-0">
+                                      Open
+                                    </span>
+                                  </div>
+                                  <p
+                                    className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2"
+                                    title={meta2}
+                                  >
+                                    {meta2}
+                                  </p>
+                                </div>
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </>
+                  )
+                ) : skuProductsLiveSorted.length === 0 ? (
                   <p className="text-[10px] font-medium text-slate-400">
-                    No coils yet — confirm a receipt in the panel on the left.
+                    No {stockReceiveKind === 'stone' ? 'stone-coated' : 'accessory'} SKUs in catalog yet — create a PO
+                    or receipt in Procurement.
                   </p>
-                ) : coilLotsReceiptFiltered.length === 0 ? (
-                  <p className="text-[10px] font-medium text-slate-400">No coils match your search.</p>
+                ) : skuProductsReceiptFiltered.length === 0 ? (
+                  <p className="text-[10px] font-medium text-slate-400">No rows match your search.</p>
                 ) : (
                   <>
                     <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-2 mb-2 shrink-0">
@@ -1287,68 +1634,52 @@ const Operations = () => {
                           type="search"
                           value={coilLiveSearch}
                           onChange={(e) => setCoilLiveSearch(e.target.value)}
-                          placeholder="Search coil, PO, colour…"
+                          placeholder="Search SKU or name…"
                           className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-2 text-[10px] font-medium text-slate-800 placeholder:text-slate-400"
                         />
                       </label>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <span className="text-[8px] font-bold uppercase tracking-wide text-slate-500 whitespace-nowrap">
-                          Sort
-                        </span>
-                        <select
-                          value={coilLiveSort}
-                          onChange={(e) => setCoilLiveSort(e.target.value)}
-                          className="rounded-lg border border-slate-200 bg-white py-1.5 px-2 text-[10px] font-semibold text-slate-700 min-w-0 max-w-full"
-                        >
-                          <option value="recent">Newest receipt</option>
-                          <option value="kgDesc">Current kg (high → low)</option>
-                          <option value="kgAsc">Current kg (low → high)</option>
-                          <option value="coilAsc">Coil no (A → Z)</option>
-                          <option value="gaugeAsc">Gauge</option>
-                          <option value="materialAsc">Material</option>
-                        </select>
-                      </div>
                     </div>
-                    {coilsReceiptTruncated ? (
+                    {skuReceiptTruncated ? (
                       <p className="text-[9px] text-slate-500 mb-1.5">
-                        Showing {STOCK_SIDE_LIST_LIMIT} of {coilLotsReceiptFiltered.length}. Search to find older coils.
+                        Showing {STOCK_SIDE_LIST_LIMIT} of {skuProductsReceiptFiltered.length}. Search for more SKUs.
                       </p>
                     ) : null}
                     <ul className="space-y-1.5">
-                      {coilLotsByReceipt.map((c) => {
-                        const live = liveCoilWeightKg(c);
-                        const material = c.materialTypeName || c.productID || '—';
+                      {skuProductsByReceipt.map((p) => {
+                        const live = Number(p.stockLevel) || 0;
+                        const u = String(p.unit || '').trim() || (stockReceiveKind === 'stone' ? 'm' : 'u');
                         const meta2 = [
-                          c.colour || null,
-                          c.gaugeLabel || null,
-                          c.poID ? `PO ${c.poID}` : null,
-                          c.receivedAtISO ? `Rcvd ${c.receivedAtISO}` : null,
-                          `${live.toLocaleString(undefined, { maximumFractionDigits: 2 })} kg current`,
-                        ]
-                          .filter(Boolean)
-                          .join(' · ');
+                          p.productID,
+                          `Live ${live.toLocaleString()} ${u}`,
+                        ].join(' · ');
                         return (
-                          <li key={`${c.coilNo}-${c.poID || ''}-${c.lineKey || ''}`}>
+                          <li key={p.productID}>
                             <button
                               type="button"
-                              onClick={() => navigate(`/operations/coils/${encodeURIComponent(c.coilNo)}`)}
+                              onClick={() =>
+                                setProductMovementModal({
+                                  productID: p.productID,
+                                  name: p.name || p.productID,
+                                  unit: u,
+                                })
+                              }
                               className="w-full text-left rounded-lg border border-slate-200/60 bg-white/40 py-1.5 px-2.5 shadow-sm backdrop-blur-md hover:bg-white/70 transition-colors group"
                             >
                               <div className="min-w-0 leading-tight">
                                 <div className="flex items-center justify-between gap-2 min-w-0">
                                   <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
-                                    {c.coilNo}
-                                    <span className="font-medium text-slate-600"> · {material}</span>
+                                    <span className="font-mono">{p.productID}</span>
+                                    <span className="font-medium text-slate-600"> · {p.name || '—'}</span>
                                   </p>
-                                  <span className="text-[8px] font-semibold uppercase tracking-wide text-sky-800 bg-sky-100 group-hover:bg-sky-200 px-2 py-1 rounded-md shrink-0">
-                                    Open
+                                  <span className="text-[10px] font-black text-[#134e4a] tabular-nums shrink-0">
+                                    {live.toLocaleString()} {u}
                                   </span>
                                 </div>
                                 <p
                                   className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2"
                                   title={meta2}
                                 >
-                                  {meta2}
+                                  {meta2} · tap for movements
                                 </p>
                               </div>
                             </button>
@@ -1897,7 +2228,7 @@ const Operations = () => {
                   setFinishedForm((f) => ({ ...f, coilNo: e.target.value }))
                 }
                 className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                placeholder="e.g. COIL-2026-0012"
+                placeholder="e.g. COIL-26-0012"
               />
               <datalist id="ops-fg-coils">
                 {coilLots
@@ -2560,6 +2891,82 @@ const Operations = () => {
                 </p>
               </div>
             ) : null}
+          </div>
+        </div>
+      </ModalFrame>
+
+      <ModalFrame
+        isOpen={productMovementModal != null}
+        onClose={() => setProductMovementModal(null)}
+      >
+        <div className="z-modal-panel max-w-lg w-full max-h-[85vh] flex flex-col p-5 sm:p-6">
+          <div className="flex items-start justify-between gap-3 mb-3">
+            <div className="min-w-0">
+              <h3 className="text-sm font-bold text-[#134e4a]">Stock movements</h3>
+              <p className="text-[10px] text-slate-500 mt-1 font-mono break-all">
+                {productMovementModal?.productID}
+              </p>
+              <p className="text-xs text-slate-700 mt-0.5 line-clamp-2">{productMovementModal?.name}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setProductMovementModal(null)}
+              className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 shrink-0"
+              aria-label="Close"
+            >
+              <X size={18} />
+            </button>
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto border border-slate-200 rounded-lg">
+            {productMovementsLoading ? (
+              <p className="text-xs text-slate-500 p-4">Loading…</p>
+            ) : productMovementsRows.length === 0 ? (
+              <p className="text-xs text-slate-500 p-4">No movements recorded for this SKU.</p>
+            ) : (
+              <div className="flex flex-col min-h-0">
+                <AppTableWrap className="shadow-none rounded-none border-0">
+                  <table className="w-full border-collapse text-left text-sm">
+                    <thead className="sticky top-0 z-[1] border-b border-slate-200 bg-slate-50 text-xs font-bold uppercase tracking-wide text-slate-600">
+                      <tr>
+                        <th className="py-2.5 px-3">When</th>
+                        <th className="py-2.5 px-3">Type</th>
+                        <th className="py-2.5 px-3 text-right">Qty</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {productMovementsPage.slice.map((m) => {
+                        const typeTitle = [m.type, m.ref, m.detail].filter(Boolean).join(' · ');
+                        return (
+                          <tr key={m.id} className="hover:bg-teal-50/30">
+                            <td className="py-2 px-3 text-slate-700 whitespace-nowrap font-mono text-[13px]">
+                              {m.dateISO || m.atISO?.slice(0, 10) || '—'}
+                            </td>
+                            <td className="max-w-0 py-2 px-3 text-slate-600 whitespace-nowrap truncate" title={typeTitle}>
+                              <span className="font-semibold">{m.type}</span>
+                              {m.ref ? <span className="text-slate-500"> · {m.ref}</span> : null}
+                            </td>
+                            <td className="py-2 px-3 text-right font-bold tabular-nums text-[#134e4a]">
+                              {m.qty != null ? Number(m.qty).toLocaleString() : '—'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </AppTableWrap>
+                <div className="shrink-0 border-t border-slate-100 bg-white px-2 py-2">
+                  <AppTablePager
+                    showingFrom={productMovementsPage.showingFrom}
+                    showingTo={productMovementsPage.showingTo}
+                    total={productMovementsPage.total}
+                    hasPrev={productMovementsPage.hasPrev}
+                    hasNext={productMovementsPage.hasNext}
+                    onPrev={productMovementsPage.goPrev}
+                    onNext={productMovementsPage.goNext}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </ModalFrame>

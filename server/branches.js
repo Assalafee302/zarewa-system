@@ -1,5 +1,5 @@
 /** Default branch for legacy rows and first login. */
-export const DEFAULT_BRANCH_ID = 'BR-KAD';
+export const DEFAULT_BRANCH_ID = 'BR-KD';
 
 /**
  * @param {import('better-sqlite3').Database} db

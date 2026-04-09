@@ -6,6 +6,17 @@ import { useHrWorkspace } from '../../context/HrWorkspaceContext';
 import { useToast } from '../../context/ToastContext';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { apiFetch } from '../../lib/apiBase';
+import { APP_DATA_TABLE_PAGE_SIZE, useAppTablePaging } from '../../lib/appDataTable';
+import {
+  AppTable,
+  AppTableBody,
+  AppTablePager,
+  AppTableTd,
+  AppTableTh,
+  AppTableThead,
+  AppTableTr,
+  AppTableWrap,
+} from '../../components/ui/AppDataTable';
 import { formatNgn } from '../../hr/hrFormat';
 import HrCapsLoading from './hrCapsLoading';
 import { HrOpsToolbar, HrSectionCard } from './hrUx';
@@ -13,7 +24,7 @@ import { HrOpsToolbar, HrSectionCard } from './hrUx';
 const ROLE_OPTIONS = [
   { value: 'viewer', label: 'Read only' },
   { value: 'sales_staff', label: 'Sales officer' },
-  { value: 'sales_manager', label: 'Sales manager' },
+  { value: 'sales_manager', label: 'Branch manager' },
   { value: 'procurement_officer', label: 'Procurement officer' },
   { value: 'operations_officer', label: 'Operations officer' },
   { value: 'finance_manager', label: 'Finance manager' },
@@ -99,6 +110,8 @@ export default function HrStaffList() {
     );
   }, [rows, q]);
 
+  const staffPage = useAppTablePaging(filtered, APP_DATA_TABLE_PAGE_SIZE, q);
+
   const openRegister = () => {
     const bid = branches[0]?.id || '';
     setRegForm({ ...emptyRegister, branchId: bid });
@@ -145,7 +158,6 @@ export default function HrStaffList() {
   return (
     <>
       <PageHeader
-        eyebrow="Human resources"
         title="Staff directory"
         subtitle="Employee files scoped to your workspace branch (unless HQ view-all is enabled). Open a record by clicking the name."
         actions={
@@ -168,7 +180,7 @@ export default function HrStaffList() {
           left={<p className="text-xs font-semibold text-slate-600">Primary directory for operations and payroll inputs.</p>}
           right={
             <p className="text-xs font-medium text-slate-500">
-              {busy ? 'Loading…' : `${filtered.length} of ${rows.length} shown`}
+              {busy ? 'Loading…' : `${filtered.length} match${filtered.length === 1 ? '' : 'es'} · ${rows.length} total`}
             </p>
           }
         />
@@ -185,7 +197,7 @@ export default function HrStaffList() {
             />
           </div>
           <p className="text-xs font-medium text-slate-500">
-            {busy ? 'Loading…' : `${filtered.length} of ${rows.length} shown`}
+            {busy ? 'Loading…' : `${filtered.length} match${filtered.length === 1 ? '' : 'es'} · ${rows.length} total`}
           </p>
         </div>
 
@@ -200,58 +212,64 @@ export default function HrStaffList() {
             </p>
           </div>
         ) : (
-          <div className="overflow-x-auto rounded-2xl border border-slate-200/90 bg-white shadow-sm">
-            <table className="min-w-full text-left text-sm">
-              <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-500">
-                <tr>
-                  <th className="px-4 py-3">Name</th>
-                  <th className="px-4 py-3 hidden md:table-cell">Role / job</th>
-                  <th className="px-4 py-3 hidden sm:table-cell">Branch</th>
-                  <th className="px-4 py-3 hidden lg:table-cell">HR file</th>
-                  <th className="px-4 py-3 text-right">Package</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((s) => (
-                  <tr key={s.userId} className="border-t border-slate-100 hover:bg-teal-50/30">
-                    <td className="px-4 py-3">
-                      <Link
-                        to={`/hr/staff/${encodeURIComponent(s.userId)}`}
-                        className="group block rounded-lg -m-1 p-1 text-left no-underline hover:bg-teal-100/40"
-                      >
-                        <p className="font-semibold text-[#134e4a] group-hover:underline">
-                          {s.displayName || s.username}
-                        </p>
-                        <p className="text-xs text-slate-500">
-                          {s.employeeNo || s.username} · {s.roleKey || '—'}
-                        </p>
-                      </Link>
-                    </td>
-                    <td className="px-4 py-3 text-xs text-slate-700 hidden md:table-cell">
-                      <span className="font-medium">{s.jobTitle || '—'}</span>
-                      {s.department ? <span className="text-slate-500"> · {s.department}</span> : null}
-                    </td>
-                    <td className="px-4 py-3 text-xs font-medium hidden sm:table-cell">{s.branchId || '—'}</td>
-                    <td className="px-4 py-3 text-xs text-slate-600 hidden lg:table-cell">
-                      {s.nextOfKin?.name ? (
-                        <span className="mr-1 rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-900">Kin</span>
-                      ) : (
-                        <span className="mr-1 rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-900">Kin missing</span>
-                      )}
-                      {s.probationEndIso ? (
-                        <span className="rounded bg-slate-100 px-1.5 py-0.5 font-semibold text-slate-700">
-                          Probation {String(s.probationEndIso)}
-                        </span>
-                      ) : null}
-                    </td>
-                    <td className="px-4 py-3 text-right text-xs font-semibold tabular-nums text-slate-800">
-                      ₦{formatNgn(packageGross(s))}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <>
+            <AppTableWrap>
+              <AppTable role="numeric">
+                <AppTableThead>
+                  <AppTableTh>Name</AppTableTh>
+                  <AppTableTh className="hidden md:table-cell">Role / job</AppTableTh>
+                  <AppTableTh className="hidden sm:table-cell">Branch</AppTableTh>
+                  <AppTableTh className="hidden lg:table-cell">HR file</AppTableTh>
+                  <AppTableTh align="right">Package</AppTableTh>
+                </AppTableThead>
+                <AppTableBody>
+                  {staffPage.slice.map((s) => {
+                    const nameLine = `${s.displayName || s.username} · ${s.employeeNo || s.username} · ${s.roleKey || '—'}`;
+                    const jobLine = `${s.jobTitle || '—'}${s.department ? ` · ${s.department}` : ''}`;
+                    const fileBits = [
+                      s.nextOfKin?.name ? 'Kin OK' : 'Kin missing',
+                      s.probationEndIso ? `Probation ${s.probationEndIso}` : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' · ');
+                    return (
+                      <AppTableTr key={s.userId}>
+                        <AppTableTd title={nameLine}>
+                          <Link
+                            to={`/hr/staff/${encodeURIComponent(s.userId)}`}
+                            className="font-semibold text-[#134e4a] hover:underline"
+                          >
+                            {nameLine}
+                          </Link>
+                        </AppTableTd>
+                        <AppTableTd className="hidden md:table-cell" title={jobLine}>
+                          {jobLine}
+                        </AppTableTd>
+                        <AppTableTd className="hidden sm:table-cell" title={s.branchId || ''}>
+                          {s.branchId || '—'}
+                        </AppTableTd>
+                        <AppTableTd className="hidden lg:table-cell" title={fileBits}>
+                          {fileBits || '—'}
+                        </AppTableTd>
+                        <AppTableTd align="right" monospace title={`₦${formatNgn(packageGross(s))}`}>
+                          ₦{formatNgn(packageGross(s))}
+                        </AppTableTd>
+                      </AppTableTr>
+                    );
+                  })}
+                </AppTableBody>
+              </AppTable>
+            </AppTableWrap>
+            <AppTablePager
+              showingFrom={staffPage.showingFrom}
+              showingTo={staffPage.showingTo}
+              total={staffPage.total}
+              hasPrev={staffPage.hasPrev}
+              hasNext={staffPage.hasNext}
+              onPrev={staffPage.goPrev}
+              onNext={staffPage.goNext}
+            />
+          </>
         )}
 
         <p className="mt-6 text-xs text-slate-500">

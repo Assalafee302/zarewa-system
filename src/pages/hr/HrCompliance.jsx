@@ -5,6 +5,17 @@ import { MainPanel, PageHeader } from '../../components/layout';
 import { useHrWorkspace } from '../../context/HrWorkspaceContext';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { apiFetch } from '../../lib/apiBase';
+import { APP_DATA_TABLE_PAGE_SIZE, useAppTablePaging } from '../../lib/appDataTable';
+import {
+  AppTable,
+  AppTableBody,
+  AppTablePager,
+  AppTableTd,
+  AppTableTh,
+  AppTableThead,
+  AppTableTr,
+  AppTableWrap,
+} from '../../components/ui/AppDataTable';
 import { HrOpsToolbar } from './hrUx';
 
 export default function HrCompliance() {
@@ -55,6 +66,9 @@ export default function HrCompliance() {
 
   const latestAck = useMemo(() => (acks.length ? acks[0] : null), [acks]);
 
+  const eventsList = Array.isArray(obs.events) ? obs.events : [];
+  const eventsPage = useAppTablePaging(eventsList, APP_DATA_TABLE_PAGE_SIZE, eventsList.length, loading);
+
   const submitAck = async (e) => {
     e.preventDefault();
     if (!signatureName.trim() || !policyVersion.trim()) return;
@@ -81,7 +95,6 @@ export default function HrCompliance() {
     return (
       <MainPanel>
         <PageHeader
-          eyebrow="Human resources"
           title="Compliance & audits"
           subtitle="Handbook sign-off and who changed what in HR"
         />
@@ -95,7 +108,6 @@ export default function HrCompliance() {
   return (
     <MainPanel>
       <PageHeader
-        eyebrow="Human resources"
         title="Compliance & audits"
         subtitle="Who signed the handbook, recent HR audit events, and (for admins) go-live checklist status."
       />
@@ -169,34 +181,56 @@ export default function HrCompliance() {
         <h3 className="text-sm font-black text-[#134e4a] flex items-center gap-2">
           <Activity size={16} /> Recent HR audit events
         </h3>
-        <div className="mt-3 overflow-auto">
-          <table className="min-w-full text-left text-xs">
-            <thead className="text-[10px] uppercase text-slate-500 border-b border-slate-100">
-              <tr>
-                <th className="py-2 pr-3">When</th>
-                <th className="py-2 pr-3">Action</th>
-                <th className="py-2 pr-3">Actor</th>
-                <th className="py-2 pr-3">Entity</th>
-              </tr>
-            </thead>
-            <tbody>
-              {obs.events.slice(0, 40).map((e) => (
-                <tr key={e.id} className="border-b border-slate-50">
-                  <td className="py-2 pr-3 text-slate-500">{String(e.atIso || '').slice(0, 10)}</td>
-                  <td className="py-2 pr-3 font-semibold text-slate-700">{e.action}</td>
-                  <td className="py-2 pr-3 text-slate-600">{e.actorDisplayName || e.actorUserId || '—'}</td>
-                  <td className="py-2 pr-3 text-slate-500">{e.entityKind}{e.entityId ? ` · ${e.entityId}` : ''}</td>
-                </tr>
-              ))}
-              {obs.events.length === 0 ? (
-                <tr>
-                  <td className="py-4 text-slate-500" colSpan={4}>
-                    {loading ? 'Loading events...' : 'No HR audit events yet.'}
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
+        <div className="mt-3">
+          <AppTableWrap className="shadow-none">
+            <AppTable>
+              <AppTableThead>
+                <AppTableTh>When</AppTableTh>
+                <AppTableTh>Action</AppTableTh>
+                <AppTableTh>Actor</AppTableTh>
+                <AppTableTh>Entity</AppTableTh>
+              </AppTableThead>
+              <AppTableBody>
+                {eventsPage.total === 0 ? (
+                  <AppTableTr>
+                    <AppTableTd colSpan={4} className="py-4 text-slate-500" truncate={false}>
+                      {loading ? 'Loading events…' : 'No HR audit events yet.'}
+                    </AppTableTd>
+                  </AppTableTr>
+                ) : null}
+                {eventsPage.total > 0
+                  ? (
+                  eventsPage.slice.map((e) => {
+                    const ent = `${e.entityKind || ''}${e.entityId ? ` · ${e.entityId}` : ''}`;
+                    return (
+                      <AppTableTr key={e.id}>
+                        <AppTableTd monospace className="text-slate-500">
+                          {String(e.atIso || '').slice(0, 10)}
+                        </AppTableTd>
+                        <AppTableTd title={e.action}>{e.action}</AppTableTd>
+                        <AppTableTd title={e.actorDisplayName || e.actorUserId || ''}>
+                          {e.actorDisplayName || e.actorUserId || '—'}
+                        </AppTableTd>
+                        <AppTableTd title={ent}>{ent || '—'}</AppTableTd>
+                      </AppTableTr>
+                    );
+                  })
+                  )
+                : null}
+              </AppTableBody>
+            </AppTable>
+          </AppTableWrap>
+          {eventsPage.total > 0 ? (
+            <AppTablePager
+              showingFrom={eventsPage.showingFrom}
+              showingTo={eventsPage.showingTo}
+              total={eventsPage.total}
+              hasPrev={eventsPage.hasPrev}
+              hasNext={eventsPage.hasNext}
+              onPrev={eventsPage.goPrev}
+              onNext={eventsPage.goNext}
+            />
+          ) : null}
         </div>
       </section>
       <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-5">

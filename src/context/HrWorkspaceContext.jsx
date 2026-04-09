@@ -44,7 +44,10 @@ function hrCapsFromSessionPermissions(hasPermission) {
       has('hr.loan_maintain') ||
       has('finance.approve'),
     canHrReview: star || has('hr.requests.hr_review') || has('hr.manage'),
-    canFinalApprove: star || has('hr.requests.final_approve') || has('finance.approve'),
+    canFinalApprove:
+      star || has('hr.requests.final_approve') || has('hr.requests.gm_approve') || has('finance.approve'),
+    canGmHrApprove: star || has('hr.requests.gm_approve') || has('hr.requests.final_approve'),
+    canBranchEndorse: star || has('hr.branch.endorse_staff'),
     canIssueLetters: star || has('hr.letters.generate') || has('hr.manage'),
     canViewSensitiveHr:
       star || has('hr.staff.manage') || has('hr.manage') || has('hr.payroll.manage'),
@@ -64,6 +67,8 @@ function mergeHrCaps(apiPayload, fromSession) {
     canLoanMaint: apiPayload.canLoanMaint || fromSession.canLoanMaint,
     canHrReview: apiPayload.canHrReview || fromSession.canHrReview,
     canFinalApprove: apiPayload.canFinalApprove || fromSession.canFinalApprove,
+    canGmHrApprove: apiPayload.canGmHrApprove || fromSession.canGmHrApprove,
+    canBranchEndorse: apiPayload.canBranchEndorse || fromSession.canBranchEndorse,
     canIssueLetters: apiPayload.canIssueLetters || fromSession.canIssueLetters,
     canViewSensitiveHr: apiPayload.canViewSensitiveHr || fromSession.canViewSensitiveHr,
     canCompliance: apiPayload.canCompliance || fromSession.canCompliance,
@@ -87,11 +92,11 @@ export function HrWorkspaceProvider({ children }) {
     }
   }, [hasPermission]);
 
-  /* eslint-disable react-hooks/set-state-in-effect -- initial HR caps fetch on mount */
+   
   useEffect(() => {
     reloadCaps();
   }, [reloadCaps]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   const value = useMemo(
     () => ({ caps, capsError, reloadCaps }),

@@ -41,14 +41,71 @@ function seedData(db) {
   insQ.run('QT-RFS-SELF-002', 'CUS-001', 'John Doe', 50000, 'Finished', linesSelf);
   insQ.run('QT-RFS-PRICE-027', 'CUS-NDA', 'NDA Corp', 12000, 'Finished', linesPrice);
 
+  const linesDeliverySvc = JSON.stringify({
+    products: [{ name: 'Roofing', qty: 10, unitPrice: 5000 }],
+    accessories: [],
+    services: [{ name: 'Site delivery', qty: 1, unit_price_ngn: 75000 }],
+  });
+  insQ.run('QT-RFS-TRN-001', 'CUS-001', 'John Doe', 125000, 'Finished', linesDeliverySvc);
+
+  const linesBundleSvc = JSON.stringify({
+    products: [{ name: 'Roofing', qty: 5, unitPrice: 5000 }],
+    accessories: [],
+    services: [{ name: 'Transport and installation', qty: 1, value: 99000 }],
+  });
+  insQ.run('QT-RFS-BND-001', 'CUS-001', 'John Doe', 124000, 'Finished', linesBundleSvc);
+
+  const linesCalcMismatch = JSON.stringify({
+    products: [{ name: 'Roofing', qty: 10, unitPrice: 5000 }],
+    accessories: [],
+    services: [],
+  });
+  insQ.run('QT-RFS-CALC-001', 'CUS-001', 'John Doe', 50001, 'Finished', linesCalcMismatch);
+
+  db.prepare(
+    `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
+     VALUES ('RCT-RFS-BND', 'CUS-001', 'John Doe', 'QT-RFS-BND-001', 124000, 'Confirmed', '2026-04-01')`
+  ).run();
+
+  db.prepare(
+    `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
+     VALUES ('RCT-RFS-CALC', 'CUS-001', 'John Doe', 'QT-RFS-CALC-001', 50001, 'Confirmed', '2026-04-01')`
+  ).run();
+
   db.prepare(
     `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
      VALUES ('RCT-RFS-OVR', 'CUS-001', 'John Doe', 'QT-RFS-OVR-001', 120000, 'Confirmed', '2026-04-01')`
   ).run();
 
   db.prepare(
+    `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
+     VALUES ('RCT-RFS-TRN', 'CUS-001', 'John Doe', 'QT-RFS-TRN-001', 125000, 'Confirmed', '2026-04-01')`
+  ).run();
+
+  db.prepare(
     `INSERT OR REPLACE INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
      VALUES ('JOB-RFS-OVR', 'QT-RFS-OVR-001', 100, 'Completed', '2026-04-01T10:00:00Z')`
+  ).run();
+
+  const linesSub = JSON.stringify({
+    products: [{ name: 'Roofing Premium', qty: 20, unitPrice: 5000 }],
+    accessories: [],
+    services: [],
+  });
+  insQ.run('QT-RFS-SUB-001', 'CUS-001', 'John Doe', 100000, 'Finished', linesSub);
+  db.prepare(
+    `INSERT OR REPLACE INTO products (product_id, name, stock_level, unit, branch_id, gauge, colour, material_type)
+     VALUES ('SUB-FG-TEST', 'Longspan economy', 0, 'm', 'BR-KD', '0.24mm', 'IV', 'Aluminium')`
+  ).run();
+  db.prepare(
+    `INSERT OR REPLACE INTO price_list_items (
+      id, gauge_key, design_key, unit_price_per_meter_ngn, sort_order, notes, branch_id, effective_from_iso
+    ) VALUES ('PL-RFS-SUB', '0.24mm', 'iv', 3000, 0, 'test', NULL, '2026-01-01')`
+  ).run();
+  db.prepare(
+    `INSERT OR REPLACE INTO production_jobs (
+      job_id, quotation_ref, product_id, product_name, actual_meters, status, created_at_iso
+    ) VALUES ('JOB-RFS-SUB', 'QT-RFS-SUB-001', 'SUB-FG-TEST', 'Longspan economy', 10, 'Completed', '2026-04-01T10:00:00Z')`
   ).run();
 }
 
@@ -95,11 +152,10 @@ describe('Refund Security & Substitution Logic', () => {
     expect(res2.body.error).toMatch(/already exists/i);
   });
 
-  it('allows self-approval when requester is a manager/approver', async () => {
-    const manager = request.agent(app);
-    await loginAs(manager, 'sales.manager', 'Sales@123');
-
-    const create = await manager.post('/api/refunds').send({
+  it('branch manager approves refund raised by sales (no refund.request on branch manager)', async () => {
+    const staff = request.agent(app);
+    await loginAs(staff, 'sales.staff', 'Sales@123');
+    const create = await staff.post('/api/refunds').send({
       customerID: 'CUS-001',
       customer: 'John Doe',
       quotationRef: 'QT-RFS-SELF-002',
@@ -109,10 +165,37 @@ describe('Refund Security & Substitution Logic', () => {
     expect(create.status).toBe(201);
     const refundID = create.body.refundID;
 
+    const manager = request.agent(app);
+    await loginAs(manager, 'sales.manager', 'Sales@123');
     const approve = await manager.post(`/api/refunds/${refundID}/decision`).send({
       status: 'Approved',
       approvedAmountNgn: 5000,
-      note: 'Self-approving (should succeed)',
+      note: 'Branch manager approval',
+    });
+    expect(approve.status).toBe(200);
+    expect(approve.body.ok).toBe(true);
+  });
+
+  it('managing director approves refund raised by sales (refunds.approve)', async () => {
+    const staff = request.agent(app);
+    await loginAs(staff, 'sales.staff', 'Sales@123');
+    const create = await staff.post('/api/refunds').send({
+      customerID: 'CUS-001',
+      customer: 'John Doe',
+      quotationRef: 'QT-RFS-PRICE-027',
+      reasonCategory: ['Calculation error'],
+      amountNgn: 100,
+      calculationLines: [{ label: 'Header vs lines', amountNgn: 100, category: 'Calculation error' }],
+    });
+    expect(create.status).toBe(201);
+    const refundID = create.body.refundID;
+
+    const md = request.agent(app);
+    await loginAs(md, 'md', 'Md@1234567890!');
+    const approve = await md.post(`/api/refunds/${refundID}/decision`).send({
+      status: 'Approved',
+      approvedAmountNgn: 100,
+      note: 'MD approval',
     });
     expect(approve.status).toBe(200);
     expect(approve.body.ok).toBe(true);
@@ -154,6 +237,41 @@ describe('Refund Security & Substitution Logic', () => {
     expect(preview.body.preview.suggestedAmountNgn).toBe(100000);
   });
 
+  it('suggests substitution credit from per-metre delta × produced metres', async () => {
+    const agent = request.agent(app);
+    await loginAs(agent);
+
+    const preview = await agent.post('/api/refunds/preview').send({
+      quotationRef: 'QT-RFS-SUB-001',
+    });
+
+    expect(preview.status).toBe(200);
+    const sub = preview.body.preview.suggestedLines.find((l) => l.category === 'Substitution Difference');
+    expect(sub).toBeDefined();
+    expect(sub.amountNgn).toBe(20_000);
+    const bd = preview.body.preview.substitutionPerMeterBreakdown;
+    expect(Array.isArray(bd)).toBe(true);
+    expect(bd).toHaveLength(1);
+    expect(bd[0].deltaPerMeterNgn).toBe(2000);
+    expect(bd[0].creditNgn).toBe(20_000);
+    expect(bd[0].meters).toBe(10);
+  });
+
+  it('honours substitutePricePerMeterNgn override for substitution delta', async () => {
+    const agent = request.agent(app);
+    await loginAs(agent);
+
+    const preview = await agent.post('/api/refunds/preview').send({
+      quotationRef: 'QT-RFS-SUB-001',
+      substitutePricePerMeterNgn: 3500,
+    });
+
+    expect(preview.status).toBe(200);
+    const sub = preview.body.preview.suggestedLines.find((l) => l.category === 'Substitution Difference');
+    expect(sub).toBeDefined();
+    expect(sub.amountNgn).toBe(15_000);
+  });
+
   it('flags price variance > 5%', async () => {
     const agent = request.agent(app);
     await loginAs(agent);
@@ -165,5 +283,138 @@ describe('Refund Security & Substitution Logic', () => {
 
     expect(preview.status).toBe(200);
     expect(preview.body.preview.warnings.some((w) => w.includes('deviates by more than 5%'))).toBe(true);
+  });
+
+  it('suggests transport refund for delivery-style service names and snake_case prices', async () => {
+    const agent = request.agent(app);
+    await loginAs(agent);
+
+    const preview = await agent.post('/api/refunds/preview').send({
+      quotationRef: 'QT-RFS-TRN-001',
+      reasonCategory: ['Transport issue'],
+    });
+
+    expect(preview.status).toBe(200);
+    const transport = preview.body.preview.suggestedLines.find((l) => l.category === 'Transport issue');
+    expect(transport).toBeDefined();
+    expect(transport.amountNgn).toBe(75000);
+  });
+
+  it('suggests bundled transport+installation when only Installation issue is selected', async () => {
+    const agent = request.agent(app);
+    await loginAs(agent);
+
+    const preview = await agent.post('/api/refunds/preview').send({
+      quotationRef: 'QT-RFS-BND-001',
+      reasonCategory: ['Installation issue'],
+    });
+
+    expect(preview.status).toBe(200);
+    const bundle = preview.body.preview.suggestedLines.find((l) =>
+      Array.isArray(l.appliesToCategories) && l.appliesToCategories.includes('Installation issue')
+    );
+    expect(bundle).toBeDefined();
+    expect(bundle.amountNgn).toBe(99000);
+  });
+
+  it('detects service amounts from value-only lines', async () => {
+    const agent = request.agent(app);
+    await loginAs(agent);
+
+    const preview = await agent.post('/api/refunds/preview').send({
+      quotationRef: 'QT-RFS-BND-001',
+      reasonCategory: ['Transport issue'],
+    });
+
+    expect(preview.status).toBe(200);
+    const bundle = preview.body.preview.suggestedLines.find((l) => l.amountNgn === 99000);
+    expect(bundle).toBeDefined();
+  });
+
+  it('suggests calculation error when header total disagrees with line sum', async () => {
+    const agent = request.agent(app);
+    await loginAs(agent);
+
+    const preview = await agent.post('/api/refunds/preview').send({
+      quotationRef: 'QT-RFS-CALC-001',
+      reasonCategory: ['Calculation error'],
+    });
+
+    expect(preview.status).toBe(200);
+    const calc = preview.body.preview.suggestedLines.find((l) => l.category === 'Calculation error');
+    expect(calc).toBeDefined();
+    expect(calc.amountNgn).toBe(1);
+  });
+
+  it('allows a second refund on the same quotation for a different category', async () => {
+    const agent = request.agent(app);
+    await loginAs(agent, 'sales.staff', 'Sales@123');
+
+    const first = await agent.post('/api/refunds').send({
+      customerID: 'CUS-001',
+      customer: 'John Doe',
+      quotationRef: 'QT-RFS-DUP-001',
+      reasonCategory: ['Overpayment'],
+      amountNgn: 500,
+      calculationLines: [{ label: 'Overpayment', amountNgn: 500, category: 'Overpayment' }],
+    });
+    expect(first.status).toBe(201);
+
+    const second = await agent.post('/api/refunds').send({
+      customerID: 'CUS-001',
+      customer: 'John Doe',
+      quotationRef: 'QT-RFS-DUP-001',
+      reasonCategory: ['Transport issue'],
+      amountNgn: 300,
+      calculationLines: [{ label: 'Transport', amountNgn: 300, category: 'Transport issue' }],
+    });
+    expect(second.status).toBe(201);
+  });
+
+  it('blocks order cancellation after a delivery is marked for the quotation', async () => {
+    db.prepare(
+      `INSERT OR REPLACE INTO deliveries (
+        id, quotation_ref, customer_id, customer_name, cutting_list_id, destination, method, status,
+        tracking_no, ship_date, eta, delivered_date_iso, pod_notes, courier_confirmed, customer_signed_pod, fulfillment_posted, branch_id
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    ).run(
+      'DLV-RFS-BLK',
+      'QT-RFS-UNPR-001',
+      'CUS-001',
+      'John Doe',
+      null,
+      'Site',
+      'Truck',
+      'Delivered',
+      null,
+      '2026-04-01',
+      '2026-04-01',
+      '2026-04-02',
+      null,
+      0,
+      0,
+      1,
+      'BR-KD'
+    );
+
+    const agent = request.agent(app);
+    await loginAs(agent, 'sales.staff', 'Sales@123');
+
+    const preview = await agent.post('/api/refunds/preview').send({
+      quotationRef: 'QT-RFS-UNPR-001',
+    });
+    expect(preview.status).toBe(200);
+    expect(preview.body.preview.blockedRefundCategories).toContain('Order cancellation');
+
+    const create = await agent.post('/api/refunds').send({
+      customerID: 'CUS-001',
+      customer: 'John Doe',
+      quotationRef: 'QT-RFS-UNPR-001',
+      reasonCategory: ['Order cancellation'],
+      amountNgn: 1000,
+      calculationLines: [{ label: 'Cancel', amountNgn: 1000, category: 'Order cancellation' }],
+    });
+    expect(create.status).toBe(400);
+    expect(String(create.body.error || '')).toMatch(/delivered/i);
   });
 });

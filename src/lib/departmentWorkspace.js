@@ -55,6 +55,7 @@ export function pathToModuleKey(pathname) {
   const p = String(pathname || '').replace(/\/$/, '') || '/';
   if (p === '/') return null;
   if (p === '/manager') return 'sales';
+  if (p === '/edit-approvals') return 'edit_approvals';
   if (p === '/sales' || p.startsWith('/customers')) return 'sales';
   if (p === '/procurement' || p.startsWith('/procurement/')) return 'procurement';
   if (p === '/operations' || p === '/deliveries') return 'operations';
@@ -72,6 +73,12 @@ export function pathToModuleKey(pathname) {
  * @param {string[]} permissions
  */
 export function resolvePostLoginPath(user, permissions) {
+  const roleKey = String(user?.roleKey || '').trim().toLowerCase();
+  if (roleKey === 'sales_manager') {
+    const mod = pathToModuleKey('/manager');
+    if (mod && !canAccessModuleWithPermissions(permissions, mod)) return '/';
+    return '/manager';
+  }
   const target = defaultHomePathForDepartment(user?.department);
   if (target === '/') return '/';
   const mod = pathToModuleKey(target);

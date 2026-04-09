@@ -16,6 +16,7 @@ import {
   Users,
   ShieldCheck,
   Scale,
+  ClipboardCheck,
 } from 'lucide-react';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { canAccessAccountingHq } from '../lib/accountingAccess';
@@ -47,7 +48,7 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
         : 'text-white/40 hover:text-white hover:bg-white/5'
     }`;
 
-  const menuItems = [
+  const fullMenuItems = [
     { icon: <Home size={18} />, label: 'Dashboard', path: '/' },
     {
       icon: <ShoppingCart size={18} />,
@@ -73,6 +74,7 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
       icon: <Landmark size={18} />,
       label: 'Finance',
       path: '/accounts',
+      active: pathMatches(p, '/accounts'),
       visible: ws?.canAccessModule?.('finance') ?? true,
     },
     {
@@ -89,6 +91,14 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
       visible: ws?.canAccessModule?.('reports') ?? true,
     },
     {
+      icon: <ClipboardCheck size={18} />,
+      label: 'Edit approvals',
+      path: '/edit-approvals',
+      // Edit approvals is embedded on the dashboard (not a standalone page).
+      visible: false,
+      badgeCount: ws?.editApprovalsPendingCount ?? 0,
+    },
+    {
       icon: <Users size={18} />,
       label: 'HR',
       path: '/hr',
@@ -99,7 +109,7 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
       icon: <ShieldCheck size={18} />,
       label: 'Management',
       path: '/manager',
-      visible: ['sales_manager', 'admin', 'md', 'ceo'].includes(ws?.session?.user?.roleKey),
+      visible: ['sales_manager', 'admin', 'md'].includes(ws?.session?.user?.roleKey),
     },
     {
       icon: <Settings size={18} />,
@@ -107,7 +117,30 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
       path: '/settings',
       visible: ws?.canAccessModule?.('settings') ?? true,
     },
-  ].filter((item) => item.visible !== false);
+  ];
+
+  const roleKey = ws?.session?.user?.roleKey;
+  let menuItems =
+    roleKey === 'ceo'
+      ? [
+          {
+            icon: <BarChart3 size={18} />,
+            label: 'Executive',
+            path: '/exec',
+            active: pathMatches(p, '/exec'),
+            visible: true,
+          },
+        ]
+      : fullMenuItems.filter((item) => item.visible !== false);
+
+  if (roleKey === 'sales_manager') {
+    const ix = menuItems.findIndex((item) => item.path === '/manager');
+    if (ix > 0) {
+      const next = [...menuItems];
+      const [management] = next.splice(ix, 1);
+      menuItems = [management, ...next];
+    }
+  }
 
   return (
     <aside
@@ -170,17 +203,29 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
                 title={collapsed ? item.label : undefined}
                 aria-label={item.label}
               >
-                <span
-                  className={`transition-transform duration-300 ${
-                    active ? 'scale-110' : 'group-hover:scale-110'
-                  }`}
-                >
-                  {item.icon}
+                <span className="relative inline-flex shrink-0">
+                  <span
+                    className={`transition-transform duration-300 ${
+                      active ? 'scale-110' : 'group-hover:scale-110'
+                    }`}
+                  >
+                    {item.icon}
+                  </span>
+                  {(item.badgeCount ?? 0) > 0 ? (
+                    <span className="absolute -right-1.5 -top-1 min-h-4 min-w-[1rem] rounded-full bg-amber-400 px-1 text-center text-[9px] font-black leading-4 text-teal-950 tabular-nums">
+                      {(item.badgeCount ?? 0) > 9 ? '9+' : item.badgeCount}
+                    </span>
+                  ) : null}
                 </span>
                 <span
-                  className={`text-[11px] font-bold uppercase tracking-[0.15em] ${collapsed ? 'lg:hidden' : ''}`}
+                  className={`flex min-w-0 flex-1 items-center justify-between gap-2 text-[11px] font-bold uppercase tracking-[0.15em] ${collapsed ? 'lg:hidden' : ''}`}
                 >
-                  {item.label}
+                  <span>{item.label}</span>
+                  {!collapsed && (item.badgeCount ?? 0) > 0 ? (
+                    <span className="rounded-full bg-amber-400/95 px-2 py-0.5 text-[9px] font-black tabular-nums text-teal-950">
+                      {item.badgeCount > 9 ? '9+' : item.badgeCount}
+                    </span>
+                  ) : null}
                 </span>
               </Link>
             </motion.div>

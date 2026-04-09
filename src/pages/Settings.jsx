@@ -25,6 +25,7 @@ import MasterDataWorkbench from '../components/settings/MasterDataWorkbench';
 import TeamAccessPanel from '../components/settings/TeamAccessPanel';
 import SettingsProfilePanel from '../components/settings/SettingsProfilePanel';
 import {
+  DEFAULT_MANAGER_TARGETS_PER_MONTH,
   mergeDashboardPrefs,
   persistDashboardPrefsToServer,
   dashboardPrefsShallowEqual,
@@ -75,6 +76,9 @@ const Settings = () => {
   });
   const [branchAudit, setBranchAudit] = useState(null);
   const [branchAuditBusy, setBranchAuditBusy] = useState(false);
+  const [orgMtNaira, setOrgMtNaira] = useState('');
+  const [orgMtMeters, setOrgMtMeters] = useState('');
+  const [orgMtBusy, setOrgMtBusy] = useState(false);
   const currentUser = ws?.session?.user;
   const permissions = ws?.permissions ?? [];
   const periodLocks = ws?.snapshot?.periodLocks ?? [];
@@ -92,6 +96,7 @@ const Settings = () => {
   };
 
   const showTeamTab = Boolean(ws?.hasPermission?.('settings.view'));
+  const canEditOrgTargets = Boolean(ws?.hasPermission?.('settings.view'));
 
   const settingsTabs = useMemo(() => {
     const tabs = [
@@ -117,6 +122,12 @@ const Settings = () => {
     setPrefs((prev) => (dashboardPrefsShallowEqual(prev, next) ? prev : next));
   }, [ws?.snapshot?.dashboardPrefs, ws?.refreshEpoch]);
 
+  useEffect(() => {
+    const o = ws?.snapshot?.orgManagerTargets;
+    setOrgMtNaira(o?.nairaTargetPerMonth != null ? String(o.nairaTargetPerMonth) : '');
+    setOrgMtMeters(o?.meterTargetPerMonth != null ? String(o.meterTargetPerMonth) : '');
+  }, [ws?.snapshot?.orgManagerTargets, ws?.refreshEpoch]);
+
   /** If URL is /settings/foo and foo is not a valid section (e.g. team without permission), normalize. */
   useEffect(() => {
     if (!allowedSections.has(activeSection)) {
@@ -139,6 +150,53 @@ const Settings = () => {
       navigate('/', { replace: true });
     } catch (e) {
       showToast(String(e.message || e), { variant: 'error' });
+    }
+  };
+
+  const persistOrgManagerTargets = async () => {
+    setOrgMtBusy(true);
+    try {
+      const nRaw = orgMtNaira.trim() === '' ? null : Number(String(orgMtNaira).replace(/,/g, ''));
+      const mRaw = orgMtMeters.trim() === '' ? null : Number(String(orgMtMeters).replace(/,/g, ''));
+      const { ok, data } = await apiFetch('/api/setup/org-manager-targets', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          nairaTargetPerMonth: nRaw,
+          meterTargetPerMonth: mRaw,
+        }),
+      });
+      if (!ok || !data?.ok) {
+        showToast(data?.error || 'Could not save company targets.', { variant: 'error' });
+        return;
+      }
+      showToast('Company manager targets saved.');
+      await ws?.refresh?.();
+    } catch (e) {
+      showToast(String(e.message || e), { variant: 'error' });
+    } finally {
+      setOrgMtBusy(false);
+    }
+  };
+
+  const clearOrgManagerTargets = async () => {
+    setOrgMtBusy(true);
+    try {
+      const { ok, data } = await apiFetch('/api/setup/org-manager-targets', {
+        method: 'PATCH',
+        body: JSON.stringify({ clear: true }),
+      });
+      if (!ok || !data?.ok) {
+        showToast(data?.error || 'Could not clear company targets.', { variant: 'error' });
+        return;
+      }
+      showToast('Company manager targets cleared.');
+      setOrgMtNaira('');
+      setOrgMtMeters('');
+      await ws?.refresh?.();
+    } catch (e) {
+      showToast(String(e.message || e), { variant: 'error' });
+    } finally {
+      setOrgMtBusy(false);
     }
   };
 
@@ -240,23 +298,18 @@ const Settings = () => {
   return (
     <PageShell>
       <PageHeader
-        eyebrow="Settings"
         title="Settings"
-        subtitle="Profile and security, preferences, team directory (admins), catalog data, governance, and team guides — each in its own section."
-      />
-
-      <MainPanel className="max-w-5xl">
-        <div className="relative z-[1] mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        subtitle="Profile, security, preferences, team, catalog, governance, and guides. Deep links use the URL (e.g. /settings/security); HR employment records stay under HR."
+        tabs={
           <PageTabs
             tabs={settingsTabs}
             value={activeSection}
             onChange={(id) => navigate(`/settings/${id}`)}
           />
-          <p className="text-[11px] text-slate-500 max-sm:order-first sm:max-w-[14rem] sm:text-right leading-snug">
-            Deep links use the URL (e.g. /settings/security). HR employment records stay under HR.
-          </p>
-        </div>
+        }
+      />
 
+      <MainPanel className="max-w-5xl">
         <div className="relative z-[1]">
           <Routes>
             <Route index element={<Navigate to="profile" replace />} />
@@ -315,37 +368,174 @@ const Settings = () => {
             <Route
               path="preferences"
               element={
-                <section className="rounded-3xl border border-slate-200/90 bg-white p-6 shadow-sm">
-                  <h3 className="z-section-title mb-1">Dashboard layout</h3>
-                  <p className="text-xs text-slate-500 mb-4">
-                    Choose what appears on the home dashboard. Save to apply and return to the dashboard.
-                  </p>
-                  <div className="space-y-3">
-                    {[
-                      { key: 'showCharts', label: 'Show charts (sales, stock mix, income vs expense)' },
-                      { key: 'showAlertBanner', label: 'Show alerts & reminders strip' },
-                      { key: 'showReportsStrip', label: 'Show reports & exports strip' },
-                    ].map((row) => (
-                      <label
-                        key={row.key}
-                        className="flex items-center justify-between gap-4 p-4 rounded-xl border border-gray-100 bg-slate-50/50 cursor-pointer hover:border-teal-100 transition-colors"
-                      >
-                        <span className="text-sm font-medium text-gray-700">{row.label}</span>
+                <section className="rounded-3xl border border-slate-200/90 bg-white p-6 shadow-sm space-y-8">
+                  <div>
+                    <h3 className="z-section-title mb-1">Dashboard layout</h3>
+                    <p className="text-xs text-slate-500 mb-4">
+                      Choose what appears on the home dashboard. Save to apply and return to the dashboard.
+                    </p>
+                    <div className="space-y-3">
+                      {[
+                        { key: 'showCharts', label: 'Show charts (sales, stock mix, income vs expense)' },
+                        { key: 'showAlertBanner', label: 'Show alerts & reminders strip' },
+                        { key: 'showReportsStrip', label: 'Show reports & exports strip' },
+                      ].map((row) => (
+                        <label
+                          key={row.key}
+                          className="flex items-center justify-between gap-4 p-4 rounded-xl border border-gray-100 bg-slate-50/50 cursor-pointer hover:border-teal-100 transition-colors"
+                        >
+                          <span className="text-sm font-medium text-gray-700">{row.label}</span>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(prefs[row.key])}
+                            onChange={(e) =>
+                              setPrefs((p) => ({
+                                ...p,
+                                [row.key]: e.target.checked,
+                              }))
+                            }
+                            className="accent-[#134e4a] w-4 h-4 shrink-0"
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  {canEditOrgTargets ? (
+                    <div className="border-t border-slate-100 pt-6">
+                      <h3 className="z-section-title mb-1">Company manager targets</h3>
+                      <p className="text-xs text-slate-500 mb-4 max-w-xl leading-relaxed">
+                        Applies to all users on the Manager dashboard unless they turn on a personal override below.
+                        Save here does not leave Preferences — use Save company only.
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <label className="block space-y-1.5">
+                          <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                            Produced sales target (₦ / month)
+                          </span>
+                          <input
+                            type="number"
+                            min={1}
+                            step={1000}
+                            value={orgMtNaira}
+                            onChange={(e) => setOrgMtNaira(e.target.value)}
+                            className="z-input w-full tabular-nums"
+                          />
+                        </label>
+                        <label className="block space-y-1.5">
+                          <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                            Production metres target (m / month)
+                          </span>
+                          <input
+                            type="number"
+                            min={1}
+                            step={1000}
+                            value={orgMtMeters}
+                            onChange={(e) => setOrgMtMeters(e.target.value)}
+                            className="z-input w-full tabular-nums"
+                          />
+                        </label>
+                      </div>
+                      <div className="mt-4 flex flex-wrap gap-3">
+                        <button
+                          type="button"
+                          disabled={orgMtBusy}
+                          onClick={() => void persistOrgManagerTargets()}
+                          className="z-btn-primary gap-2 disabled:opacity-50"
+                        >
+                          <Save size={16} /> Save company targets
+                        </button>
+                        <button
+                          type="button"
+                          disabled={orgMtBusy}
+                          onClick={() => void clearOrgManagerTargets()}
+                          className="z-btn-secondary disabled:opacity-50"
+                        >
+                          Clear company targets
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="border-t border-slate-100 pt-6">
+                    <h3 className="z-section-title mb-1">Your manager targets</h3>
+                    <p className="text-xs text-slate-500 mb-4 max-w-xl leading-relaxed">
+                      Personal monthly baselines for Manager progress bars. Used when &quot;Use my own targets&quot; is
+                      on, or when no company targets are set.
+                    </p>
+                    <label className="flex items-center justify-between gap-4 p-4 rounded-xl border border-gray-100 bg-slate-50/50 cursor-pointer hover:border-teal-100 transition-colors mb-4">
+                      <span className="text-sm font-medium text-gray-700">
+                        Use my own targets (ignore company defaults)
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(prefs.managerTargetsPersonalOverride)}
+                        onChange={(e) =>
+                          setPrefs((p) => ({
+                            ...p,
+                            managerTargetsPersonalOverride: e.target.checked,
+                          }))
+                        }
+                        className="accent-[#134e4a] w-4 h-4 shrink-0"
+                      />
+                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <label className="block space-y-1.5">
+                        <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                          Produced sales target (₦ / month)
+                        </span>
                         <input
-                          type="checkbox"
-                          checked={Boolean(prefs[row.key])}
-                          onChange={(e) =>
+                          type="number"
+                          min={1}
+                          step={1000}
+                          value={prefs.managerTargets?.nairaTargetPerMonth ?? ''}
+                          onChange={(e) => {
+                            const v = Number(e.target.value);
                             setPrefs((p) => ({
                               ...p,
-                              [row.key]: e.target.checked,
-                            }))
-                          }
-                          className="accent-[#134e4a] w-4 h-4 shrink-0"
+                              managerTargets: {
+                                ...p.managerTargets,
+                                nairaTargetPerMonth:
+                                  Number.isFinite(v) && v > 0
+                                    ? v
+                                    : p.managerTargets?.nairaTargetPerMonth ??
+                                      DEFAULT_MANAGER_TARGETS_PER_MONTH.nairaTargetPerMonth,
+                              },
+                            }));
+                          }}
+                          className="z-input w-full tabular-nums"
                         />
                       </label>
-                    ))}
+                      <label className="block space-y-1.5">
+                        <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                          Production metres target (m / month)
+                        </span>
+                        <input
+                          type="number"
+                          min={1}
+                          step={1000}
+                          value={prefs.managerTargets?.meterTargetPerMonth ?? ''}
+                          onChange={(e) => {
+                            const v = Number(e.target.value);
+                            setPrefs((p) => ({
+                              ...p,
+                              managerTargets: {
+                                ...p.managerTargets,
+                                meterTargetPerMonth:
+                                  Number.isFinite(v) && v > 0
+                                    ? v
+                                    : p.managerTargets?.meterTargetPerMonth ??
+                                      DEFAULT_MANAGER_TARGETS_PER_MONTH.meterTargetPerMonth,
+                              },
+                            }));
+                          }}
+                          className="z-input w-full tabular-nums"
+                        />
+                      </label>
+                    </div>
                   </div>
-                  <div className="mt-6 flex flex-wrap gap-3">
+
+                  <div className="flex flex-wrap gap-3 pt-2">
                     <button type="button" onClick={persist} className="z-btn-primary gap-2">
                       <Save size={16} /> Save & return to dashboard
                     </button>

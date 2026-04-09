@@ -10,9 +10,26 @@ import { formatNgn } from '../../Data/mockData';
 const TODAY_ISO = '2026-03-28';
 const INSIGHT_DAYS = 90;
 
-/** Match Sales main lists / Stock-style compact cards */
-const CUSTOMER_CARD_ROW =
+/** Match quotation row chrome; padding lives on the link / actions so the whole row is clickable */
+const CARD_ROW =
   'rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md shadow-sm transition-colors hover:bg-white/70';
+
+const CHIP =
+  'inline-flex items-center text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border shrink-0';
+
+function customerStatusChipBorder(status) {
+  if (String(status).toLowerCase() === 'active') {
+    return 'border-emerald-200 bg-emerald-50 text-emerald-800';
+  }
+  return 'border-slate-200 bg-slate-50 text-slate-600';
+}
+
+function customerTierChipBorder(tier) {
+  const t = String(tier || '').toLowerCase();
+  if (t === 'vip') return 'border-amber-200 bg-amber-50 text-amber-800';
+  if (t === 'wholesale') return 'border-sky-200 bg-sky-50 text-sky-800';
+  return 'border-slate-200 bg-slate-50 text-slate-600';
+}
 
 const emptyForm = {
   name: '',
@@ -199,9 +216,9 @@ export default function SalesCustomersTab({
 
   return (
     <>
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 items-start">
+      <div className="grid w-full min-w-0 grid-cols-1 gap-6 items-start lg:grid-cols-[minmax(0,260px)_minmax(0,1fr)]">
         {/* Intelligence Sidebar on Left */}
-        <aside className="lg:col-span-1 space-y-5 sticky top-4">
+        <aside className="space-y-5 sticky top-4 min-w-0">
           <div className="rounded-xl border border-teal-100 bg-white p-5 space-y-6 shadow-sm overflow-hidden">
             <div className="h-1 bg-teal-600 -mx-5 -mt-5 mb-4" />
             <div>
@@ -230,7 +247,7 @@ export default function SalesCustomersTab({
 
               <section>
                 <p className="text-[9px] font-black text-slate-400 uppercase flex items-center gap-2 mb-3 tracking-widest">
-                  <Ruler size={14} className="text-amber-500" /> Meters
+                  <Ruler size={14} className="text-amber-500" /> Metres
                 </p>
                 {insights.topMeters.length === 0 ? (
                   <p className="text-[10px] text-slate-300 italic">No volume</p>
@@ -265,7 +282,7 @@ export default function SalesCustomersTab({
         </aside>
 
         {/* Main Customer List on Right */}
-        <div className="lg:col-span-3 space-y-4">
+        <div className="min-w-0 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3 px-1">
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-2">
@@ -293,60 +310,67 @@ export default function SalesCustomersTab({
             </p>
           </div>
 
-          <div className="rounded-lg border border-slate-200/60 bg-white/30 backdrop-blur-md p-2 shadow-sm">
-            {paginated.length === 0 ? (
-               <div className="py-12 text-center">
-                 <UserCircle size={40} className="mx-auto text-slate-200 mb-3" />
-                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">No matching customers</p>
-               </div>
-            ) : (
-              <ul className="space-y-1.5">
-                 {paginated.map((c) => {
-                   const rev = customerRevenue.get(c.customerID) || 0;
-                   const meta2 = [
-                     c.phoneNumber || 'No phone',
-                     c.email || 'No email',
-                     `Rev ${formatNgn(rev)}`,
-                     c.status,
-                     c.tier,
-                   ].join(' · ');
-                   return (
-                     <li
-                       key={c.customerID}
-                       className={`${CUSTOMER_CARD_ROW} flex items-stretch justify-between gap-2 !p-0 overflow-hidden`}
-                     >
-                       <Link
-                         to={`/customers/${encodeURIComponent(c.customerID)}`}
-                         className="group flex-1 min-w-0 py-1.5 px-2.5 no-underline leading-tight hover:bg-[#134e4a]/[0.04] transition-colors"
-                       >
-                         <p className="text-[11px] font-bold text-[#134e4a] truncate group-hover:underline group-hover:underline-offset-2">
-                           <span className="tabular-nums text-slate-500 font-semibold">{c.customerID}</span>
-                           <span className="font-medium text-slate-600"> · {c.name}</span>
-                         </p>
-                         <p
-                           className="text-[8px] text-slate-500 mt-0.5 line-clamp-2"
-                           title={meta2}
-                         >
-                           {meta2}
-                         </p>
-                       </Link>
-                       {canDeleteCustomer ? (
-                         <button
-                           type="button"
-                           onClick={() => handleDeleteCustomer(c)}
-                           disabled={deleteBusy}
-                           className="shrink-0 self-stretch px-2 flex items-center border-l border-slate-200/80 text-slate-300 hover:text-rose-600 hover:bg-rose-50/80 transition-colors disabled:opacity-40"
-                           title="Delete customer"
-                         >
-                           <Trash2 size={14} />
-                         </button>
-                       ) : null}
-                     </li>
-                   );
-                 })}
-              </ul>
-            )}
-          </div>
+          {paginated.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/50 py-14 px-6 text-center">
+              <UserCircle size={40} className="mx-auto text-slate-200 mb-3" strokeWidth={1.5} />
+              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">No matching customers</p>
+            </div>
+          ) : (
+            <ul className="space-y-1.5">
+              {paginated.map((c) => {
+                const rev = customerRevenue.get(c.customerID) || 0;
+                const meta2 = [c.phoneNumber || 'No phone', c.email || 'No email'].join(' · ');
+                const profileTo = `/customers/${encodeURIComponent(c.customerID)}`;
+                return (
+                  <li key={c.customerID} className={`${CARD_ROW} flex flex-nowrap items-stretch min-w-0`}>
+                    <Link
+                      to={profileTo}
+                      className="min-w-0 flex-1 px-2.5 py-1.5 text-inherit no-underline outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#134e4a]/25 rounded-lg"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
+                        <div className="min-w-0 flex-1 leading-tight">
+                          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 min-w-0">
+                            <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
+                              <span className="tabular-nums font-mono">{c.customerID}</span>
+                              <span className="font-medium text-slate-600"> · {c.name}</span>
+                            </p>
+                            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                              <span className="text-[11px] font-black text-[#134e4a] tabular-nums">
+                                {formatNgn(rev)}
+                              </span>
+                              <span className={`${CHIP} ${customerStatusChipBorder(c.status)}`}>{c.status}</span>
+                              <span className={`${CHIP} ${customerTierChipBorder(c.tier)}`}>{c.tier}</span>
+                            </div>
+                          </div>
+                          <p
+                            className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2 tabular-nums"
+                            title={meta2}
+                          >
+                            {meta2}
+                          </p>
+                        </div>
+                      </div>
+                    </Link>
+                    {canDeleteCustomer ? (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          handleDeleteCustomer(c);
+                        }}
+                        disabled={deleteBusy}
+                        className="shrink-0 self-stretch px-2.5 py-1.5 flex items-center border-l border-slate-200/60 text-slate-300 hover:text-rose-600 hover:bg-rose-50/80 transition-colors disabled:opacity-40"
+                        title="Delete customer"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
 
           {totalPages > 1 && (
             <div className="flex items-center justify-center gap-2 pt-2">

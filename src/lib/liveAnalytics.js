@@ -1,5 +1,6 @@
-import { amountDueOnQuotationFromEntries, sumForQuotationInEntries } from './customerLedgerCore';
+import { amountDueOnQuotationFromEntries } from './customerLedgerCore';
 import { refundOutstandingAmount } from './refundsStore';
+import { receiptCashReceivedNgn } from './salesReceiptsList';
 
 function toIsoDate(value) {
   return String(value || '').slice(0, 10);
@@ -24,6 +25,77 @@ function parseMeters(totalLabel) {
 
 function cuttingMeters(row) {
   return Number(row?.totalMeters) || parseMeters(row?.total);
+}
+
+function productionJobIsCompleted(job) {
+  return String(job?.status || '').trim() === 'Completed';
+}
+
+/**
+ * Calendar date for recorded production output (differs from quotation date and cutting-list date).
+ * Uses completion timestamp, then end date.
+ */
+export function productionOutputDateISO(job) {
+  return toIsoDate(job?.completedAtISO || job?.endDateISO || '');
+}
+
+function productionJobActualMeters(job) {
+  return Number(job?.actualMeters) || 0;
+}
+
+/** Sum of actual metres from completed production jobs per quotation ref (split denominator for attributed sales). */
+export function metersProducedByQuotationRef(productionJobs = []) {
+  const map = new Map();
+  for (const j of productionJobs) {
+    if (!productionJobIsCompleted(j)) continue;
+    const ref = String(j.quotationRef || '').trim();
+    if (!ref) continue;
+    const m = productionJobActualMeters(j);
+    if (m <= 0) continue;
+    map.set(ref, (map.get(ref) || 0) + m);
+  }
+  return map;
+}
+
+/**
+ * Share of quotation total for one completed job (by actual metres vs all completed output for that quote).
+ */
+export function allocatedQuotationRevenueForProductionJob(job, quotation, metersProducedByRef) {
+  const ref = String(job.quotationRef || '').trim();
+  if (!ref || !quotation || !productionJobIsCompleted(job)) return 0;
+  const quoteTotal = Number(quotation.totalNgn) || 0;
+  if (quoteTotal <= 0) return 0;
+  const jm = productionJobActualMeters(job);
+  if (jm <= 0) return 0;
+  const denom = metersProducedByRef.get(ref) || jm || 1;
+  return quoteTotal * (jm / denom);
+}
+
+/** Total metres per quotation ref across all cutting lists (planning / dispatch — not produced metres). */
+export function metersTotalsByQuotationRef(cuttingLists = []) {
+  const map = new Map();
+  for (const cl of cuttingLists) {
+    const ref = String(cl.quotationRef || '').trim();
+    if (!ref) continue;
+    map.set(ref, (map.get(ref) || 0) + cuttingMeters(cl));
+  }
+  return map;
+}
+
+/**
+ * Share of quotation total attributed to one cutting list (by metre share across all lists for that quote).
+ * @param {object} cl cutting list row
+ * @param {object | undefined} quotation
+ * @param {Map<string, number>} metersByQuoteRef from {@link metersTotalsByQuotationRef}
+ */
+export function allocatedQuotationRevenueForCuttingList(cl, quotation, metersByQuoteRef) {
+  const ref = String(cl.quotationRef || '').trim();
+  if (!ref || !quotation) return 0;
+  const quoteTotal = Number(quotation.totalNgn) || 0;
+  if (quoteTotal <= 0) return 0;
+  const clM = cuttingMeters(cl);
+  const denom = metersByQuoteRef.get(ref) || clM || 1;
+  return quoteTotal * (clM / denom);
 }
 
 function weekStart(iso) {
@@ -57,6 +129,7 @@ function lastWeekKeys(count = 8, baseDate = new Date()) {
   return keys;
 }
 
+/** Quotation totals by month (quote date). Order-book / pipeline — not sales until material is produced (cutting lists). */
 export function liveSalesSeriesByMonth(quotations = [], count = 6) {
   const keys = lastMonthKeys(count);
   const sums = new Map(keys.map((k) => [k, 0]));
@@ -67,6 +140,7 @@ export function liveSalesSeriesByMonth(quotations = [], count = 6) {
   return keys.map((key) => ({ key, period: monthLabel(key), amountNgn: sums.get(key) || 0 }));
 }
 
+/** Same as {@link liveSalesSeriesByMonth} but by ISO week start of quotation date. */
 export function liveSalesSeriesByWeek(quotations = [], count = 8) {
   const keys = lastWeekKeys(count);
   const sums = new Map(keys.map((k) => [k, 0]));
@@ -77,13 +151,58 @@ export function liveSalesSeriesByWeek(quotations = [], count = 8) {
   return keys.map((key) => ({ key, period: key.slice(5), amountNgn: sums.get(key) || 0 }));
 }
 
-export function liveMetersSeries(cuttingLists = [], count = 6) {
+/** Sales (₦) by month from production completion dates; quote total split by actual metres across completed jobs per quote. */
+export function liveProductionAttributedSalesSeriesByMonth(quotations = [], productionJobs = [], count = 6) {
   const keys = lastMonthKeys(count);
   const sums = new Map(keys.map((k) => [k, 0]));
-  cuttingLists.forEach((row) => {
-    const key = monthKey(row.dateISO);
-    if (sums.has(key)) sums.set(key, (sums.get(key) || 0) + cuttingMeters(row));
-  });
+  const qById = new Map(quotations.map((q) => [String(q.id || '').trim(), q]));
+  const metersByRef = metersProducedByQuotationRef(productionJobs);
+  for (const j of productionJobs) {
+    if (!productionJobIsCompleted(j)) continue;
+    const iso = productionOutputDateISO(j);
+    if (!iso) continue;
+    const key = monthKey(iso);
+    if (!sums.has(key)) continue;
+    const ref = String(j.quotationRef || '').trim();
+    const q = qById.get(ref);
+    const alloc = allocatedQuotationRevenueForProductionJob(j, q, metersByRef);
+    sums.set(key, (sums.get(key) || 0) + alloc);
+  }
+  return keys.map((key) => ({ key, period: monthLabel(key), amountNgn: Math.round(sums.get(key) || 0) }));
+}
+
+/** Same as {@link liveProductionAttributedSalesSeriesByMonth} but by week start of production completion. */
+export function liveProductionAttributedSalesSeriesByWeek(quotations = [], productionJobs = [], count = 8) {
+  const keys = lastWeekKeys(count);
+  const sums = new Map(keys.map((k) => [k, 0]));
+  const qById = new Map(quotations.map((q) => [String(q.id || '').trim(), q]));
+  const metersByRef = metersProducedByQuotationRef(productionJobs);
+  for (const j of productionJobs) {
+    if (!productionJobIsCompleted(j)) continue;
+    const iso = productionOutputDateISO(j);
+    if (!iso) continue;
+    const wk = weekStart(iso);
+    if (!sums.has(wk)) continue;
+    const ref = String(j.quotationRef || '').trim();
+    const q = qById.get(ref);
+    const alloc = allocatedQuotationRevenueForProductionJob(j, q, metersByRef);
+    sums.set(wk, (sums.get(wk) || 0) + alloc);
+  }
+  return keys.map((key) => ({ key, period: key.slice(5), amountNgn: Math.round(sums.get(key) || 0) }));
+}
+
+/** Metres produced by calendar month (completed jobs only; dated by production completion). */
+export function liveMetersSeries(productionJobs = [], count = 6) {
+  const keys = lastMonthKeys(count);
+  const sums = new Map(keys.map((k) => [k, 0]));
+  for (const j of productionJobs) {
+    if (!productionJobIsCompleted(j)) continue;
+    const iso = productionOutputDateISO(j);
+    if (!iso) continue;
+    const key = monthKey(iso);
+    if (!sums.has(key)) continue;
+    sums.set(key, (sums.get(key) || 0) + productionJobActualMeters(j));
+  }
   return keys.map((key) => ({ key, label: monthLabel(key), meters: sums.get(key) || 0 }));
 }
 
@@ -131,7 +250,7 @@ export function liveCashflowMonthly(receipts = [], expenses = [], count = 6, tre
   }
   receipts.forEach((r) => {
     const key = monthKey(r.dateISO);
-    if (income.has(key)) income.set(key, (income.get(key) || 0) + (Number(r.amountNgn) || 0));
+    if (income.has(key)) income.set(key, (income.get(key) || 0) + receiptCashReceivedNgn(r));
   });
   expenses.forEach((e) => {
     const key = monthKey(e.date);
@@ -173,10 +292,9 @@ function monthToDateRangeISO(base = new Date()) {
 
 /**
  * Top material combinations (colour × gauge × profile) by sales in a date range.
- * Meters from cutting lists; revenue = sum of quotation totalNgn for distinct quotes
- * linked to those lists (each quote counted once per bucket).
+ * Metres produced = actual metres from completed production jobs; dated by production completion.
  */
-export function liveTopSalesPerformersByMaterial(cuttingLists = [], quotations = [], opts = {}) {
+export function liveTopSalesPerformersByMaterial(productionJobs = [], quotations = [], opts = {}) {
   const { limit = 5 } = opts;
   const { startIso, endIso } = opts.startIso && opts.endIso ? opts : monthToDateRangeISO();
 
@@ -185,13 +303,16 @@ export function liveTopSalesPerformersByMaterial(cuttingLists = [], quotations =
     if (q?.id) quoteById.set(q.id, q);
   });
 
+  const metersByRef = metersProducedByQuotationRef(productionJobs || []);
   const buckets = new Map();
-  for (const cl of cuttingLists || []) {
-    const d = toIsoDate(cl.dateISO);
+  for (const j of productionJobs || []) {
+    if (!productionJobIsCompleted(j)) continue;
+    const d = productionOutputDateISO(j);
     if (!d || d < startIso || d > endIso) continue;
-    const m = cuttingMeters(cl);
+    const m = productionJobActualMeters(j);
     if (m <= 0) continue;
-    const q = quoteById.get(cl.quotationRef);
+    const ref = String(j.quotationRef || '').trim();
+    const q = quoteById.get(ref);
     const spec = materialSpecFromQuotation(q);
     const key = `${spec.colour}\0${spec.gauge}\0${spec.profile}`;
     let row = buckets.get(key);
@@ -202,46 +323,41 @@ export function liveTopSalesPerformersByMaterial(cuttingLists = [], quotations =
         gaugeRaw: spec.gauge,
         gaugeMm,
         materialType: spec.profile,
-        metersSold: 0,
-        quoteIds: new Set(),
+        metresProduced: 0,
+        revenueNgn: 0,
       };
       buckets.set(key, row);
     }
-    row.metersSold += m;
-    if (q?.id) row.quoteIds.add(q.id);
+    row.metresProduced += m;
+    row.revenueNgn += allocatedQuotationRevenueForProductionJob(j, q, metersByRef);
   }
 
   const rows = [...buckets.values()].map((row) => {
-    let revenueNgn = 0;
-    for (const id of row.quoteIds) {
-      const q = quoteById.get(id);
-      revenueNgn += Number(q?.totalNgn) || 0;
-    }
-    const weightKg = roughKgFromMeters(row.metersSold, row.gaugeMm);
+    const weightKg = roughKgFromMeters(row.metresProduced, row.gaugeMm);
     return {
       colour: row.colour,
       gaugeRaw: row.gaugeRaw,
       gaugeMm: row.gaugeMm,
       materialType: row.materialType,
-      metersSold: row.metersSold,
+      metresProduced: row.metresProduced,
       weightKg,
-      revenueNgn,
+      revenueNgn: Math.round(row.revenueNgn),
     };
   });
 
-  rows.sort((a, b) => (b.revenueNgn - a.revenueNgn) || (b.metersSold - a.metersSold));
+  rows.sort((a, b) => (b.revenueNgn - a.revenueNgn) || (b.metresProduced - a.metresProduced));
   return rows.slice(0, limit).map((r, i) => ({ ...r, rank: i + 1 }));
 }
 
-export function liveProductionPulse(cuttingLists = [], movements = [], wipByProduct = {}, coilRequests = []) {
+export function liveProductionPulse(productionJobs = [], movements = [], wipByProduct = {}, coilRequests = []) {
   const now = new Date();
   const sevenDaysAgo = new Date(now);
   sevenDaysAgo.setDate(now.getDate() - 7);
   const cutoff = sevenDaysAgo.toISOString().slice(0, 10);
 
-  const metersSold7d = cuttingLists
-    .filter((row) => toIsoDate(row.dateISO) >= cutoff)
-    .reduce((s, row) => s + cuttingMeters(row), 0);
+  const metresProduced7d = productionJobs
+    .filter((j) => productionJobIsCompleted(j) && productionOutputDateISO(j) >= cutoff)
+    .reduce((s, j) => s + productionJobActualMeters(j), 0);
 
   const millOutput7d = movements
     .filter((m) => m.type === 'FINISHED_GOODS' && toIsoDate(m.dateISO || m.atISO) >= cutoff)
@@ -251,7 +367,7 @@ export function liveProductionPulse(cuttingLists = [], movements = [], wipByProd
   const pendingCoil = (coilRequests || []).filter((r) => String(r.status).toLowerCase() === 'pending').length;
   const activeJobs = activeWip + pendingCoil;
 
-  return { metersSold7d, millOutput7d, activeJobs };
+  return { metresProduced7d, millOutput7d, activeJobs };
 }
 
 export function liveReceivablesNgn(quotations = [], ledgerEntries = []) {
@@ -284,37 +400,47 @@ export function filterRefundsInRange(refunds = [], startDate, endDate) {
   });
 }
 
+/** Purchase orders whose `orderDateISO` falls in range (orders without a date are excluded). */
+export function filterPurchaseOrdersInRange(purchaseOrders = [], startDate, endDate) {
+  return purchaseOrders.filter((po) => {
+    const iso = toIsoDate(po.orderDateISO);
+    if (!iso) return false;
+    return (!startDate || iso >= startDate) && (!endDate || iso <= endDate);
+  });
+}
+
+/** Production accessory postings in range (`postedAtISO`). */
+export function filterAccessoryUsageInRange(rows = [], startDate, endDate) {
+  return rows.filter((u) => {
+    const iso = toIsoDate(u.postedAtISO);
+    if (!iso) return false;
+    return (!startDate || iso >= startDate) && (!endDate || iso <= endDate);
+  });
+}
+
 /**
- * Revenue attributed to production in the period (not cash): for each cutting list dated in range,
- * allocate quotation total by meter share across all cutting lists for that quotation (all time).
- * Missing quotations are skipped. This is an operational proxy for “sales value of work released” in the month.
+ * Revenue attributed to production in the period (not cash): each completed job dated by production completion,
+ * quotation total split by actual metres across all completed jobs for that quote.
  */
-export function productionAttributedRevenueNgn(quotations = [], cuttingLists = [], startDate, endDate) {
+export function productionAttributedRevenueNgn(quotations = [], productionJobs = [], startDate, endDate) {
   const qById = new Map(quotations.map((q) => [String(q.id || '').trim(), q]));
-  const metersAllClsByQuote = new Map();
-  for (const cl of cuttingLists) {
-    const ref = String(cl.quotationRef || '').trim();
-    if (!ref) continue;
-    metersAllClsByQuote.set(ref, (metersAllClsByQuote.get(ref) || 0) + (Number(cl.totalMeters) || 0));
-  }
+  const metersByRef = metersProducedByQuotationRef(productionJobs);
   let sum = 0;
-  for (const cl of cuttingLists) {
-    const iso = toIsoDate(cl.dateISO);
+  for (const j of productionJobs) {
+    if (!productionJobIsCompleted(j)) continue;
+    const iso = productionOutputDateISO(j);
+    if (!iso) continue;
     if (startDate && iso < startDate) continue;
     if (endDate && iso > endDate) continue;
-    const ref = String(cl.quotationRef || '').trim();
+    const ref = String(j.quotationRef || '').trim();
     if (!ref) continue;
     const q = qById.get(ref);
-    if (!q) continue;
-    const quoteTotal = Number(q.totalNgn) || 0;
-    if (quoteTotal <= 0) continue;
-    const clM = Number(cl.totalMeters) || 0;
-    const denom = metersAllClsByQuote.get(ref) || clM || 1;
-    sum += quoteTotal * (clM / denom);
+    sum += allocatedQuotationRevenueForProductionJob(j, q, metersByRef);
   }
   return Math.round(sum);
 }
 
+/** @deprecated Use {@link topCustomersByProductionAttributedSales} for “sales” ranking; this sums quotation totals by quote date (pipeline only). */
 export function topCustomersBySales(quotations = [], startDate, endDate, limit = 5) {
   const inRange = filterQuotationsInRange(quotations, startDate, endDate);
   const byCustomer = new Map();
@@ -326,6 +452,40 @@ export function topCustomersBySales(quotations = [], startDate, endDate, limit =
     byCustomer.set(key, row);
   });
   return [...byCustomer.values()].sort((a, b) => b.amountNgn - a.amountNgn).slice(0, limit);
+}
+
+/** Top customers by production-attributed sales (production completion date in range). */
+export function topCustomersByProductionAttributedSales(
+  quotations = [],
+  productionJobs = [],
+  startDate,
+  endDate,
+  limit = 5
+) {
+  const qById = new Map(quotations.map((q) => [String(q.id || '').trim(), q]));
+  const metersByRef = metersProducedByQuotationRef(productionJobs);
+  const byCustomer = new Map();
+  for (const j of productionJobs) {
+    if (!productionJobIsCompleted(j)) continue;
+    const iso = productionOutputDateISO(j);
+    if (!iso) continue;
+    if (startDate && iso < startDate) continue;
+    if (endDate && iso > endDate) continue;
+    const ref = String(j.quotationRef || '').trim();
+    const q = qById.get(ref);
+    const alloc = allocatedQuotationRevenueForProductionJob(j, q, metersByRef);
+    if (alloc <= 0) continue;
+    const key = (q && (q.customerID || q.customer)) || j.customerID || j.customerName || ref;
+    const display = (q && q.customer) || j.customerName || j.customerID || '—';
+    const row = byCustomer.get(key) || { customer: display, amountNgn: 0, completedJobs: 0 };
+    row.amountNgn += alloc;
+    row.completedJobs += 1;
+    byCustomer.set(key, row);
+  }
+  return [...byCustomer.values()]
+    .map((r) => ({ ...r, amountNgn: Math.round(r.amountNgn) }))
+    .sort((a, b) => b.amountNgn - a.amountNgn)
+    .slice(0, limit);
 }
 
 export function receivablesAgingBuckets(quotations = [], ledgerEntries = [], asOfISO = new Date().toISOString().slice(0, 10)) {
@@ -361,10 +521,7 @@ export function supplierPerformanceSummary(purchaseOrders = [], limit = 5) {
       paidNgn: 0,
       receivedCount: 0,
     };
-    const orderValue = (po.lines || []).reduce(
-      (sum, line) => sum + (Number(line.qtyOrdered) || 0) * (Number(line.unitPriceNgn) || 0),
-      0
-    );
+    const orderValue = (po.lines || []).reduce((sum, line) => sum + poLineOrderedValueNgn(line), 0);
     row.poCount += 1;
     row.orderValueNgn += orderValue;
     row.paidNgn += Number(po.supplierPaidNgn) || 0;
@@ -429,6 +586,261 @@ export function customerLedgerActivityRows(ledgerEntries = [], quotations = [], 
       branchId: e.branchId || '',
     };
   });
+}
+
+/**
+ * True if the quotation has at least one **completed** production job whose completion date is on or before `endDateISO`.
+ * Used to tag receipts in a period vs production timing (e.g. paid 31 Jan, produced 1 Feb → Jan report = not produced).
+ */
+export function quotationHasCompletedProductionByEndDate(quotationRef, productionJobs, endDateISO) {
+  const ref = String(quotationRef || '').trim();
+  if (!ref) return false;
+  const end = toIsoDate(endDateISO);
+  for (const j of productionJobs || []) {
+    if (String(j.status || '').trim() !== 'Completed') continue;
+    if (String(j.quotationRef || '').trim() !== ref) continue;
+    const d = productionOutputDateISO(j);
+    if (!d) continue;
+    if (!end || d <= end) return true;
+  }
+  return false;
+}
+
+/**
+ * Flat rows for export/print: customer cash in the period (receipts + advances) by production status as of period end;
+ * ledger reversals in period; refund payouts dated in period; refunds pending or awaiting payout; open receivables (live);
+ * production jobs completed in the period (bridge to revenue timing).
+ */
+export function salesPeriodCashBridgeExportRows(
+  ledgerEntries = [],
+  productionJobs = [],
+  quotations = [],
+  refunds = [],
+  startDate,
+  endDate
+) {
+  const rows = [];
+  const inRange = filterLedgerEntriesInRange(ledgerEntries, startDate, endDate);
+  const quoteCustomer = new Map(
+    (quotations || []).map((q) => [String(q.id || '').trim(), q.customer || q.customerName || ''])
+  );
+
+  const inflowTypes = new Set(['RECEIPT', 'ADVANCE_IN', 'OVERPAY_ADVANCE']);
+  const reversalTypes = new Set(['RECEIPT_REVERSAL', 'ADVANCE_REVERSAL']);
+
+  for (const e of [...inRange].sort((a, b) => String(a.atISO).localeCompare(String(b.atISO)))) {
+    const type = String(e.type || '');
+    if (inflowTypes.has(type)) {
+      const qref = String(e.quotationRef || '').trim();
+      let category = '';
+      if (type === 'RECEIPT') {
+        if (!qref) category = 'Receipt — no quotation on line';
+        else if (quotationHasCompletedProductionByEndDate(qref, productionJobs, endDate))
+          category = 'Receipt on quote — production completed by period end';
+        else category = 'Receipt on quote — not produced by period end';
+      } else {
+        category = 'Advance / overpay received (deposit)';
+      }
+      rows.push({
+        reportSection: 'Customer cash in (period)',
+        category,
+        ledgerType: type,
+        dateISO: toIsoDate(e.atISO),
+        recordId: e.id,
+        customer: e.customerName || e.customerID || '',
+        quotationRef: qref,
+        quoteCustomer: qref ? quoteCustomer.get(qref) || '' : '',
+        amountNgn: Math.round(Number(e.amountNgn) || 0),
+        metresProduced: '',
+        remarks: [e.paymentMethod, e.bankReference].filter(Boolean).join(' · '),
+      });
+    } else if (reversalTypes.has(type)) {
+      rows.push({
+        reportSection: 'Reversals (period)',
+        category: type === 'RECEIPT_REVERSAL' ? 'Receipt reversal' : 'Advance reversal',
+        ledgerType: type,
+        dateISO: toIsoDate(e.atISO),
+        recordId: e.id,
+        customer: e.customerName || e.customerID || '',
+        quotationRef: String(e.quotationRef || '').trim(),
+        quoteCustomer: '',
+        amountNgn: Math.round(Number(e.amountNgn) || 0),
+        metresProduced: '',
+        remarks: e.bankReference || e.note || '',
+      });
+    }
+  }
+
+  for (const r of refunds || []) {
+    const hist = Array.isArray(r.payoutHistory) ? r.payoutHistory : [];
+    if (hist.length > 0) {
+      for (const p of hist) {
+        const iso = toIsoDate(p.postedAtISO);
+        if (!iso) continue;
+        if (startDate && iso < startDate) continue;
+        if (endDate && iso > endDate) continue;
+        const amt = Math.round(Number(p.amountNgn) || 0);
+        if (amt <= 0) continue;
+        rows.push({
+          reportSection: 'Refund payouts (period)',
+          category: 'Refund cash paid',
+          ledgerType: 'REFUND_PAYOUT',
+          dateISO: iso,
+          recordId: p.id || r.refundID,
+          customer: r.customer || '',
+          quotationRef: r.quotationRef || '',
+          quoteCustomer: '',
+          amountNgn: amt,
+          metresProduced: '',
+          remarks: r.refundID || '',
+        });
+      }
+    } else {
+      const paidIso = toIsoDate(r.paidAtISO);
+      const paidAmt = Math.round(Number(r.paidAmountNgn) || 0);
+      if (paidAmt > 0 && paidIso && (!startDate || paidIso >= startDate) && (!endDate || paidIso <= endDate)) {
+        rows.push({
+          reportSection: 'Refund payouts (period)',
+          category: 'Refund cash paid (single paid date)',
+          ledgerType: 'REFUND_PAYOUT',
+          dateISO: paidIso,
+          recordId: r.refundID,
+          customer: r.customer || '',
+          quotationRef: r.quotationRef || '',
+          quoteCustomer: '',
+          amountNgn: paidAmt,
+          metresProduced: '',
+          remarks: r.refundID || '',
+        });
+      }
+    }
+  }
+
+  for (const r of refunds || []) {
+    const st = String(r.status || '');
+    if (st === 'Rejected') continue;
+    if (st === 'Pending') {
+      const req = Math.round(Number(r.amountNgn) || 0);
+      if (req <= 0) continue;
+      rows.push({
+        reportSection: 'Refunds pending approval',
+        category: 'Request not yet approved',
+        ledgerType: 'REFUND_OPEN',
+        dateISO: toIsoDate(r.requestedAtISO) || '',
+        recordId: r.refundID,
+        customer: r.customer || '',
+        quotationRef: r.quotationRef || '',
+        quoteCustomer: '',
+        amountNgn: req,
+        metresProduced: '',
+        remarks: `Status: ${st}`,
+      });
+      continue;
+    }
+    const out = refundOutstandingAmount(r);
+    if (out <= 0) continue;
+    if (st === 'Approved' || st === 'Paid') {
+      rows.push({
+        reportSection: 'Refunds awaiting payout',
+        category: 'Approved — balance not yet paid',
+        ledgerType: 'REFUND_OPEN',
+        dateISO: toIsoDate(r.requestedAtISO) || '',
+        recordId: r.refundID,
+        customer: r.customer || '',
+        quotationRef: r.quotationRef || '',
+        quoteCustomer: '',
+        amountNgn: out,
+        metresProduced: '',
+        remarks: `Status: ${st}`,
+      });
+    }
+  }
+
+  for (const q of quotations || []) {
+    const due = amountDueOnQuotationFromEntries(ledgerEntries, q);
+    if (due <= 0) continue;
+    rows.push({
+      reportSection: 'Open receivables (live snapshot)',
+      category: 'Amount still due on quotation',
+      ledgerType: 'AR_OPEN',
+      dateISO: endDate || '',
+      recordId: q.id,
+      customer: q.customer || q.customerName || '',
+      quotationRef: q.id,
+      quoteCustomer: '',
+      amountNgn: due,
+      metresProduced: '',
+      remarks: `Quote total ₦${Math.round(Number(q.totalNgn) || 0)} · paid ₦${Math.round(Number(q.paidNgn) || 0)}`,
+    });
+  }
+
+  for (const j of productionJobs || []) {
+    if (String(j.status || '').trim() !== 'Completed') continue;
+    const iso = productionOutputDateISO(j);
+    if (!iso) continue;
+    if (startDate && iso < startDate) continue;
+    if (endDate && iso > endDate) continue;
+    const ref = String(j.quotationRef || '').trim();
+    const m = productionJobActualMeters(j);
+    rows.push({
+      reportSection: 'Production completed (period)',
+      category: 'Job completed (revenue timing bridge)',
+      ledgerType: 'PRODUCTION',
+      dateISO: iso,
+      recordId: j.jobID || j.id || '',
+      customer: j.customerName || j.customerID || '',
+      quotationRef: ref,
+      quoteCustomer: ref ? quoteCustomer.get(ref) || '' : '',
+      amountNgn: 0,
+      metresProduced: m,
+      remarks: j.productName || j.productID || '',
+    });
+  }
+
+  return rows;
+}
+
+/** Summary numbers for print header lines (same inputs as {@link salesPeriodCashBridgeExportRows}). */
+export function salesPeriodCashBridgeSummary(
+  ledgerEntries,
+  productionJobs,
+  quotations,
+  refunds,
+  startDate,
+  endDate
+) {
+  const flat = salesPeriodCashBridgeExportRows(
+    ledgerEntries,
+    productionJobs,
+    quotations,
+    refunds,
+    startDate,
+    endDate
+  );
+  const sumSection = (section, pred = () => true) =>
+    flat
+      .filter((r) => r.reportSection === section && pred(r))
+      .reduce((s, r) => s + (Number(r.amountNgn) || 0), 0);
+  const countSection = (section, pred = () => true) => flat.filter((r) => r.reportSection === section && pred(r)).length;
+
+  return {
+    cashInReceiptProducedNgn: sumSection('Customer cash in (period)', (r) =>
+      String(r.category || '').includes('production completed')
+    ),
+    cashInReceiptNotProducedNgn: sumSection('Customer cash in (period)', (r) =>
+      String(r.category || '').includes('not produced')
+    ),
+    cashInReceiptNoQuoteNgn: sumSection('Customer cash in (period)', (r) => String(r.category || '').includes('no quotation')),
+    cashInAdvanceNgn: sumSection('Customer cash in (period)', (r) => String(r.category || '').includes('Advance / overpay')),
+    reversalsNgn: sumSection('Reversals (period)'),
+    refundPayoutsNgn: sumSection('Refund payouts (period)'),
+    refundAwaitingNgn: sumSection('Refunds awaiting payout'),
+    refundPendingApprovalNgn: sumSection('Refunds pending approval'),
+    receivablesOpenNgn: sumSection('Open receivables (live snapshot)'),
+    receivablesOpenQuotes: countSection('Open receivables (live snapshot)'),
+    productionJobsCompleted: countSection('Production completed (period)'),
+    rowCount: flat.length,
+  };
 }
 
 export function filterBankReconciliationInRange(bankReconciliation = [], startDate, endDate) {
@@ -564,30 +976,59 @@ export function receiptAdvanceTreasuryReconciliationRows(
   ];
 }
 
-/** Paid from ledger attributed to a quotation (applied + receipts − receipt reversals). */
-export function ledgerAttributedPaidNgnForQuotation(ledgerEntries, quotationId) {
+function sumReceiptsNgnForQuotation(salesReceipts, quotationId) {
   const id = String(quotationId || '').trim();
   if (!id) return 0;
-  const applied = sumForQuotationInEntries(ledgerEntries, id, 'ADVANCE_APPLIED');
-  const receipts = sumForQuotationInEntries(ledgerEntries, id, 'RECEIPT');
-  const receiptReversals = sumForQuotationInEntries(ledgerEntries, id, 'RECEIPT_REVERSAL');
-  return Math.round(applied + receipts - receiptReversals);
+  let s = 0;
+  for (const r of salesReceipts || []) {
+    const ref = String(r.quotationRef ?? r.quotation_ref ?? '').trim();
+    if (ref !== id) continue;
+    const st = String(r.status || '').trim().toLowerCase();
+    if (st === 'reversed') continue;
+    s += Number(r.amountNgn ?? r.amount_ngn) || 0;
+  }
+  return Math.round(s);
 }
 
-/** Quotations where `paidNgn` differs from ledger-attributed paid total (tolerance in NGN). */
-export function quotationPaidNgnLedgerDiscrepancies(quotations = [], ledgerEntries = [], toleranceNgn = 1) {
+function sumAdvanceAppliedNgnForQuotation(ledgerEntries, quotationId) {
+  const id = String(quotationId || '').trim();
+  if (!id) return 0;
+  let s = 0;
+  for (const e of ledgerEntries || []) {
+    if (e.type !== 'ADVANCE_APPLIED') continue;
+    const ref = String(e.quotationRef || '').trim();
+    if (ref !== id) continue;
+    s += Number(e.amountNgn) || 0;
+  }
+  return Math.round(s);
+}
+
+/**
+ * Quotations where `paidNgn` ≠ sum of **sales receipts** for that quote + `ADVANCE_APPLIED` on the ledger
+ * (matches server `syncQuotationPaidFromReceipts`).
+ */
+export function quotationPaidNgnReceiptDiscrepancies(
+  quotations = [],
+  salesReceipts = [],
+  ledgerEntries = [],
+  toleranceNgn = 1
+) {
   return (quotations || [])
     .map((q) => {
-      const stored = Math.round(Number(q.paidNgn) || 0);
-      const ledgerPaid = ledgerAttributedPaidNgnForQuotation(ledgerEntries, q.id);
-      const delta = stored - ledgerPaid;
+      const stored = Math.round(Number(q.paidNgn ?? q.paid_ngn) || 0);
+      const receiptSum = sumReceiptsNgnForQuotation(salesReceipts, q.id);
+      const advanceApplied = sumAdvanceAppliedNgnForQuotation(ledgerEntries, q.id);
+      const expected = receiptSum + advanceApplied;
+      const delta = stored - expected;
       return {
         quotationID: q.id,
         dateISO: q.dateISO,
         customer: q.customer,
         totalNgn: q.totalNgn,
         paidNgnOnQuote: stored,
-        ledgerAttributedPaidNgn: ledgerPaid,
+        receiptPaidNgn: receiptSum,
+        advanceAppliedNgn: advanceApplied,
+        expectedPaidNgn: expected,
         deltaNgn: delta,
       };
     })
@@ -621,13 +1062,19 @@ export function grnCoilRegisterRows(coilLots = [], startDate, endDate) {
     }));
 }
 
-function poLineOrderedValueNgn(line) {
+/** Ordered line value: per-unit `unitPriceNgn` or, when that is zero, `qty × unitPricePerKgNgn` (coil kg lines). */
+export function poLineOrderedValueNgn(line) {
   const q = Number(line.qtyOrdered) || 0;
   const up = Math.round(Number(line.unitPriceNgn) || 0);
   const upkg = Math.round(Number(line.unitPricePerKgNgn) || 0);
   if (up > 0) return Math.round(q * up);
   if (upkg > 0) return Math.round(q * upkg);
   return 0;
+}
+
+/** Sum of ordered line values for a PO (same rules as {@link poLineOrderedValueNgn}). */
+export function purchaseOrderOrderedValueNgn(po) {
+  return (po?.lines || []).reduce((s, l) => s + poLineOrderedValueNgn(l), 0);
 }
 
 function poLineReceivedValueNgn(line) {
@@ -689,7 +1136,8 @@ export function coilInventoryValuationRows(coilLots = []) {
 /** Stock movements in period with optional COGS value (e.g. COIL_CONSUMPTION). */
 export function filterStockMovementsInRange(movements = [], startDate, endDate) {
   return (movements || []).filter((m) => {
-    const iso = toIsoDate(m.dateISO || m.atISO);
+    const iso = toIsoDate(m.atISO || m.dateISO);
+    if (!iso) return false;
     return (!startDate || iso >= startDate) && (!endDate || iso <= endDate);
   });
 }
@@ -742,15 +1190,18 @@ export function accruedApprovedPayablesRows(paymentRequests = [], startDate, end
 export function openAuditQueue(bankReconciliation = [], paymentRequests = [], refunds = []) {
   const items = [];
   bankReconciliation
-    .filter((x) => x.status === 'Review')
+    .filter((x) => x.status === 'Review' || x.status === 'PendingManager')
     .forEach((x) => {
       items.push({
         id: x.id,
         customer: x.description,
         amount: Math.abs(Number(x.amountNgn) || 0),
-        bank: 'Bank statement',
+        bank: x.status === 'PendingManager' ? 'Awaiting manager (bank recon)' : 'Bank statement',
         date: x.bankDateISO,
-        desc: x.systemMatch || 'Unmatched statement line',
+        desc:
+          x.status === 'PendingManager'
+            ? `Variance clearance · ${x.systemMatch || '—'}`
+            : x.systemMatch || 'Unmatched statement line',
       });
     });
   paymentRequests
@@ -787,4 +1238,6 @@ export function openAuditQueue(bankReconciliation = [], paymentRequests = [], re
     });
   return items.slice(0, 12);
 }
+
+export { productionTransactionReportRows } from './productionTransactionReportCore.js';
 

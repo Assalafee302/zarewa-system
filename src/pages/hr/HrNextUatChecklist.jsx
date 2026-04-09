@@ -42,7 +42,6 @@ export default function HrNextUatChecklist() {
   return (
     <MainPanel>
       <PageHeader
-        eyebrow="Human resources"
         title="HR Next UAT checklist"
         subtitle="Gate review before replacing legacy /hr entry."
       />

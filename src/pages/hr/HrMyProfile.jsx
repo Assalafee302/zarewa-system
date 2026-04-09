@@ -46,38 +46,50 @@ export default function HrMyProfile() {
   if (caps.enabled === false) {
     return (
       <MainPanel>
-        <PageHeader eyebrow="Human resources" title="My profile" subtitle="HR data is not initialised on this server." />
+        <PageHeader title="My profile" subtitle="HR data is not initialised on this server." />
       </MainPanel>
     );
   }
 
   const u = me.user;
   const h = me.hr;
+  const selfSvc = Boolean(h?.selfServiceEligible);
 
   return (
     <MainPanel>
       <PageHeader
-        eyebrow="Human resources"
         title="My profile"
         subtitle="Your sign-in identity and HR file summary. Apply for leave or a staff loan from here."
         actions={
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={openLeave}
-              className="inline-flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-[11px] font-black uppercase text-[#134e4a]"
-            >
-              <CalendarRange size={16} />
-              Leave application
-            </button>
-            <button
-              type="button"
-              onClick={openLoan}
-              className="inline-flex items-center gap-2 rounded-xl border border-teal-200 bg-teal-50 px-4 py-2.5 text-[11px] font-black uppercase text-[#134e4a]"
-            >
-              <Wallet size={16} />
-              Loan application
-            </button>
+          <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-start">
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={openLeave}
+                disabled={h && !selfSvc}
+                title={h && !selfSvc ? 'HR has not enabled self-service on your staff file.' : undefined}
+                className="inline-flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-[11px] font-black uppercase text-[#134e4a] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <CalendarRange size={16} />
+                Leave application
+              </button>
+              <button
+                type="button"
+                onClick={openLoan}
+                disabled={h && !selfSvc}
+                title={h && !selfSvc ? 'HR has not enabled self-service on your staff file.' : undefined}
+                className="inline-flex items-center gap-2 rounded-xl border border-teal-200 bg-teal-50 px-4 py-2.5 text-[11px] font-black uppercase text-[#134e4a] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Wallet size={16} />
+                Loan application
+              </button>
+            </div>
+            {h && !selfSvc ? (
+              <p className="text-[10px] font-semibold text-amber-800 sm:max-w-xs">
+                Self-service applications are turned off for your file. Ask HR to enable &quot;Self-service&quot; on your
+                staff profile.
+              </p>
+            ) : null}
           </div>
         }
       />

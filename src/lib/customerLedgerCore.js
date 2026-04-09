@@ -12,6 +12,16 @@ export function sumForQuotationInEntries(entries, quotationId, type) {
     .reduce((s, e) => s + (Number(e.amountNgn) || 0), 0);
 }
 
+/** Paid toward a quotation from ledger only (applied advance + receipts − receipt reversals). */
+export function ledgerAttributedPaidNgnForQuotation(entries, quotationId) {
+  const id = String(quotationId || '').trim();
+  if (!id) return 0;
+  const applied = sumForQuotationInEntries(entries, id, 'ADVANCE_APPLIED');
+  const receipts = sumForQuotationInEntries(entries, id, 'RECEIPT');
+  const receiptReversals = sumForQuotationInEntries(entries, id, 'RECEIPT_REVERSAL');
+  return Math.round(applied + receipts - receiptReversals);
+}
+
 /**
  * @param {Array<{ customerID: string, type: string, amountNgn?: number }>} entries
  */
@@ -36,20 +46,17 @@ export function advanceBalanceFromEntries(entries, customerID) {
 }
 
 /**
+ * Amount still due on a quotation. Uses the quotation row only: `paidNgn` is maintained from **sales receipts**
+ * (plus applied advances rolled into the same field on the server). The `entries` argument is unused but kept
+ * so call sites stay stable.
+ * @param {unknown} _entries
  * @param {{ id: string, totalNgn?: number, paidNgn?: number }} q
  */
-export function amountDueOnQuotationFromEntries(entries, q) {
+export function amountDueOnQuotationFromEntries(_entries, q) {
   if (!q?.id) return 0;
   const total = Number(q.totalNgn) || 0;
   const rowPaid = Number(q.paidNgn) || 0;
-  const applied = sumForQuotationInEntries(entries, q.id, 'ADVANCE_APPLIED');
-  const receipts = sumForQuotationInEntries(entries, q.id, 'RECEIPT');
-  const receiptReversals = sumForQuotationInEntries(entries, q.id, 'RECEIPT_REVERSAL');
-  const ledgerPaid = applied + receipts - receiptReversals;
-  // `paidNgn` is off-ledger / manual unless it was rolled up to match ledger; subtract ledger only when row is still below it.
-  if (ledgerPaid <= 0) return Math.max(0, total - rowPaid);
-  if (rowPaid >= ledgerPaid) return Math.max(0, total - rowPaid);
-  return Math.max(0, total - rowPaid - ledgerPaid);
+  return Math.max(0, Math.round(total - rowPaid));
 }
 
 export function ledgerReceiptTotalFromEntries(entries, customerID) {
@@ -222,6 +229,72 @@ export function planRefundAdvance(entries, { customerID, customerName, amountNgn
       },
     ],
   };
+}
+
+function normLedgerStr(v) {
+  return String(v ?? '').trim();
+}
+
+/** Matches server `planReceiptWithQuotation` overpay note when payment exceeds quote due. */
+const SPLIT_OVERPAY_NOTE_SNIP = 'Overpayment vs remaining balance on';
+
+/**
+ * When a customer pays more than the quote balance, the ledger stores RECEIPT (amount applied to the quote)
+ * plus OVERPAY_ADVANCE (remainder). Rows from the same till payment share customer, quotation, atISO,
+ * payment method, and bank reference. Returns a map RECEIPT entry id → companion overpay ₦ (for UI cash total).
+ * @param {Array<{ id: string, type: string, customerID?: string, quotationRef?: string, atISO?: string, paymentMethod?: string, bankReference?: string, amountNgn?: number, note?: string }>} ledgerEntries
+ * @returns {Map<string, number>}
+ */
+export function companionOverpayNgnByReceiptId(ledgerEntries) {
+  const entries = Array.isArray(ledgerEntries) ? ledgerEntries : [];
+  const groupKey = (e) =>
+    [
+      normLedgerStr(e.customerID),
+      normLedgerStr(e.quotationRef),
+      normLedgerStr(e.atISO),
+      normLedgerStr(e.paymentMethod),
+      normLedgerStr(e.bankReference),
+    ].join('\u0001');
+
+  const receipts = entries
+    .filter((e) => e.type === 'RECEIPT' && normLedgerStr(e.quotationRef))
+    .slice()
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  const overpays = entries
+    .filter(
+      (e) =>
+        e.type === 'OVERPAY_ADVANCE' &&
+        normLedgerStr(e.quotationRef) &&
+        String(e.note || '').includes(SPLIT_OVERPAY_NOTE_SNIP)
+    )
+    .slice()
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+
+  const bucket = (list) => {
+    const m = new Map();
+    for (const e of list) {
+      const k = groupKey(e);
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(e);
+    }
+    return m;
+  };
+
+  const rBy = bucket(receipts);
+  const oBy = bucket(overpays);
+  /** @type {Map<string, number>} */
+  const out = new Map();
+  for (const [k, rList] of rBy) {
+    const oList = oBy.get(k) || [];
+    for (let i = 0; i < rList.length; i++) {
+      const o = oList[i];
+      if (!o) continue;
+      const n = Math.round(Number(o.amountNgn) || 0);
+      if (n <= 0) continue;
+      out.set(String(rList[i].id), n);
+    }
+  }
+  return out;
 }
 
 /**

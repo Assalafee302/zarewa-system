@@ -18,6 +18,17 @@ import { useHrWorkspace } from '../../context/HrWorkspaceContext';
 import { useToast } from '../../context/ToastContext';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { apiFetch } from '../../lib/apiBase';
+import { APP_DATA_TABLE_PAGE_SIZE, useAppTablePaging } from '../../lib/appDataTable';
+import {
+  AppTable,
+  AppTableBody,
+  AppTablePager,
+  AppTableTd,
+  AppTableTh,
+  AppTableThead,
+  AppTableTr,
+  AppTableWrap,
+} from '../../components/ui/AppDataTable';
 import { formatNgn, statusChipClass } from '../../hr/hrFormat';
 import HrCapsLoading from './hrCapsLoading';
 import { HrOpsToolbar, HrSectionCard } from './hrUx';
@@ -42,7 +53,8 @@ const STATUS_OPTIONS = [
   { value: '', label: 'All statuses' },
   { value: 'draft', label: 'Draft' },
   { value: 'hr_review', label: 'HR review' },
-  { value: 'manager_review', label: 'Executive review' },
+  { value: 'branch_manager_review', label: 'Branch endorsement' },
+  { value: 'gm_hr_review', label: 'GM HR review' },
   { value: 'approved', label: 'Approved' },
   { value: 'rejected', label: 'Rejected' },
 ];
@@ -98,10 +110,15 @@ export default function HrTalent() {
     reason: '',
   });
   const [reviewTarget, setReviewTarget] = useState(null);
-  const [reviewForm, setReviewForm] = useState({ approve: true, note: '' });
+  const [reviewForm, setReviewForm] = useState({ approve: true, note: '', reasonCode: 'policy' });
   const [reviewRole, setReviewRole] = useState('hr');
 
-  const canQueue = caps?.canHrReview || caps?.canFinalApprove || caps?.canManageStaff;
+  const canQueue =
+    caps?.canHrReview ||
+    caps?.canFinalApprove ||
+    caps?.canGmHrApprove ||
+    caps?.canBranchEndorse ||
+    caps?.canManageStaff;
 
   const load = useCallback(async () => {
     setBusy(true);
@@ -141,6 +158,8 @@ export default function HrTalent() {
     }, 0);
     return () => window.clearTimeout(t);
   }, [location.state, location.pathname, navigate]);
+
+  const requestsPage = useAppTablePaging(requests, APP_DATA_TABLE_PAGE_SIZE, q, kindFilter, statusFilter);
 
   const submitCreate = async (e) => {
     e.preventDefault();
@@ -334,11 +353,17 @@ export default function HrTalent() {
     const path =
       reviewRole === 'hr'
         ? `/api/hr/requests/${encodeURIComponent(reviewTarget.id)}/hr-review`
-        : `/api/hr/requests/${encodeURIComponent(reviewTarget.id)}/manager-review`;
+        : reviewRole === 'branch'
+          ? `/api/hr/requests/${encodeURIComponent(reviewTarget.id)}/branch-endorse`
+          : `/api/hr/requests/${encodeURIComponent(reviewTarget.id)}/gm-hr-review`;
     setBusy(true);
     const { ok, data } = await apiFetch(path, {
       method: 'PATCH',
-      body: JSON.stringify({ approve: reviewForm.approve, note: reviewForm.note }),
+      body: JSON.stringify({
+        approve: reviewForm.approve,
+        note: reviewForm.note,
+        reasonCode: reviewForm.reasonCode || 'policy',
+      }),
     });
     setBusy(false);
     if (!ok || !data?.ok) {
@@ -352,20 +377,27 @@ export default function HrTalent() {
 
   const openHrReview = (r) => {
     setReviewRole('hr');
-    setReviewForm({ approve: true, note: '' });
+    setReviewForm({ approve: true, note: '', reasonCode: 'policy' });
     setReviewTarget(r);
   };
 
-  const openMgrReview = (r) => {
-    setReviewRole('manager');
-    setReviewForm({ approve: true, note: '' });
+  const openBranchReview = (r) => {
+    setReviewRole('branch');
+    setReviewForm({ approve: true, note: '', reasonCode: 'policy' });
+    setReviewTarget(r);
+  };
+
+  const openGmReview = (r) => {
+    setReviewRole('gm');
+    setReviewForm({ approve: true, note: '', reasonCode: 'policy' });
     setReviewTarget(r);
   };
 
   const needsMyAction = useMemo(() => {
     return (r) => {
       if (r.status === 'hr_review' && caps?.canHrReview) return true;
-      if (r.status === 'manager_review' && caps?.canFinalApprove) return true;
+      if (r.status === 'branch_manager_review' && caps?.canBranchEndorse) return true;
+      if (r.status === 'gm_hr_review' && caps?.canGmHrApprove) return true;
       return false;
     };
   }, [caps]);
@@ -375,7 +407,7 @@ export default function HrTalent() {
   if (caps.enabled === false) {
     return (
       <MainPanel>
-        <PageHeader eyebrow="Human resources" title="Leave & HR requests" />
+        <PageHeader title="Leave & HR requests" />
         <p className="text-sm text-amber-800">HR data is not initialised on this server.</p>
       </MainPanel>
     );
@@ -384,9 +416,8 @@ export default function HrTalent() {
   return (
     <>
       <PageHeader
-        eyebrow="Human resources"
         title="Leave & HR requests"
-        subtitle="One queue for leave, loans, welfare, and other HR cases — submit, get HR then executive approval, and push approved loans into finance for payout."
+        subtitle="HR officer → branch manager endorsement → GM HR final approval. Approved loans go to finance for payout."
         actions={
           <div className="flex flex-wrap gap-2">
             <button
@@ -505,75 +536,68 @@ export default function HrTalent() {
         {requests.length === 0 ? (
           <p className="text-sm text-slate-600">No requests match your filters.</p>
         ) : (
-          <div className="overflow-x-auto rounded-2xl border border-slate-200/90 bg-white shadow-sm">
-            <table className="min-w-full text-left text-sm">
-              <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-500">
-                <tr>
-                  <th className="px-4 py-3">Title</th>
-                  <th className="px-4 py-3 hidden sm:table-cell">Kind</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3 hidden md:table-cell">Staff</th>
-                  <th className="px-4 py-3 hidden lg:table-cell">Created</th>
-                  <th className="px-4 py-3 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {requests.map((r) => {
-                  const mine = r.userId === selfId;
-                  const loan = r.kind === 'loan' && r.payload;
-                  return (
-                    <tr
-                      key={r.id}
-                      className={`border-t border-slate-100 ${needsMyAction(r) ? 'bg-amber-50/50' : ''}`}
-                    >
-                      <td className="px-4 py-3">
-                        <p className="font-semibold text-slate-900">{r.title}</p>
-                        {loan ? (
-                          <p className="text-[11px] text-slate-500">
-                            ₦{formatNgn(loan.amountNgn)} · {loan.repaymentMonths || 0} mo · ₦
-                            {formatNgn(loan.deductionPerMonthNgn)}/mo
-                          </p>
-                        ) : null}
-                        {loan ? (
-                          <p className="text-[11px] text-slate-500">
-                            Branch {r.branchId || '—'} · Finance queue{' '}
-                            {loan.financePaymentRequestId
-                              ? `${loan.disbursementQueueStatus || 'Pending'} (${loan.financePaymentRequestId})`
-                              : 'Not yet created'}
-                            {loan.loanDisbursedAtIso ? ` · Disbursed ${loan.loanDisbursedAtIso}` : ''}
-                          </p>
-                        ) : null}
-                      </td>
-                      <td className="px-4 py-3 text-xs capitalize hidden sm:table-cell">{String(r.kind).replace(/_/g, ' ')}</td>
-                      <td className="px-4 py-3">
-                        <span
-                          className={`inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-bold capitalize ${statusStyle(r.status)}`}
-                        >
-                          {String(r.status).replace(/_/g, ' ')}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-xs hidden md:table-cell">
-                        {r.userId ? (
-                          <Link
-                            to={`/hr/staff/${encodeURIComponent(r.userId)}`}
-                            className="font-medium text-[#134e4a] hover:underline"
+          <>
+            <AppTableWrap>
+              <AppTable>
+                <AppTableThead>
+                  <AppTableTh>Title</AppTableTh>
+                  <AppTableTh className="hidden sm:table-cell">Kind</AppTableTh>
+                  <AppTableTh>Status</AppTableTh>
+                  <AppTableTh className="hidden md:table-cell">Staff</AppTableTh>
+                  <AppTableTh className="hidden lg:table-cell">Created</AppTableTh>
+                  <AppTableTh align="right">Actions</AppTableTh>
+                </AppTableThead>
+                <AppTableBody>
+                  {requestsPage.slice.map((r) => {
+                    const mine = r.userId === selfId;
+                    const loan = r.kind === 'loan' && r.payload;
+                    const loanMeta = loan
+                      ? `₦${formatNgn(loan.amountNgn)} · ${loan.repaymentMonths || 0} mo · ₦${formatNgn(loan.deductionPerMonthNgn)}/mo · Branch ${r.branchId || '—'} · Finance ${loan.financePaymentRequestId ? `${loan.disbursementQueueStatus || 'Pending'} (${loan.financePaymentRequestId})` : 'Not yet created'}${loan.loanDisbursedAtIso ? ` · Disbursed ${loan.loanDisbursedAtIso}` : ''}`
+                      : '';
+                    const titleLine = loan ? `${r.title} · ${loanMeta}` : r.title;
+                    return (
+                      <AppTableTr key={r.id} className={needsMyAction(r) ? 'bg-amber-50/50' : ''}>
+                        <AppTableTd title={titleLine}>
+                          <span className="font-semibold text-slate-900">{r.title}</span>
+                          {loan ? <span className="text-slate-500"> · </span> : null}
+                          {loan ? (
+                            <span className="text-slate-600">
+                              ₦{formatNgn(loan.amountNgn)} · {loan.repaymentMonths || 0} mo
+                            </span>
+                          ) : null}
+                        </AppTableTd>
+                        <AppTableTd className="hidden sm:table-cell capitalize" title={String(r.kind)}>
+                          {String(r.kind).replace(/_/g, ' ')}
+                        </AppTableTd>
+                        <AppTableTd truncate={false}>
+                          <span
+                            className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-bold capitalize ${statusStyle(r.status)}`}
                           >
-                            {r.staffDisplayName || '—'}
-                          </Link>
-                        ) : (
-                          <span className="font-medium">{r.staffDisplayName || '—'}</span>
-                        )}
-                        {mine ? (
-                          <span className="ml-1 rounded bg-teal-100 px-1.5 py-0.5 text-[10px] font-black text-[#134e4a]">
-                            You
+                            {String(r.status).replace(/_/g, ' ')}
                           </span>
-                        ) : null}
-                      </td>
-                      <td className="px-4 py-3 text-xs text-slate-600 whitespace-nowrap hidden lg:table-cell">
-                        {r.createdAtIso ? String(r.createdAtIso).slice(0, 10) : '—'}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <div className="flex flex-wrap justify-end gap-2">
+                        </AppTableTd>
+                        <AppTableTd className="hidden md:table-cell" title={r.staffDisplayName || ''}>
+                          {r.userId ? (
+                            <Link
+                              to={`/hr/staff/${encodeURIComponent(r.userId)}`}
+                              className="font-medium text-[#134e4a] hover:underline"
+                            >
+                              {r.staffDisplayName || '—'}
+                            </Link>
+                          ) : (
+                            <span className="font-medium">{r.staffDisplayName || '—'}</span>
+                          )}
+                          {mine ? (
+                            <span className="ml-1 rounded bg-teal-100 px-1.5 py-0.5 text-[10px] font-black text-[#134e4a]">
+                              You
+                            </span>
+                          ) : null}
+                        </AppTableTd>
+                        <AppTableTd className="hidden lg:table-cell text-slate-600 whitespace-nowrap" monospace>
+                          {r.createdAtIso ? String(r.createdAtIso).slice(0, 10) : '—'}
+                        </AppTableTd>
+                        <AppTableTd align="right" truncate={false}>
+                          <div className="flex flex-nowrap justify-end gap-1 overflow-x-auto max-w-[min(22rem,80vw)]">
                           {mine && r.status === 'draft' ? (
                             <>
                               <button
@@ -604,13 +628,22 @@ export default function HrTalent() {
                               HR review
                             </button>
                           ) : null}
-                          {r.status === 'manager_review' && caps?.canFinalApprove ? (
+                          {r.status === 'branch_manager_review' && caps?.canBranchEndorse ? (
                             <button
                               type="button"
                               className="text-[11px] font-black uppercase text-sky-900"
-                              onClick={() => openMgrReview(r)}
+                              onClick={() => openBranchReview(r)}
                             >
-                              Executive
+                              Endorse
+                            </button>
+                          ) : null}
+                          {r.status === 'gm_hr_review' && caps?.canGmHrApprove ? (
+                            <button
+                              type="button"
+                              className="text-[11px] font-black uppercase text-indigo-900"
+                              onClick={() => openGmReview(r)}
+                            >
+                              GM HR
                             </button>
                           ) : null}
                           {r.body ? (
@@ -618,14 +651,24 @@ export default function HrTalent() {
                               <FileText size={14} className="inline" />
                             </span>
                           ) : null}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                          </div>
+                        </AppTableTd>
+                      </AppTableTr>
+                    );
+                  })}
+                </AppTableBody>
+              </AppTable>
+            </AppTableWrap>
+            <AppTablePager
+              showingFrom={requestsPage.showingFrom}
+              showingTo={requestsPage.showingTo}
+              total={requestsPage.total}
+              hasPrev={requestsPage.hasPrev}
+              hasNext={requestsPage.hasNext}
+              onPrev={requestsPage.goPrev}
+              onNext={requestsPage.goNext}
+            />
+          </>
         )}
         </HrSectionCard>
       </MainPanel>
@@ -991,7 +1034,11 @@ export default function HrTalent() {
           <div className="flex items-center justify-between border-b border-slate-100 bg-slate-800 px-5 py-4 text-white">
             <div>
               <p className="text-[10px] font-black uppercase text-slate-400">
-                {reviewRole === 'hr' ? 'HR review' : 'Executive approval'}
+                {reviewRole === 'hr'
+                  ? 'HR review'
+                  : reviewRole === 'branch'
+                    ? 'Branch manager endorsement'
+                    : 'GM HR final approval'}
               </p>
               <h2 className="text-base font-black line-clamp-2">{reviewTarget?.title}</h2>
             </div>
@@ -1030,6 +1077,21 @@ export default function HrTalent() {
                 Reject
               </button>
             </div>
+            <label className="block text-xs font-bold text-slate-700">
+              Reason code
+              <select
+                className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                value={reviewForm.reasonCode}
+                onChange={(e) => setReviewForm((f) => ({ ...f, reasonCode: e.target.value }))}
+              >
+                <option value="policy">Policy</option>
+                <option value="documentation">Documentation</option>
+                <option value="attendance">Attendance</option>
+                <option value="performance">Performance</option>
+                <option value="finance">Finance</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
             <label className="block text-xs font-bold text-slate-700">
               Note
               <textarea

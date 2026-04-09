@@ -2,6 +2,7 @@
  * Merge imported/historical receipts with ledger RECEIPT rows for Sales UI and print history.
  */
 import { loadLedgerEntries, amountDueOnQuotation } from './customerLedgerStore';
+import { companionOverpayNgnByReceiptId } from './customerLedgerCore';
 import { formatNgn } from '../Data/mockData';
 
 function reversalTargetId(raw) {
@@ -16,6 +17,13 @@ function shortDateFromISO(iso) {
   if (!d || !m) return '—';
   const mo = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][Number(m) - 1];
   return `${d} ${mo}`;
+}
+
+/** Cash actually received for a sales receipt (overpay splits use `cashReceivedNgn` from API / merge). */
+export function receiptCashReceivedNgn(r) {
+  if (!r) return 0;
+  if (r.cashReceivedNgn != null) return Math.round(Number(r.cashReceivedNgn) || 0);
+  return Math.round(Number(r.amountNgn ?? r.amount_ngn) || 0);
 }
 
 function quotePaymentHint(quotation) {
@@ -39,7 +47,14 @@ function quotePaymentHint(quotation) {
 export function mergeReceiptRowsForSales(importedReceipts, quotations, _ledgerEpoch = 0) {
   void _ledgerEpoch;
   const qMap = new Map((quotations || []).map((q) => [q.id, q]));
+  const regById = new Map();
+  const regByLedgerId = new Map();
+  for (const r of importedReceipts || []) {
+    if (r?.id) regById.set(String(r.id), r);
+    if (r?.ledgerEntryId) regByLedgerId.set(String(r.ledgerEntryId), r);
+  }
   const ledgerEntries = loadLedgerEntries();
+  const companionOverpay = companionOverpayNgnByReceiptId(ledgerEntries);
   const reversedReceiptIds = new Set(
     ledgerEntries
       .filter((e) => e.type === 'RECEIPT_REVERSAL')
@@ -53,6 +68,10 @@ export function mergeReceiptRowsForSales(importedReceipts, quotations, _ledgerEp
       const q = qMap.get(e.quotationRef);
       const hint = quotePaymentHint(q);
       const dateISO = (e.atISO || '').slice(0, 10) || '';
+      const mirror = regById.get(String(e.id)) || regByLedgerId.get(String(e.id));
+      const alloc = Math.round(Number(e.amountNgn) || 0);
+      const extra = companionOverpay.get(String(e.id)) || 0;
+      const cash = Math.round(alloc + extra);
       return {
         id: e.id,
         source: 'ledger',
@@ -61,10 +80,16 @@ export function mergeReceiptRowsForSales(importedReceipts, quotations, _ledgerEp
         quotationRef: e.quotationRef,
         dateISO,
         date: shortDateFromISO(e.atISO),
-        amountNgn: e.amountNgn,
-        amount: formatNgn(e.amountNgn),
+        amountNgn: alloc,
+        quotationAllocatedNgn: extra > 0 ? alloc : undefined,
+        cashReceivedNgn: cash,
+        amount: formatNgn(cash),
         status: 'Recorded',
         handledBy: '—',
+        bankConfirmedAtISO: mirror?.bankConfirmedAtISO ?? null,
+        bankConfirmedByUserId: mirror?.bankConfirmedByUserId ?? null,
+        bankReceivedAmountNgn: mirror?.bankReceivedAmountNgn ?? null,
+        financeDeliveryClearedAtISO: mirror?.financeDeliveryClearedAtISO ?? null,
         _ledgerEntry: e,
         _payBadge: hint.badge,
         _subLabel: 'From customer ledger',
@@ -85,10 +110,18 @@ export function mergeReceiptRowsForSales(importedReceipts, quotations, _ledgerEp
     .map((r) => {
       const q = r.quotationRef ? qMap.get(r.quotationRef) : null;
       const hint = quotePaymentHint(q);
+      const cash =
+        r.cashReceivedNgn != null ? Math.round(Number(r.cashReceivedNgn) || 0) : Math.round(Number(r.amountNgn) || 0);
       return {
         ...r,
         source: 'imported',
         dateISO: r.dateISO || r.date || '',
+        cashReceivedNgn: cash,
+        amount: formatNgn(cash),
+        bankConfirmedAtISO: r.bankConfirmedAtISO ?? null,
+        bankConfirmedByUserId: r.bankConfirmedByUserId ?? null,
+        bankReceivedAmountNgn: r.bankReceivedAmountNgn ?? null,
+        financeDeliveryClearedAtISO: r.financeDeliveryClearedAtISO ?? null,
         _payBadge: hint.badge,
         _subLabel: 'Imported history row',
         _detailNote: r.method ? `Method: ${r.method}` : '',
@@ -115,16 +148,21 @@ export function quotationReceiptPrintHistory(quotationId, importedReceipts = [])
       .filter(Boolean)
   );
 
+  const companionPrint = companionOverpayNgnByReceiptId(ledgerEntries);
   const ledger = ledgerEntries
     .filter((e) => e.type === 'RECEIPT' && e.quotationRef === quotationId && !reversedReceiptIds.has(e.id))
-    .map((e) => ({
-      id: e.id,
-      dateStr: formatPrintDate((e.atISO || '').slice(0, 10)),
-      iso: (e.atISO || '').slice(0, 10),
-      amountNgn: Number(e.amountNgn) || 0,
-      source: 'Ledger',
-      detail: e.bankReference || e.note || '—',
-    }));
+    .map((e) => {
+      const alloc = Math.round(Number(e.amountNgn) || 0);
+      const extra = companionPrint.get(String(e.id)) || 0;
+      return {
+        id: e.id,
+        dateStr: formatPrintDate((e.atISO || '').slice(0, 10)),
+        iso: (e.atISO || '').slice(0, 10),
+        amountNgn: Math.round(alloc + extra),
+        source: 'Ledger',
+        detail: e.bankReference || e.note || '—',
+      };
+    });
 
   const imported = (importedReceipts || [])
     .filter(
@@ -137,7 +175,10 @@ export function quotationReceiptPrintHistory(quotationId, importedReceipts = [])
       id: r.id,
       dateStr: formatPrintDate(r.dateISO) || r.date || '—',
       iso: r.dateISO || '',
-      amountNgn: Number(r.amountNgn) || 0,
+      amountNgn:
+        r.cashReceivedNgn != null
+          ? Math.round(Number(r.cashReceivedNgn) || 0)
+          : Math.round(Number(r.amountNgn) || 0),
       source: 'Imported',
       detail: r.method ? `Method: ${r.method}` : 'Imported receipt',
     }));

@@ -1,3 +1,5 @@
+import { canWorkspaceSearchProducts, canWorkspaceSearchRefunds } from './workspaceSearchClientGates.js';
+
 /**
  * Search cached workspace snapshot (offline / degraded) with permission checks.
  * @param {object} snapshot
@@ -106,7 +108,7 @@ export function searchWorkspaceSnapshot(snapshot, rawQuery, hasPermission, limit
           label: row.id,
           sublabel: row.customer,
           path: '/operations',
-          state: { focusOpsTab: 'production' },
+          state: { focusOpsTab: 'production', highlightCuttingListId: row.id },
         });
       }
     }
@@ -122,6 +124,42 @@ export function searchWorkspaceSnapshot(snapshot, rawQuery, hasPermission, limit
           label: lot.coilNo,
           sublabel: `${lot.colour || '—'} · ${lot.gaugeLabel || '—'} · ${lot.productID || ''}`,
           path: `/operations/coils/${encodeURIComponent(lot.coilNo)}`,
+        });
+      }
+    }
+  }
+
+  if (canWorkspaceSearchRefunds(hasPermission)) {
+    for (const row of snapshot.refunds || []) {
+      if (results.length >= limit) break;
+      const blob = `${row.refundID || ''} ${row.customer || ''} ${row.customerID || ''} ${row.quotationRef || ''} ${
+        row.product || ''
+      } ${row.reasonCategory || ''}`.toLowerCase();
+      if (blob.includes(q)) {
+        push({
+          kind: 'refund',
+          id: row.refundID,
+          label: row.refundID,
+          sublabel: row.customer,
+          path: '/sales',
+          state: { globalSearchQuery: row.refundID, focusSalesTab: 'refund' },
+        });
+      }
+    }
+  }
+
+  if (canWorkspaceSearchProducts(hasPermission)) {
+    for (const row of snapshot.products || []) {
+      if (results.length >= limit) break;
+      const blob = `${row.productID || ''} ${row.name || ''}`.toLowerCase();
+      if (blob.includes(q)) {
+        push({
+          kind: 'product',
+          id: row.productID,
+          label: row.name || row.productID,
+          sublabel: row.productID,
+          path: '/operations',
+          state: { focusOpsTab: 'inventory', opsInventorySkuQuery: row.productID },
         });
       }
     }

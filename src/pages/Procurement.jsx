@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Search,
@@ -16,16 +16,26 @@ import {
   ChevronRight,
   Pencil,
   Trash2,
+  FileSpreadsheet,
 } from 'lucide-react';
 
 import { MainPanel, PageHeader, PageShell, PageTabs, ModalFrame } from '../components/layout';
 import CoilPurchaseOrderModal from '../components/procurement/CoilPurchaseOrderModal';
+import StonePurchaseOrderModal from '../components/procurement/StonePurchaseOrderModal';
+import AccessoryPurchaseOrderModal from '../components/procurement/AccessoryPurchaseOrderModal';
+import StoneAccessoryReceiptModal from '../components/procurement/StoneAccessoryReceiptModal';
 import { ProcurementFormSection } from '../components/procurement/ProcurementFormSection';
+import { PriceListPanel } from '../components/procurement/PriceListPanel';
 import { CONVERSION_FLAG_RATIO, formatNgn } from '../Data/mockData';
 import { useToast } from '../context/ToastContext';
 import { useInventory } from '../context/InventoryContext';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { apiFetch } from '../lib/apiBase';
+import { downloadCoilImportTemplate, parseCoilImportWorkbookArrayBuffer } from '../lib/coilExcelImport';
+import { purchaseOrderOrderedValueNgn } from '../lib/liveAnalytics';
+import { procurementKindFromPo } from '../lib/procurementPoKind';
+import { EditSecondApprovalInline } from '../components/EditSecondApprovalInline';
+import { editMutationNeedsSecondApprovalRole } from '../lib/editApprovalUi';
 
 const TAB_LABELS = {
   purchases: 'Purchases',
@@ -34,13 +44,110 @@ const TAB_LABELS = {
   conversion: 'Conversion',
 };
 
+/** Coil materials for density-based standard conversion (maps to stock product_id). Stonecoated is excluded — different product class. */
+const PROCUREMENT_COIL_MATERIALS = [
+  { key: 'alu', label: 'Aluminium', productID: 'COIL-ALU', defaultCatalogLabel: 'Aluminium' },
+  { key: 'aluzinc', label: 'Aluzinc (PPGI)', productID: 'PRD-102', defaultCatalogLabel: 'Aluzinc (PPGI)' },
+];
+
+function procurementCoilMaterialByKey(key) {
+  return PROCUREMENT_COIL_MATERIALS.find((m) => m.key === key) ?? PROCUREMENT_COIL_MATERIALS[0];
+}
+
+/** Standard gauges (mm) used in yard / procurement. */
+const STANDARD_COIL_GAUGES_MM = ['0.18', '0.20', '0.22', '0.24', '0.28', '0.30', '0.40', '0.45', '0.50', '0.55'];
+
+/** Strip width for theoretical mass per metre (metres). */
+const PROCUREMENT_STRIP_WIDTH_M = 1.2;
+
+/** Mass density in g/cm³ (×1000 → kg/m³). Values confirmed with operations. */
+const DENSITY_ALUMINIUM_G_CM3 = 2.7;
+const DENSITY_ALUZINC_G_CM3 = 7.8;
+
+function densityKgPerM3ForProcurementKey(materialKey) {
+  if (materialKey === 'alu') return DENSITY_ALUMINIUM_G_CM3 * 1000;
+  if (materialKey === 'aluzinc') return DENSITY_ALUZINC_G_CM3 * 1000;
+  return null;
+}
+
+/** Theoretical kg/m: ρ (kg/m³) × strip width (m) × thickness (m); gaugeMm is thickness in mm. */
+function kgPerMFromStripDensity(materialKey, gaugeMm) {
+  const rho = densityKgPerM3ForProcurementKey(materialKey);
+  if (rho == null || !Number.isFinite(gaugeMm) || gaugeMm <= 0) return null;
+  return rho * PROCUREMENT_STRIP_WIDTH_M * (gaugeMm / 1000);
+}
+
 const TRANSPORT_SUBS = [
   { id: 'agents', label: 'Agents' },
   { id: 'transit', label: 'Orders on road' },
 ];
 
-function poTotalNgn(po) {
-  return po.lines.reduce((s, l) => s + Number(l.qtyOrdered) * Number(l.unitPriceNgn || 0), 0);
+function coilMaterialKindFromProductId(productID) {
+  if (productID === 'PRD-102') return 'aluzinc';
+  if (productID === 'COIL-ALU') return 'aluminium';
+  return '';
+}
+
+function purchaseOrderToCoilModalDraft(po) {
+  return {
+    poID: po.poID,
+    supplierID: po.supplierID,
+    orderDateISO: po.orderDateISO,
+    expectedDeliveryISO: po.expectedDeliveryISO || '',
+    lines: (po.lines || []).map((l) => ({
+      lineKey: l.lineKey,
+      materialKind: coilMaterialKindFromProductId(l.productID),
+      color: l.color || '',
+      gauge: l.gauge || '',
+      kg: l.qtyOrdered,
+      meters: l.metersOffered,
+      pricePerKg: l.unitPricePerKgNgn ?? l.unitPriceNgn,
+    })),
+  };
+}
+
+function purchaseOrderToStoneModalDraft(po, products) {
+  return {
+    poID: po.poID,
+    supplierID: po.supplierID,
+    orderDateISO: po.orderDateISO,
+    expectedDeliveryISO: po.expectedDeliveryISO || '',
+    lines: (po.lines || []).map((l) => {
+      const p = products.find((x) => x.productID === l.productID);
+      const da = p?.dashboardAttrs || {};
+      return {
+        rowUid: l.lineKey,
+        existingLineKey: l.lineKey,
+        designLabel: da.stoneDesign || '',
+        colourLabel: da.stoneColour || l.color || '',
+        gaugeLabel: da.stoneGauge || l.gauge || '',
+        metres: l.qtyOrdered,
+        pricePerM: l.unitPriceNgn,
+      };
+    }),
+  };
+}
+
+function purchaseOrderToAccessoryModalDraft(po) {
+  return {
+    poID: po.poID,
+    supplierID: po.supplierID,
+    orderDateISO: po.orderDateISO,
+    expectedDeliveryISO: po.expectedDeliveryISO || '',
+    lines: (po.lines || []).map((l) => ({
+      rowUid: l.lineKey,
+      existingLineKey: l.lineKey,
+      productID: l.productID,
+      qty: l.qtyOrdered,
+      unitPrice: l.unitPriceNgn,
+    })),
+  };
+}
+
+function poLineSummaryLabel(kind) {
+  if (kind === 'stone') return 'stone line(s)';
+  if (kind === 'accessory') return 'accessory line(s)';
+  return 'coil line(s)';
 }
 
 const PILL = 'inline-flex items-center px-2 py-0.5 rounded-md text-[9px] font-semibold uppercase tracking-wide';
@@ -68,6 +175,7 @@ const Procurement = () => {
     products: invProducts,
     coilLots,
     createPurchaseOrder,
+    updatePurchaseOrder,
     setPurchaseOrderStatus,
     attachSupplierInvoice,
     linkTransportToPurchaseOrder,
@@ -78,6 +186,8 @@ const Procurement = () => {
   const canRecordSupplierPayment = ws?.hasPermission?.('finance.pay') ?? true;
   const canRecordTransportTreasury = ws?.hasPermission?.('finance.pay') ?? false;
   const currentActorLabel = ws?.session?.user?.displayName ?? 'Accounts';
+  const canAccessPriceList =
+    (ws?.hasPermission?.('pricing.manage') || ws?.hasPermission?.('md.price_exception.approve')) ?? false;
 
   const [activeTab, setActiveTab] = useState('purchases');
   const [transportSubTab, setTransportSubTab] = useState('agents');
@@ -86,7 +196,7 @@ const Procurement = () => {
 
   const [searchQuery, setSearchQuery] = useState('');
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     const s = ws?.snapshot;
     if (!s) {
@@ -97,9 +207,19 @@ const Procurement = () => {
     setAgents(Array.isArray(s.transportAgents) ? s.transportAgents.map((a) => ({ ...a })) : []);
     setSuppliers(Array.isArray(s.suppliers) ? s.suppliers.map((x) => ({ ...x })) : []);
   }, [ws?.snapshot, ws?.refreshEpoch]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
+  const [showStoneAccessoryReceiptModal, setShowStoneAccessoryReceiptModal] = useState(false);
   const [showCoilPoModal, setShowCoilPoModal] = useState(false);
+  const [coilPoEditDraft, setCoilPoEditDraft] = useState(null);
+  const [showStonePoModal, setShowStonePoModal] = useState(false);
+  const [stonePoEditDraft, setStonePoEditDraft] = useState(null);
+  const [showAccessoryPoModal, setShowAccessoryPoModal] = useState(false);
+  const [accessoryPoEditDraft, setAccessoryPoEditDraft] = useState(null);
+  /** Single-use token for PATCH on a PO (server consumes per request). */
+  const [procurementPoEditApprovalId, setProcurementPoEditApprovalId] = useState('');
+  /** PO id for list-level second-approval strip (Approve / Reject / haulage actions). */
+  const [procurementPoForApprovalUi, setProcurementPoForApprovalUi] = useState('');
   const [showSupplierModal, setShowSupplierModal] = useState(false);
   const [showAgentModal, setShowAgentModal] = useState(false);
   const [showTransportModal, setShowTransportModal] = useState(false);
@@ -107,6 +227,8 @@ const Procurement = () => {
   const [showPayModal, setShowPayModal] = useState(false);
   const [showInvoiceModal, setShowInvoiceModal] = useState(false);
   const [showConversionModal, setShowConversionModal] = useState(false);
+  const [coilImportBusy, setCoilImportBusy] = useState(false);
+  const coilImportInputRef = useRef(null);
 
   const [supplierForm, setSupplierForm] = useState({
     name: '',
@@ -117,7 +239,9 @@ const Procurement = () => {
   });
   const [agentForm, setAgentForm] = useState({ name: '', phone: '', region: '' });
   const [editingSupplierId, setEditingSupplierId] = useState(null);
+  const [supplierEditApprovalId, setSupplierEditApprovalId] = useState('');
   const [editingAgentId, setEditingAgentId] = useState(null);
+  const [agentEditApprovalId, setAgentEditApprovalId] = useState('');
   const [editingConversionId, setEditingConversionId] = useState(null);
 
   const [transportForm, setTransportForm] = useState({
@@ -162,8 +286,17 @@ const Procurement = () => {
     offerMeters: '',
     pricePerKg: '',
   });
+  /** Inline Conversion tab: standard kg/m by material (coil product) + gauge */
+  const [standardConversionForm, setStandardConversionForm] = useState({
+    materialKey: 'alu',
+    gauge: STANDARD_COIL_GAUGES_MM.includes('0.24') ? '0.24' : STANDARD_COIL_GAUGES_MM[0] || '',
+    color: PROCUREMENT_COIL_MATERIALS[0].defaultCatalogLabel,
+    conversionKgPerM: '',
+    label: '',
+  });
+  const [standardConversionSaving, setStandardConversionSaving] = useState(false);
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     if (!location.state?.openPurchaseReceipt) return;
     setActiveTab('purchases');
@@ -177,7 +310,6 @@ const Procurement = () => {
     setActiveTab(t);
     navigate(location.pathname, { replace: true, state: {} });
   }, [location.state, location.pathname, navigate]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   const procurementTabs = useMemo(
     () => [
@@ -193,7 +325,7 @@ const Procurement = () => {
     () =>
       purchaseOrders.reduce((s, p) => {
         if (p.status === 'Rejected') return s;
-        const tot = poTotalNgn(p);
+        const tot = purchaseOrderOrderedValueNgn(p);
         const paid = Number(p.supplierPaidNgn) || 0;
         return s + Math.max(0, tot - paid);
       }, 0),
@@ -204,7 +336,7 @@ const Procurement = () => {
     () =>
       purchaseOrders
         .filter((p) => !['Received', 'Rejected'].includes(p.status))
-        .reduce((s, p) => s + poTotalNgn(p), 0),
+        .reduce((s, p) => s + purchaseOrderOrderedValueNgn(p), 0),
     [purchaseOrders]
   );
 
@@ -217,7 +349,7 @@ const Procurement = () => {
   const bestSupplier = useMemo(() => {
     const byId = {};
     for (const p of purchaseOrders) {
-      byId[p.supplierID] = (byId[p.supplierID] || 0) + poTotalNgn(p);
+      byId[p.supplierID] = (byId[p.supplierID] || 0) + purchaseOrderOrderedValueNgn(p);
     }
     let top = null;
     for (const s of suppliers) {
@@ -279,6 +411,7 @@ const Procurement = () => {
 
   const openEditSupplier = (s) => {
     setEditingSupplierId(s.supplierID);
+    setSupplierEditApprovalId('');
     setSupplierForm({
       name: s.name || '',
       city: s.city && s.city !== '—' ? s.city : '',
@@ -291,12 +424,14 @@ const Procurement = () => {
 
   const openAgentModal = () => {
     setEditingAgentId(null);
+    setAgentEditApprovalId('');
     setAgentForm({ name: '', phone: '', region: '' });
     setShowAgentModal(true);
   };
 
   const openEditAgent = (a) => {
     setEditingAgentId(a.id);
+    setAgentEditApprovalId('');
     setAgentForm({
       name: a.name || '',
       phone: a.phone && a.phone !== '—' ? a.phone : '',
@@ -306,8 +441,10 @@ const Procurement = () => {
   };
 
   const openPrimaryAction = () => {
-    if (activeTab === 'purchases') setShowCoilPoModal(true);
-    else if (activeTab === 'transport') openAgentModal();
+    if (activeTab === 'purchases') {
+      setCoilPoEditDraft(null);
+      setShowCoilPoModal(true);
+    } else if (activeTab === 'transport') openAgentModal();
     else if (activeTab === 'suppliers') openSupplierModal();
     else if (activeTab === 'conversion') {
       setEditingConversionId(null);
@@ -326,7 +463,7 @@ const Procurement = () => {
 
   const newButtonLabel =
     activeTab === 'purchases'
-      ? 'New coil PO'
+      ? null
       : activeTab === 'transport'
         ? 'New agent'
         : activeTab === 'suppliers'
@@ -334,6 +471,8 @@ const Procurement = () => {
         : activeTab === 'conversion'
           ? 'Add conversion'
           : null;
+
+  const canManagePo = Boolean(ws?.hasPermission?.('purchase_orders.manage'));
 
   const openEditConversion = (row) => {
     setEditingConversionId(row.id);
@@ -421,6 +560,68 @@ const Procurement = () => {
     );
   };
 
+  const saveStandardConversion = async (e) => {
+    e.preventDefault();
+    const matOpt = procurementCoilMaterialByKey(standardConversionForm.materialKey);
+    const colorFallback = matOpt.defaultCatalogLabel;
+    const color = standardConversionForm.color.trim() || colorFallback;
+    const gauge = standardConversionForm.gauge.trim();
+    const gaugeMm = parseFloat(gauge, 10);
+    const override = Number(standardConversionForm.conversionKgPerM);
+    let conversion = null;
+    if (Number.isFinite(override) && override > 0) {
+      conversion = override;
+    } else {
+      conversion = kgPerMFromStripDensity(standardConversionForm.materialKey, gaugeMm);
+    }
+    if (!matOpt.productID || !gauge || conversion == null || !Number.isFinite(conversion) || conversion <= 0) {
+      showToast('Select material and gauge, or enter a valid kg/m override.', { variant: 'error' });
+      return;
+    }
+    const payload = {
+      color,
+      gauge,
+      productID: matOpt.productID,
+      offerKg: 0,
+      offerMeters: 0,
+      conversionKgPerM: Number(conversion.toFixed(6)),
+      label:
+        standardConversionForm.label.trim() ||
+        `Standard (density) · ${matOpt.label} · ${gauge} mm`,
+    };
+    if (!ws?.canMutate) {
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to save — workspace is read-only.'
+          : 'Connect to the API to save standard conversion.',
+        { variant: 'info' }
+      );
+      return;
+    }
+    setStandardConversionSaving(true);
+    try {
+      const { ok, data } = await apiFetch('/api/setup/procurementCatalog', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      if (!ok || !data?.ok) {
+        showToast(data?.error || 'Could not save standard conversion.', { variant: 'error' });
+        return;
+      }
+      await ws.refresh();
+      const opt = procurementCoilMaterialByKey(standardConversionForm.materialKey);
+      setStandardConversionForm((f) => ({
+        ...f,
+        conversionKgPerM: '',
+        label: '',
+        color: opt.defaultCatalogLabel,
+      }));
+      showToast('Standard conversion saved.');
+    } finally {
+      setStandardConversionSaving(false);
+    }
+  };
+
   const calcOfferKg = Number(conversionCalc.offerKg);
   const calcOfferMeters = Number(conversionCalc.offerMeters);
   const calcPricePerKg = Number(conversionCalc.pricePerKg);
@@ -432,6 +633,14 @@ const Procurement = () => {
     calcKgPerM != null && Number.isFinite(calcPricePerKg) && calcPricePerKg > 0
       ? calcKgPerM * calcPricePerKg
       : null;
+
+  const stdGaugeMm = parseFloat(standardConversionForm.gauge, 10);
+  const stdOverrideKgPerM = Number(standardConversionForm.conversionKgPerM);
+  const standardPhysicsKgPerM = kgPerMFromStripDensity(standardConversionForm.materialKey, stdGaugeMm);
+  const standardEffectiveKgPerM =
+    Number.isFinite(stdOverrideKgPerM) && stdOverrideKgPerM > 0
+      ? stdOverrideKgPerM
+      : standardPhysicsKgPerM;
 
   const saveSupplier = async (e) => {
     e.preventDefault();
@@ -446,17 +655,21 @@ const Procurement = () => {
 
     if (ws?.canMutate) {
       if (editingSupplierId) {
+        const patch = {
+          name: supplierForm.name.trim(),
+          city,
+          paymentTerms: supplierForm.paymentTerms,
+          qualityScore: qScore,
+          notes,
+        };
+        if (String(supplierEditApprovalId || '').trim()) {
+          patch.editApprovalId = String(supplierEditApprovalId).trim();
+        }
         const { ok, data } = await apiFetch(
           `/api/suppliers/${encodeURIComponent(editingSupplierId)}`,
           {
             method: 'PATCH',
-            body: JSON.stringify({
-              name: supplierForm.name.trim(),
-              city,
-              paymentTerms: supplierForm.paymentTerms,
-              qualityScore: qScore,
-              notes,
-            }),
+            body: JSON.stringify(patch),
           }
         );
         if (!ok || !data?.ok) {
@@ -493,6 +706,7 @@ const Procurement = () => {
       notes: '',
     });
     setEditingSupplierId(null);
+    setSupplierEditApprovalId('');
     setShowSupplierModal(false);
     showToast(wasEditSupplier ? 'Supplier updated.' : 'Supplier saved.');
   };
@@ -527,15 +741,19 @@ const Procurement = () => {
 
     if (ws?.canMutate) {
       if (editingAgentId) {
+        const patch = {
+          name: agentForm.name.trim(),
+          phone,
+          region,
+        };
+        if (String(agentEditApprovalId || '').trim()) {
+          patch.editApprovalId = String(agentEditApprovalId).trim();
+        }
         const { ok, data } = await apiFetch(
           `/api/transport-agents/${encodeURIComponent(editingAgentId)}`,
           {
             method: 'PATCH',
-            body: JSON.stringify({
-              name: agentForm.name.trim(),
-              phone,
-              region,
-            }),
+            body: JSON.stringify(patch),
           }
         );
         if (!ok || !data?.ok) {
@@ -564,6 +782,7 @@ const Procurement = () => {
 
     setAgentForm({ name: '', phone: '', region: '' });
     setEditingAgentId(null);
+    setAgentEditApprovalId('');
     setShowAgentModal(false);
     showToast(wasEditAgent ? 'Agent updated.' : 'Agent registered.');
   };
@@ -595,6 +814,19 @@ const Procurement = () => {
     });
   }, [purchaseOrders, searchQuery]);
 
+  const coilPOsFiltered = useMemo(
+    () => filteredPOs.filter((p) => procurementKindFromPo(p) === 'coil'),
+    [filteredPOs]
+  );
+  const stonePOsFiltered = useMemo(
+    () => filteredPOs.filter((p) => procurementKindFromPo(p) === 'stone'),
+    [filteredPOs]
+  );
+  const accessoryPOsFiltered = useMemo(
+    () => filteredPOs.filter((p) => procurementKindFromPo(p) === 'accessory'),
+    [filteredPOs]
+  );
+
   const filteredSuppliers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return suppliers;
@@ -603,8 +835,85 @@ const Procurement = () => {
     );
   }, [suppliers, searchQuery]);
 
+  const handleCoilImportFileChange = async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    if (!ws?.canMutate) {
+      showToast('Reconnect to import coils — read-only workspace.', { variant: 'info' });
+      return;
+    }
+    setCoilImportBusy(true);
+    try {
+      const ab = await f.arrayBuffer();
+      const { rows, fileErrors } = parseCoilImportWorkbookArrayBuffer(ab);
+      if (fileErrors.length) {
+        showToast(fileErrors.slice(0, 4).join(' · '), { variant: 'error' });
+        return;
+      }
+      if (!rows.length) {
+        showToast('No valid coil rows found (need Coil no, Product ID, Current kg).', { variant: 'error' });
+        return;
+      }
+      const r = await apiFetch('/api/coil-lots/import', {
+        method: 'POST',
+        body: JSON.stringify({ rows, insertOnly: false }),
+      });
+      const data = r.data;
+      if (!r.ok || !data?.ok) {
+        if (data?.code === 'CSRF_INVALID' || (r.status === 403 && String(data?.error || '').includes('CSRF'))) {
+          showToast('Sign out and sign in again, then retry the upload (session security token).', {
+            variant: 'error',
+          });
+          return;
+        }
+        if (r.status === 403 && data?.code === 'FORBIDDEN') {
+          showToast('Your role cannot import coils — need purchase order / procurement manage permission.', {
+            variant: 'error',
+          });
+          return;
+        }
+        const err = data?.error || `Import failed (${r.status})`;
+        const rowErrs = data?.errors;
+        if (Array.isArray(rowErrs) && rowErrs.length) {
+          showToast(`${err} · Row ${rowErrs[0].row}: ${rowErrs[0].error}`, { variant: 'error' });
+        } else {
+          showToast(err, { variant: 'error' });
+        }
+        return;
+      }
+      const msg = `Imported ${data.imported} coil row(s).`;
+      const skip = data.skipped?.length ? ` Skipped ${data.skipped.length}.` : '';
+      const rowWarn = data.errors?.length ? ` ${data.errors.length} row(s) had validation issues.` : '';
+      showToast(msg + skip + rowWarn);
+      await ws.refresh?.();
+    } catch (err) {
+      showToast(String(err?.message || err), { variant: 'error' });
+    } finally {
+      setCoilImportBusy(false);
+    }
+  };
+
+  const openPoEditor = (p) => {
+    setProcurementPoForApprovalUi(p.poID);
+    const kind = procurementKindFromPo(p);
+    if (kind === 'stone') {
+      setStonePoEditDraft(purchaseOrderToStoneModalDraft(p, invProducts));
+      setShowStonePoModal(true);
+    } else if (kind === 'accessory') {
+      setAccessoryPoEditDraft(purchaseOrderToAccessoryModalDraft(p));
+      setShowAccessoryPoModal(true);
+    } else {
+      setCoilPoEditDraft(purchaseOrderToCoilModalDraft(p));
+      setShowCoilPoModal(true);
+    }
+  };
+
   const isAnyModalOpen =
+    showStoneAccessoryReceiptModal ||
     showCoilPoModal ||
+    showStonePoModal ||
+    showAccessoryPoModal ||
     showSupplierModal ||
     showAgentModal ||
     showTransportModal ||
@@ -614,22 +923,57 @@ const Procurement = () => {
   return (
     <PageShell blurred={isAnyModalOpen}>
       <PageHeader
-        eyebrow="Procurement"
         title="Purchases"
         subtitle="Coil procurement (KG) for MD — suppliers Kano / Abuja / Lagos, transport, conversion (kg/m), Finance-ready payments."
-        actions={
-          <div className="flex flex-wrap items-center gap-2 justify-end w-full lg:max-w-3xl">
-            <PageTabs tabs={procurementTabs} value={activeTab} onChange={setActiveTab} />
-            {newButtonLabel ? (
-              <button
-                type="button"
-                onClick={openPrimaryAction}
-                className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#134e4a] text-white px-3 py-1.5 text-[9px] font-semibold uppercase tracking-wider shadow-sm hover:brightness-105 shrink-0"
-              >
-                <Plus size={14} strokeWidth={2} /> {newButtonLabel}
-              </button>
-            ) : null}
-          </div>
+        tabs={<PageTabs tabs={procurementTabs} value={activeTab} onChange={setActiveTab} />}
+        toolbar={
+          (activeTab === 'purchases' && canManagePo) || newButtonLabel ? (
+            <div className="flex flex-wrap items-center gap-2 justify-end w-full">
+              {activeTab === 'purchases' && canManagePo ? (
+                <div className="flex flex-wrap gap-1 justify-end shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCoilPoEditDraft(null);
+                      setShowCoilPoModal(true);
+                    }}
+                    className="inline-flex items-center justify-center gap-1 rounded-lg bg-[#134e4a] text-white px-2.5 py-1.5 text-[9px] font-semibold uppercase tracking-wider shadow-sm hover:brightness-105"
+                  >
+                    <Plus size={12} strokeWidth={2} /> Coil PO
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStonePoEditDraft(null);
+                      setShowStonePoModal(true);
+                    }}
+                    className="inline-flex items-center justify-center gap-1 rounded-lg border border-teal-300 bg-teal-50 text-[#134e4a] px-2.5 py-1.5 text-[9px] font-semibold uppercase tracking-wider hover:bg-teal-100"
+                  >
+                    <Plus size={12} strokeWidth={2} /> Stone PO
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAccessoryPoEditDraft(null);
+                      setShowAccessoryPoModal(true);
+                    }}
+                    className="inline-flex items-center justify-center gap-1 rounded-lg border border-slate-300 bg-white text-[#134e4a] px-2.5 py-1.5 text-[9px] font-semibold uppercase tracking-wider hover:bg-slate-50"
+                  >
+                    <Plus size={12} strokeWidth={2} /> Accessory PO
+                  </button>
+                </div>
+              ) : null}
+              {newButtonLabel ? (
+                <button
+                  type="button"
+                  onClick={openPrimaryAction}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#134e4a] text-white px-3 py-1.5 text-[9px] font-semibold uppercase tracking-wider shadow-sm hover:brightness-105 shrink-0"
+                >
+                  <Plus size={14} strokeWidth={2} /> {newButtonLabel}
+                </button>
+              ) : null}
+            </div>
+          ) : null
         }
       />
 
@@ -751,6 +1095,17 @@ const Procurement = () => {
               {activeTab === 'purchases' && (
                 <div className="space-y-3">
                   <div className="flex flex-wrap gap-2 mb-2">
+                    {ws?.hasPermission?.('inventory.receive') ? (
+                      <button
+                        type="button"
+                        disabled={!ws?.canMutate}
+                        onClick={() => setShowStoneAccessoryReceiptModal(true)}
+                        className="inline-flex items-center gap-2 rounded-lg border border-teal-200 bg-teal-50/80 px-3 py-2 text-[10px] font-semibold uppercase text-[#134e4a] hover:bg-teal-50 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Ruler size={14} />
+                        Stone / accessory receipt
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => setShowInvoiceModal(true)}
@@ -758,23 +1113,82 @@ const Procurement = () => {
                     >
                       Supplier invoice
                     </button>
+                    {ws?.hasPermission?.('purchase_orders.manage') ? (
+                      <>
+                        <input
+                          ref={coilImportInputRef}
+                          type="file"
+                          accept=".xlsx,.xls"
+                          className="hidden"
+                          onChange={handleCoilImportFileChange}
+                        />
+                        <button
+                          type="button"
+                          disabled={!ws?.canMutate || coilImportBusy}
+                          onClick={() => coilImportInputRef.current?.click()}
+                          className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[10px] font-semibold uppercase text-[#134e4a] hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <FileSpreadsheet size={14} />
+                          {coilImportBusy ? 'Importing…' : 'Upload coil register'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => downloadCoilImportTemplate()}
+                          className="inline-flex items-center gap-2 rounded-lg border border-dashed border-slate-300 bg-slate-50/80 px-3 py-2 text-[10px] font-semibold uppercase text-slate-600 hover:bg-slate-100"
+                        >
+                          Excel template
+                        </button>
+                      </>
+                    ) : null}
                   </div>
-                  <ul className="space-y-1.5">
-                    {filteredPOs.map((p) => {
-                      const meta2 = [
-                        p.orderDateISO,
-                        `${p.lines.length} coil line(s)`,
-                        p.transportAgentName,
-                        p.transportReference ? `Ref ${p.transportReference}` : null,
-                        p.transportTreasuryMovementId ? `Treasury ${p.transportTreasuryMovementId}` : null,
-                        p.transportAmountNgn ? `Haulage ${formatNgn(p.transportAmountNgn)}` : null,
-                        p.transportPaid ? 'Haulage settled' : null,
-                        `Supplier paid ${formatNgn(p.supplierPaidNgn || 0)}`,
-                        p.transportNote ? `Note: ${p.transportNote}` : null,
-                      ]
-                        .filter(Boolean)
-                        .join(' · ');
-                      return (
+                  {editMutationNeedsSecondApprovalRole(ws?.session?.user?.roleKey) && procurementPoForApprovalUi ? (
+                    <div className="mb-2">
+                      <EditSecondApprovalInline
+                        entityKind="purchase_order"
+                        entityId={procurementPoForApprovalUi}
+                        value={procurementPoEditApprovalId}
+                        onChange={setProcurementPoEditApprovalId}
+                      />
+                    </div>
+                  ) : null}
+                  {ws?.hasPermission?.('purchase_orders.manage') ? (
+                    <p className="text-[9px] text-slate-500 leading-snug max-w-3xl">
+                      Use a row of titles (<span className="font-mono">Coil no</span>,{' '}
+                      <span className="font-mono">Product ID</span>, <span className="font-mono">Current kg</span>) or
+                      a grid with coil tags (e.g. CL-26-…), product codes (COIL-ALU / PRD-102), and kg in separate
+                      columns. Rows upsert by coil number; stock reconciles from lots.
+                    </p>
+                  ) : null}
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 min-w-0">
+                    {[
+                      { title: 'Coil (kg)', list: coilPOsFiltered, empty: 'No coil purchase orders.' },
+                      { title: 'Stone-coated (m)', list: stonePOsFiltered, empty: 'No stone-coated POs.' },
+                      { title: 'Accessories', list: accessoryPOsFiltered, empty: 'No accessory POs.' },
+                    ].map((col) => (
+                      <div key={col.title} className="min-w-0 flex flex-col">
+                        <h3 className="text-[10px] font-bold uppercase tracking-wide text-slate-600 mb-2 border-b border-slate-200 pb-1">
+                          {col.title}
+                        </h3>
+                        {col.list.length === 0 ? (
+                          <p className="text-[10px] text-slate-400 py-3">{col.empty}</p>
+                        ) : (
+                          <ul className="space-y-1.5 flex-1 min-h-0">
+                            {col.list.map((p) => {
+                              const pk = procurementKindFromPo(p);
+                              const meta2 = [
+                                p.orderDateISO,
+                                `${p.lines.length} ${poLineSummaryLabel(pk)}`,
+                                p.transportAgentName,
+                                p.transportReference ? `Ref ${p.transportReference}` : null,
+                                p.transportTreasuryMovementId ? `Treasury ${p.transportTreasuryMovementId}` : null,
+                                p.transportAmountNgn ? `Haulage ${formatNgn(p.transportAmountNgn)}` : null,
+                                p.transportPaid ? 'Haulage settled' : null,
+                                `Supplier paid ${formatNgn(p.supplierPaidNgn || 0)}`,
+                                p.transportNote ? `Note: ${p.transportNote}` : null,
+                              ]
+                                .filter(Boolean)
+                                .join(' · ');
+                              return (
                         <li key={p.poID} className={CARD_ROW}>
                           <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
                             <div className="min-w-0 leading-tight flex-1">
@@ -784,8 +1198,11 @@ const Procurement = () => {
                                   <span className="font-medium text-slate-600"> · {p.supplierName}</span>
                                 </p>
                                 <div className="flex items-center gap-1.5 shrink-0">
-                                  <span className="text-[11px] font-black text-[#134e4a] tabular-nums">
-                                    {formatNgn(poTotalNgn(p))}
+                                  <span
+                                    className="text-[11px] font-black text-[#134e4a] tabular-nums"
+                                    title="Ordered value: each line uses ₦/m (stone), ₦/unit or ₦/kg (accessory), or ₦/kg (coil), including legacy rows with only per-kg price."
+                                  >
+                                    {formatNgn(purchaseOrderOrderedValueNgn(p))}
                                   </span>
                                   <span
                                     className={`text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border ${statusChipBorder(p.status)}`}
@@ -803,15 +1220,31 @@ const Procurement = () => {
                             </div>
                           </div>
                           <div className="flex flex-wrap gap-1.5 pt-1.5 mt-1 border-t border-dashed border-slate-200">
+                            {ws?.hasPermission?.('purchase_orders.manage') ?? true ? (
+                              <button
+                                type="button"
+                                title="Edit supplier, dates, and lines"
+                                disabled={!ws?.canMutate}
+                                className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-slate-200 bg-white text-[#134e4a] hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                                onClick={() => openPoEditor(p)}
+                              >
+                                Edit PO
+                              </button>
+                            ) : null}
                             {p.status === 'Pending' ? (
                               <>
                                 <button
                                   type="button"
                                   className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md bg-[#134e4a] text-white hover:brightness-110"
                                   onClick={async () => {
-                                    const r = await setPurchaseOrderStatus(p.poID, 'Approved');
-                                    if (r.ok) showToast(`${p.poID} approved.`);
-                                    else showToast(r.error || 'Update failed', { variant: 'error' });
+                                    setProcurementPoForApprovalUi(p.poID);
+                                    const r = await setPurchaseOrderStatus(p.poID, 'Approved', {
+                                      editApprovalId: procurementPoEditApprovalId || undefined,
+                                    });
+                                    if (r.ok) {
+                                      setProcurementPoEditApprovalId('');
+                                      showToast(`${p.poID} approved.`);
+                                    } else showToast(r.error || 'Update failed', { variant: 'error' });
                                   }}
                                 >
                                   Approve
@@ -820,9 +1253,14 @@ const Procurement = () => {
                                   type="button"
                                   className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                                   onClick={async () => {
-                                    const r = await setPurchaseOrderStatus(p.poID, 'Rejected');
-                                    if (r.ok) showToast(`${p.poID} rejected.`);
-                                    else showToast(r.error || 'Update failed', { variant: 'error' });
+                                    setProcurementPoForApprovalUi(p.poID);
+                                    const r = await setPurchaseOrderStatus(p.poID, 'Rejected', {
+                                      editApprovalId: procurementPoEditApprovalId || undefined,
+                                    });
+                                    if (r.ok) {
+                                      setProcurementPoEditApprovalId('');
+                                      showToast(`${p.poID} rejected.`);
+                                    } else showToast(r.error || 'Update failed', { variant: 'error' });
                                   }}
                                 >
                                   Reject
@@ -834,6 +1272,7 @@ const Procurement = () => {
                                 type="button"
                                 className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-violet-300 bg-violet-50 text-violet-900 hover:bg-violet-100"
                                 onClick={() => {
+                                  setProcurementPoForApprovalUi(p.poID);
                                   setTransportForm({
                                     poID: p.poID,
                                     agentId: p.transportAgentId || '',
@@ -871,9 +1310,14 @@ const Procurement = () => {
                                 type="button"
                                 className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-sky-300 bg-sky-100 text-sky-900 hover:bg-sky-200"
                                 onClick={async () => {
-                                  const r = await markPurchaseTransportPaid(p.poID);
-                                  if (r.ok) showToast('Haulage marked settled (no treasury line).');
-                                  else showToast(r.error || 'Update failed', { variant: 'error' });
+                                  setProcurementPoForApprovalUi(p.poID);
+                                  const r = await markPurchaseTransportPaid(p.poID, {
+                                    editApprovalId: procurementPoEditApprovalId || undefined,
+                                  });
+                                  if (r.ok) {
+                                    setProcurementPoEditApprovalId('');
+                                    showToast('Haulage marked settled (no treasury line).');
+                                  } else showToast(r.error || 'Update failed', { variant: 'error' });
                                 }}
                               >
                                 Haulage settled
@@ -903,10 +1347,14 @@ const Procurement = () => {
                               Supplier pay
                             </button>
                           </div>
-                        </li>
-                      );
-                    })}
-                  </ul>
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 
@@ -1093,6 +1541,156 @@ const Procurement = () => {
                       {Math.round((CONVERSION_FLAG_RATIO - 1) * 100)}%+, check waste, gauge drift, or measurement.
                     </p>
                   </ProcurementFormSection>
+
+                  <ProcurementFormSection letter="S" title="Standard conversion (density & gauges)" compact>
+                    <p className="text-[10px] text-slate-600 mb-2 leading-relaxed">
+                      Theoretical <strong className="text-slate-800">kg/m</strong> for{' '}
+                      <strong className="text-slate-800">1.2 m</strong> strip width:{' '}
+                      <span className="font-mono">ρ × 1.2 × (gauge_mm ÷ 1000)</span>.
+                      Densities (as you specified):{' '}
+                      <strong className="text-slate-800">Aluminium 2.7 g/cm³</strong>,{' '}
+                      <strong className="text-slate-800">Aluzinc (PPGI) 7.8 g/cm³</strong>.                       Stonecoated is not included
+                      here — different material / build-up. Saved rows are matched to coils by stock product and gauge
+                      (and colour when listed) and used as the <strong className="text-slate-800">standard kg/m</strong> in
+                      production conversion checks.
+                    </p>
+                    <div className="rounded-2xl border border-slate-200/90 bg-white overflow-x-auto mb-3 shadow-sm">
+                      <table className="min-w-full border-collapse text-left text-sm">
+                        <thead>
+                          <tr className="border-b border-slate-200 bg-slate-50 text-xs font-bold uppercase tracking-wide text-slate-600">
+                            <th className="py-2.5 px-3">Gauge (mm)</th>
+                            <th className="py-2.5 px-3">Aluminium kg/m</th>
+                            <th className="py-2.5 px-3">Aluzinc (PPGI) kg/m</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {STANDARD_COIL_GAUGES_MM.map((gLabel) => {
+                            const mm = parseFloat(gLabel, 10);
+                            const alu = kgPerMFromStripDensity('alu', mm);
+                            const az = kgPerMFromStripDensity('aluzinc', mm);
+                            return (
+                              <tr key={gLabel} className="hover:bg-teal-50/30">
+                                <td className="py-2.5 px-3 font-semibold text-slate-800 tabular-nums whitespace-nowrap">
+                                  {gLabel}
+                                </td>
+                                <td className="py-2.5 px-3 font-mono tabular-nums text-[#134e4a] whitespace-nowrap">
+                                  {alu == null ? '—' : alu.toFixed(4)}
+                                </td>
+                                <td className="py-2.5 px-3 font-mono tabular-nums text-[#134e4a] whitespace-nowrap">
+                                  {az == null ? '—' : az.toFixed(4)}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    <form className="space-y-3" onSubmit={saveStandardConversion}>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[9px] font-bold text-slate-400 uppercase block mb-1">Material</label>
+                          <select
+                            required
+                            value={standardConversionForm.materialKey}
+                            onChange={(e) => {
+                              const key = e.target.value;
+                              const opt = procurementCoilMaterialByKey(key);
+                              setStandardConversionForm((f) => ({
+                                ...f,
+                                materialKey: key,
+                                color: opt.defaultCatalogLabel,
+                              }));
+                            }}
+                            className="w-full rounded-lg border border-slate-200 bg-white py-2 px-2.5 text-xs font-semibold"
+                          >
+                            {PROCUREMENT_COIL_MATERIALS.map((m) => (
+                              <option key={m.key} value={m.key}>
+                                {m.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-[9px] font-bold text-slate-400 uppercase block mb-1">Gauge (mm)</label>
+                          <select
+                            required
+                            value={standardConversionForm.gauge}
+                            onChange={(e) =>
+                              setStandardConversionForm((f) => ({ ...f, gauge: e.target.value }))
+                            }
+                            className="w-full rounded-lg border border-slate-200 bg-white py-2 px-2.5 text-xs font-semibold"
+                          >
+                            {STANDARD_COIL_GAUGES_MM.map((g) => (
+                              <option key={g} value={g}>
+                                {g}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-[9px] font-bold text-slate-400 uppercase block mb-1">
+                          Catalogue label (colour / grade)
+                        </label>
+                        <input
+                          value={standardConversionForm.color}
+                          onChange={(e) =>
+                            setStandardConversionForm((f) => ({ ...f, color: e.target.value }))
+                          }
+                          placeholder="Defaults from material; override e.g. IV, GB, HMB"
+                          className="w-full rounded-lg border border-slate-200 bg-white py-2 px-2.5 text-xs font-semibold"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[9px] font-bold text-slate-400 uppercase block mb-1">
+                          Override kg/m (optional)
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.000001"
+                          value={standardConversionForm.conversionKgPerM}
+                          onChange={(e) =>
+                            setStandardConversionForm((f) => ({ ...f, conversionKgPerM: e.target.value }))
+                          }
+                          placeholder="Leave empty to use density calculation"
+                          className="w-full rounded-lg border border-slate-200 bg-white py-2 px-2.5 text-xs font-semibold tabular-nums"
+                        />
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`${PILL} bg-sky-100 text-sky-900`}>
+                          Density kg/m:{' '}
+                          {standardPhysicsKgPerM == null ? '—' : standardPhysicsKgPerM.toFixed(6)}
+                        </span>
+                        <span className={`${PILL} border border-slate-200 bg-white text-slate-700`}>
+                          Will save:{' '}
+                          {standardEffectiveKgPerM == null ? '—' : standardEffectiveKgPerM.toFixed(6)} kg/m
+                        </span>
+                        {Number.isFinite(stdOverrideKgPerM) && stdOverrideKgPerM > 0 ? (
+                          <span className={`${PILL} bg-amber-100 text-amber-900`}>Using override</span>
+                        ) : null}
+                      </div>
+                      <div>
+                        <label className="text-[9px] font-bold text-slate-400 uppercase block mb-1">Note</label>
+                        <input
+                          value={standardConversionForm.label}
+                          onChange={(e) =>
+                            setStandardConversionForm((f) => ({ ...f, label: e.target.value }))
+                          }
+                          placeholder="Optional (defaults to Standard (density) · material · gauge mm)"
+                          className="w-full rounded-lg border border-slate-200 bg-white py-2 px-2.5 text-xs font-semibold"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={standardConversionSaving || !ws?.canMutate}
+                        className="z-btn-primary w-full sm:w-auto justify-center py-2.5 px-4 text-xs disabled:opacity-50"
+                      >
+                        {standardConversionSaving ? 'Saving…' : 'Save standard conversion'}
+                      </button>
+                    </form>
+                  </ProcurementFormSection>
+
                   <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
                     <p className="text-[9px] font-bold uppercase tracking-wide text-slate-500 mb-2">Live calculator</p>
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
@@ -1133,6 +1731,17 @@ const Procurement = () => {
                       </span>
                     </div>
                   </div>
+
+                  {canAccessPriceList ? (
+                    <ProcurementFormSection letter="P" title="Price list (minimum ₦/m)" compact>
+                      <p className="text-[10px] text-slate-600 mb-2 leading-relaxed">
+                        Minimum price per metre by gauge and design. Production can be blocked when a quotation is
+                        below list until the MD records a price exception.
+                      </p>
+                      <PriceListPanel embedded />
+                    </ProcurementFormSection>
+                  ) : null}
+
                   <div className="rounded-lg border border-slate-200/60 bg-white/30 backdrop-blur-md p-2 shadow-sm">
                     {procurementCatalog.length === 0 ? (
                       <p className="text-[11px] text-slate-500 py-4 px-2 text-center">
@@ -1197,16 +1806,159 @@ const Procurement = () => {
         </div>
       </div>
 
+      <StoneAccessoryReceiptModal
+        isOpen={showStoneAccessoryReceiptModal}
+        onClose={() => setShowStoneAccessoryReceiptModal(false)}
+        masterData={ws?.snapshot?.masterData ?? null}
+        products={invProducts}
+        canMutate={Boolean(ws?.canMutate)}
+        onPosted={async () => {
+          showToast('Receipt posted.');
+          await ws.refresh?.();
+        }}
+      />
+
       <CoilPurchaseOrderModal
         isOpen={showCoilPoModal}
-        onClose={() => setShowCoilPoModal(false)}
+        editDraft={coilPoEditDraft}
+        onClose={() => {
+          setShowCoilPoModal(false);
+          setCoilPoEditDraft(null);
+        }}
         suppliers={suppliers}
         masterData={ws?.snapshot?.masterData ?? null}
+        editApprovalSlot={
+          coilPoEditDraft?.poID ? (
+            <EditSecondApprovalInline
+              entityKind="purchase_order"
+              entityId={coilPoEditDraft.poID}
+              value={procurementPoEditApprovalId}
+              onChange={setProcurementPoEditApprovalId}
+            />
+          ) : null
+        }
         onQuickAddSupplier={() => {
           setShowCoilPoModal(false);
+          setCoilPoEditDraft(null);
           openSupplierModal();
         }}
         onSubmit={async (payload) => {
+          if (payload.poID) {
+            const { poID, ...rest } = payload;
+            const res = await updatePurchaseOrder({
+              poID,
+              ...rest,
+              editApprovalId: procurementPoEditApprovalId || undefined,
+            });
+            if (!res.ok) {
+              showToast(res.error || 'Could not update PO', { variant: 'error' });
+              return false;
+            }
+            setProcurementPoEditApprovalId('');
+            showToast(`${poID} updated.`);
+            return true;
+          }
+          const res = await createPurchaseOrder({ ...payload, status: 'Pending' });
+          if (!res.ok) {
+            showToast(res.error || 'Could not save PO', { variant: 'error' });
+            return false;
+          }
+          showToast(`${res.poID} created — approve, then assign transport.`);
+          return true;
+        }}
+      />
+
+      <StonePurchaseOrderModal
+        isOpen={showStonePoModal}
+        editDraft={stonePoEditDraft}
+        onClose={() => {
+          setShowStonePoModal(false);
+          setStonePoEditDraft(null);
+        }}
+        suppliers={suppliers}
+        masterData={ws?.snapshot?.masterData ?? null}
+        products={invProducts}
+        editApprovalSlot={
+          stonePoEditDraft?.poID ? (
+            <EditSecondApprovalInline
+              entityKind="purchase_order"
+              entityId={stonePoEditDraft.poID}
+              value={procurementPoEditApprovalId}
+              onChange={setProcurementPoEditApprovalId}
+            />
+          ) : null
+        }
+        onQuickAddSupplier={() => {
+          setShowStonePoModal(false);
+          setStonePoEditDraft(null);
+          openSupplierModal();
+        }}
+        onSubmit={async (payload) => {
+          if (payload.poID) {
+            const { poID, ...rest } = payload;
+            const res = await updatePurchaseOrder({
+              poID,
+              ...rest,
+              editApprovalId: procurementPoEditApprovalId || undefined,
+            });
+            if (!res.ok) {
+              showToast(res.error || 'Could not update PO', { variant: 'error' });
+              return false;
+            }
+            setProcurementPoEditApprovalId('');
+            showToast(`${poID} updated.`);
+            return true;
+          }
+          const res = await createPurchaseOrder({ ...payload, status: 'Pending' });
+          if (!res.ok) {
+            showToast(res.error || 'Could not save PO', { variant: 'error' });
+            return false;
+          }
+          showToast(`${res.poID} created — approve, then assign transport.`);
+          return true;
+        }}
+      />
+
+      <AccessoryPurchaseOrderModal
+        isOpen={showAccessoryPoModal}
+        editDraft={accessoryPoEditDraft}
+        onClose={() => {
+          setShowAccessoryPoModal(false);
+          setAccessoryPoEditDraft(null);
+        }}
+        suppliers={suppliers}
+        products={invProducts}
+        editApprovalSlot={
+          accessoryPoEditDraft?.poID ? (
+            <EditSecondApprovalInline
+              entityKind="purchase_order"
+              entityId={accessoryPoEditDraft.poID}
+              value={procurementPoEditApprovalId}
+              onChange={setProcurementPoEditApprovalId}
+            />
+          ) : null
+        }
+        onQuickAddSupplier={() => {
+          setShowAccessoryPoModal(false);
+          setAccessoryPoEditDraft(null);
+          openSupplierModal();
+        }}
+        onSubmit={async (payload) => {
+          if (payload.poID) {
+            const { poID, ...rest } = payload;
+            const res = await updatePurchaseOrder({
+              poID,
+              ...rest,
+              editApprovalId: procurementPoEditApprovalId || undefined,
+            });
+            if (!res.ok) {
+              showToast(res.error || 'Could not update PO', { variant: 'error' });
+              return false;
+            }
+            setProcurementPoEditApprovalId('');
+            showToast(`${poID} updated.`);
+            return true;
+          }
           const res = await createPurchaseOrder({ ...payload, status: 'Pending' });
           if (!res.ok) {
             showToast(res.error || 'Could not save PO', { variant: 'error' });
@@ -1225,6 +1977,16 @@ const Procurement = () => {
             until you use <strong>Post to in transit</strong> (optionally with a treasury payment linked to
             this PO). Store / Production see it as in transit only after that post.
           </p>
+          {transportForm.poID ? (
+            <div className="mb-4">
+              <EditSecondApprovalInline
+                entityKind="purchase_order"
+                entityId={transportForm.poID}
+                value={procurementPoEditApprovalId}
+                onChange={setProcurementPoEditApprovalId}
+              />
+            </div>
+          ) : null}
           <form
             className="space-y-4"
             onSubmit={async (e) => {
@@ -1239,11 +2001,13 @@ const Procurement = () => {
                 transportAgentName: ag.name,
                 transportReference: transportForm.transportReference,
                 transportNote: transportForm.transportNote,
+                editApprovalId: procurementPoEditApprovalId || undefined,
               });
               if (!r.ok) {
                 showToast(r.error || 'Link failed', { variant: 'error' });
                 return;
               }
+              setProcurementPoEditApprovalId('');
               setShowTransportModal(false);
               showToast('Transport linked — PO is on loading until you post to in transit.');
             }}
@@ -1529,6 +2293,7 @@ const Procurement = () => {
         onClose={() => {
           setShowSupplierModal(false);
           setEditingSupplierId(null);
+          setSupplierEditApprovalId('');
         }}
       >
         <div className="z-modal-panel max-w-md p-8">
@@ -1541,6 +2306,7 @@ const Procurement = () => {
               onClick={() => {
                 setShowSupplierModal(false);
                 setEditingSupplierId(null);
+                setSupplierEditApprovalId('');
               }}
               className="p-2 text-slate-400"
             >
@@ -1600,6 +2366,14 @@ const Procurement = () => {
                 className="w-full bg-slate-50 border border-slate-200 rounded-xl py-3 px-4 text-sm"
               />
             </div>
+            {editingSupplierId ? (
+              <EditSecondApprovalInline
+                entityKind="supplier"
+                entityId={editingSupplierId}
+                value={supplierEditApprovalId}
+                onChange={setSupplierEditApprovalId}
+              />
+            ) : null}
             <button type="submit" className="z-btn-primary w-full justify-center py-3">
               {editingSupplierId ? 'Update supplier' : 'Save supplier'}
             </button>
@@ -1612,6 +2386,7 @@ const Procurement = () => {
         onClose={() => {
           setShowAgentModal(false);
           setEditingAgentId(null);
+          setAgentEditApprovalId('');
         }}
       >
         <div className="z-modal-panel max-w-md p-8">
@@ -1624,6 +2399,7 @@ const Procurement = () => {
               onClick={() => {
                 setShowAgentModal(false);
                 setEditingAgentId(null);
+                setAgentEditApprovalId('');
               }}
               className="p-2 text-slate-400"
             >
@@ -1650,6 +2426,14 @@ const Procurement = () => {
               onChange={(e) => setAgentForm((f) => ({ ...f, region: e.target.value }))}
               className="w-full rounded-xl border border-slate-200 py-3 px-4 text-sm"
             />
+            {editingAgentId ? (
+              <EditSecondApprovalInline
+                entityKind="transport_agent"
+                entityId={editingAgentId}
+                value={agentEditApprovalId}
+                onChange={setAgentEditApprovalId}
+              />
+            ) : null}
             <button type="submit" className="z-btn-primary w-full justify-center py-3">
               {editingAgentId ? 'Update agent' : 'Save agent'}
             </button>
@@ -1660,6 +2444,16 @@ const Procurement = () => {
       <ModalFrame isOpen={showInvoiceModal} onClose={() => setShowInvoiceModal(false)}>
         <div className="z-modal-panel max-w-md p-8">
           <h3 className="text-lg font-bold text-[#134e4a] mb-4">Attach supplier invoice</h3>
+          {invoiceForm.poID ? (
+            <div className="mb-4">
+              <EditSecondApprovalInline
+                entityKind="purchase_order"
+                entityId={invoiceForm.poID}
+                value={procurementPoEditApprovalId}
+                onChange={setProcurementPoEditApprovalId}
+              />
+            </div>
+          ) : null}
           <form
             className="space-y-4"
             onSubmit={async (e) => {
@@ -1668,11 +2462,13 @@ const Procurement = () => {
                 invoiceNo: invoiceForm.invoiceNo,
                 invoiceDateISO: invoiceForm.invoiceDateISO,
                 deliveryDateISO: invoiceForm.deliveryDateISO,
+                editApprovalId: procurementPoEditApprovalId || undefined,
               });
               if (!r.ok) {
                 showToast(r.error || 'Save failed', { variant: 'error' });
                 return;
               }
+              setProcurementPoEditApprovalId('');
               setShowInvoiceModal(false);
               showToast('Invoice details saved on PO.');
             }}

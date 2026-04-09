@@ -99,9 +99,9 @@ function mapRoleKey(raw) {
 function mapBranchId(raw) {
   const s = String(raw ?? '').toLowerCase();
   if (s.includes('jalingo')) return null;
-  if (s.includes('yola')) return 'BR-YOL';
-  if (s.includes('maiduguri') || s.includes('maig')) return 'BR-MAI';
-  if (s.includes('kaduna') || s.includes('hq') || s.includes('head office') || s.includes('kano')) return 'BR-KAD';
+  if (s.includes('yola')) return 'BR-YL';
+  if (s.includes('maiduguri') || s.includes('maig')) return 'BR-MDG';
+  if (s.includes('kaduna') || s.includes('hq') || s.includes('head office') || s.includes('kano')) return 'BR-KD';
   if (/^br-/i.test(String(raw ?? '').trim())) {
     const id = String(raw).trim().toUpperCase();
     if (id.startsWith('BR-')) return id;
@@ -112,9 +112,9 @@ function mapBranchId(raw) {
 function branchIdFromSectionLabel(label) {
   const s = String(label ?? '').trim().toLowerCase();
   if (!s) return null;
-  if (s === 'kaduna') return 'BR-KAD';
-  if (s === 'yola') return 'BR-YOL';
-  if (s === 'maiduguri') return 'BR-MAI';
+  if (s === 'kaduna') return 'BR-KD';
+  if (s === 'yola') return 'BR-YL';
+  if (s === 'maiduguri') return 'BR-MDG';
   if (s === 'jalingo') return null;
   return null;
 }

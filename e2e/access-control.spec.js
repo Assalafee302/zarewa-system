@@ -68,11 +68,9 @@ test.describe('Role-based access (API + UI)', () => {
     expect(cust.status()).toBe(403);
 
     const search = await page.request.get('/api/workspace/search?q=QT');
-    expect(search.status()).toBe(200);
+    expect(search.status()).toBe(403);
     const sJson = await search.json();
-    expect(sJson.ok).toBe(true);
-    expect(Array.isArray(sJson.results)).toBe(true);
-    expect(sJson.results.length).toBe(0);
+    expect(sJson.ok).toBe(false);
   });
 
   test('CEO: executive dashboard UI loads', async ({ page }) => {
@@ -103,7 +101,7 @@ test.describe('Role-based access (API + UI)', () => {
     await signInViaApi(page, 'md', 'Md@1234567890!');
     await page.goto('/');
     await expect(page).toHaveURL(/\/manager$/, { timeout: 20_000 });
-    await expect(page.getByRole('heading', { name: /manager dashboard/i })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('button', { name: /mark attendance/i })).toBeVisible({ timeout: 15_000 });
   });
 
   test('branch manager: refunds list readable (approval lane)', async ({ page }) => {

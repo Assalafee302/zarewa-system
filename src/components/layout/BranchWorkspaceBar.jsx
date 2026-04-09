@@ -45,29 +45,42 @@ export function BranchWorkspaceBar() {
 
   if (!ws.apiOnline || branches.length === 0) return null;
 
+  const activeBranch = branches.find((b) => b.id === currentId) || branches[0] || null;
+
   return (
     <div className="flex w-full min-w-0 flex-col gap-1 sm:w-auto sm:flex-row sm:items-center sm:gap-3">
-      <div className="flex min-w-0 w-full items-center gap-2 rounded-2xl border border-gray-100/90 bg-white/95 px-3 py-2.5 shadow-sm sm:w-auto sm:py-2">
-        <Building2 size={16} className="shrink-0 text-[#134e4a]/70" aria-hidden />
-        <div className="min-w-0 flex-1">
-          <label htmlFor="zarewa-branch-workspace" className="sr-only">
-            Active branch
-          </label>
-          <select
-            id="zarewa-branch-workspace"
-            value={currentId || (branches[0]?.id ?? '')}
-            onChange={onBranchChange}
-            disabled={busy}
-            className="z-toolbar-shell w-full min-w-0 max-w-none cursor-pointer truncate bg-transparent text-[11px] font-bold uppercase tracking-wide text-[#134e4a] outline-none disabled:opacity-50 sm:max-w-[240px]"
-          >
-            {branches.map((b) => (
-              <option key={b.id} value={b.id}>
-                {b.name || b.code || b.id}
-              </option>
-            ))}
-          </select>
+      {isHqRole ? (
+        <div className="flex min-w-0 w-full items-center gap-2 rounded-2xl border border-gray-100/90 bg-white/95 px-3 py-2.5 shadow-sm sm:w-auto sm:py-2">
+          <Building2 size={16} className="shrink-0 text-[#134e4a]/70" aria-hidden />
+          <div className="min-w-0 flex-1">
+            <label htmlFor="zarewa-branch-workspace" className="sr-only">
+              Active branch
+            </label>
+            <select
+              id="zarewa-branch-workspace"
+              value={currentId || (branches[0]?.id ?? '')}
+              onChange={onBranchChange}
+              disabled={busy}
+              className="z-toolbar-shell w-full min-w-0 max-w-none cursor-pointer truncate bg-transparent text-[11px] font-bold uppercase tracking-wide text-[#134e4a] outline-none disabled:opacity-50 sm:max-w-[240px]"
+            >
+              {branches.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name || b.code || b.id}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="flex min-w-0 w-full items-center gap-2 rounded-2xl border border-gray-100/90 bg-white/95 px-3 py-2.5 shadow-sm sm:w-auto sm:py-2">
+          <Building2 size={16} className="shrink-0 text-[#134e4a]/70" aria-hidden />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[11px] font-bold uppercase tracking-wide text-[#134e4a]">
+              {activeBranch ? activeBranch.name || activeBranch.code || activeBranch.id : 'Branch'}
+            </p>
+          </div>
+        </div>
+      )}
 
       {canHqRollup ? (
         <label className="flex cursor-pointer items-center gap-2 whitespace-nowrap rounded-xl border border-gray-100/80 bg-white/80 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-gray-600 shadow-sm">

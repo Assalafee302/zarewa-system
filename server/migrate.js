@@ -1,11 +1,15 @@
 import { mapLegacyExpenseCategoryToCanonical, isAllowedExpenseCategory } from '../shared/expenseCategories.js';
+import { ensureEditApprovalTable } from './editApproval.js';
 import { seedDefaultGlAccounts } from './glOps.js';
+import { migrateTimestampStyleDocumentIds } from './migrateTimestampDocIds.js';
+import { deriveProcurementKindFromProductIds } from './procurementPoKind.js';
 
 /**
  * Idempotent SQLite migrations for existing DB files (CREATE IF NOT EXISTS misses new columns).
  * @param {import('better-sqlite3').Database} db
  */
 export function runMigrations(db) {
+  ensureEditApprovalTable(db);
   const tableCols = (name) => {
     const rows = db.prepare(`PRAGMA table_info(${name})`).all();
     return new Set(rows.map((c) => c.name));
@@ -30,10 +34,37 @@ export function runMigrations(db) {
   if (!q.has('manager_production_approved_at_iso')) {
     db.exec(`ALTER TABLE quotations ADD COLUMN manager_production_approved_at_iso TEXT`);
   }
+  if (!q.has('md_price_exception_approved_at_iso')) {
+    db.exec(`ALTER TABLE quotations ADD COLUMN md_price_exception_approved_at_iso TEXT`);
+  }
+  if (!q.has('md_price_exception_approved_by_user_id')) {
+    db.exec(`ALTER TABLE quotations ADD COLUMN md_price_exception_approved_by_user_id TEXT`);
+  }
+  if (!q.has('archived')) {
+    db.exec(`ALTER TABLE quotations ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!q.has('quotation_lifecycle_note')) {
+    db.exec(`ALTER TABLE quotations ADD COLUMN quotation_lifecycle_note TEXT`);
+  }
 
   const r = tableCols('sales_receipts');
   if (!r.has('ledger_entry_id')) {
     db.exec(`ALTER TABLE sales_receipts ADD COLUMN ledger_entry_id TEXT`);
+  }
+  if (r.size && !r.has('bank_confirmed_at_iso')) {
+    db.exec(`ALTER TABLE sales_receipts ADD COLUMN bank_confirmed_at_iso TEXT`);
+  }
+  if (r.size && !r.has('bank_confirmed_by_user_id')) {
+    db.exec(`ALTER TABLE sales_receipts ADD COLUMN bank_confirmed_by_user_id TEXT`);
+  }
+  if (r.size && !r.has('bank_received_amount_ngn')) {
+    db.exec(`ALTER TABLE sales_receipts ADD COLUMN bank_received_amount_ngn INTEGER`);
+  }
+  if (r.size && !r.has('finance_delivery_cleared_at_iso')) {
+    db.exec(`ALTER TABLE sales_receipts ADD COLUMN finance_delivery_cleared_at_iso TEXT`);
+  }
+  if (r.size && !r.has('finance_delivery_cleared_by_user_id')) {
+    db.exec(`ALTER TABLE sales_receipts ADD COLUMN finance_delivery_cleared_by_user_id TEXT`);
   }
 
   const ledger = tableCols('ledger_entries');
@@ -208,6 +239,14 @@ export function runMigrations(db) {
   if (!productionJobs.has('manager_review_remark')) {
     db.exec(`ALTER TABLE production_jobs ADD COLUMN manager_review_remark TEXT`);
   }
+  if (!productionJobs.has('coil_spec_mismatch_pending')) {
+    db.exec(`ALTER TABLE production_jobs ADD COLUMN coil_spec_mismatch_pending INTEGER NOT NULL DEFAULT 0`);
+  }
+
+  const pjc = tableCols('production_job_coils');
+  if (pjc.size > 0 && !pjc.has('spec_mismatch')) {
+    db.exec(`ALTER TABLE production_job_coils ADD COLUMN spec_mismatch INTEGER NOT NULL DEFAULT 0`);
+  }
 
   const refunds = tableCols('customer_refunds');
   // Legacy DBs: refunds table existed before workflow status column (listManagementItems filters on it).
@@ -229,11 +268,8 @@ export function runMigrations(db) {
   if (!refunds.has('requested_by_user_id')) {
     db.exec(`ALTER TABLE customer_refunds ADD COLUMN requested_by_user_id TEXT`);
   }
-  db.exec(`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_refunds_single_pending
-      ON customer_refunds(quotation_ref, product)
-      WHERE status IN ('Pending', 'Approved');
-  `);
+  // Legacy index blocked multiple refund requests per quotation (product defaulted to "—").
+  db.exec(`DROP INDEX IF EXISTS idx_customer_refunds_single_pending`);
   db.exec(`
     UPDATE customer_refunds
     SET suggested_lines_json = CASE
@@ -249,6 +285,37 @@ export function runMigrations(db) {
           ELSE COALESCE(paid_amount_ngn, 0)
         END
   `);
+
+  const brl = tableCols('bank_reconciliation_lines');
+  if (brl.size > 0) {
+    if (!brl.has('settled_amount_ngn')) {
+      db.exec(`ALTER TABLE bank_reconciliation_lines ADD COLUMN settled_amount_ngn INTEGER`);
+    }
+    if (!brl.has('matched_system_amount_ngn')) {
+      db.exec(`ALTER TABLE bank_reconciliation_lines ADD COLUMN matched_system_amount_ngn INTEGER`);
+    }
+    if (!brl.has('variance_ngn')) {
+      db.exec(`ALTER TABLE bank_reconciliation_lines ADD COLUMN variance_ngn INTEGER`);
+    }
+    if (!brl.has('variance_percent')) {
+      db.exec(`ALTER TABLE bank_reconciliation_lines ADD COLUMN variance_percent REAL`);
+    }
+    if (!brl.has('treasury_account_id')) {
+      db.exec(`ALTER TABLE bank_reconciliation_lines ADD COLUMN treasury_account_id INTEGER`);
+    }
+    if (!brl.has('treasury_adjustment_movement_id')) {
+      db.exec(`ALTER TABLE bank_reconciliation_lines ADD COLUMN treasury_adjustment_movement_id TEXT`);
+    }
+    if (!brl.has('manager_cleared_at_iso')) {
+      db.exec(`ALTER TABLE bank_reconciliation_lines ADD COLUMN manager_cleared_at_iso TEXT`);
+    }
+    if (!brl.has('manager_cleared_by_user_id')) {
+      db.exec(`ALTER TABLE bank_reconciliation_lines ADD COLUMN manager_cleared_by_user_id TEXT`);
+    }
+    if (!brl.has('manager_cleared_by_name')) {
+      db.exec(`ALTER TABLE bank_reconciliation_lines ADD COLUMN manager_cleared_by_name TEXT`);
+    }
+  }
 
   const customers = tableCols('customers');
   if (!customers.has('company_name')) {
@@ -345,6 +412,7 @@ export function runMigrations(db) {
       manager_review_signed_by_user_id TEXT,
       manager_review_signed_by_name TEXT,
       manager_review_remark TEXT,
+      coil_spec_mismatch_pending INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (cutting_list_id) REFERENCES cutting_lists(id)
     );
 
@@ -362,6 +430,7 @@ export function runMigrations(db) {
       meters_produced REAL NOT NULL DEFAULT 0,
       actual_conversion_kg_per_m REAL,
       allocation_status TEXT NOT NULL DEFAULT 'Allocated',
+      spec_mismatch INTEGER NOT NULL DEFAULT 0,
       note TEXT,
       allocated_at_iso TEXT NOT NULL,
       FOREIGN KEY (job_id) REFERENCES production_jobs(job_id) ON DELETE CASCADE,
@@ -431,14 +500,16 @@ export function runMigrations(db) {
       density_kg_per_m3 REAL NOT NULL DEFAULT 0,
       width_m REAL NOT NULL DEFAULT 1.2,
       active INTEGER NOT NULL DEFAULT 1,
-      sort_order INTEGER NOT NULL DEFAULT 0
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      inventory_model TEXT NOT NULL DEFAULT 'coil_kg'
     );
 
     CREATE TABLE IF NOT EXISTS setup_profiles (
       profile_id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       active INTEGER NOT NULL DEFAULT 1,
-      sort_order INTEGER NOT NULL DEFAULT 0
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      material_type_id TEXT
     );
 
     CREATE TABLE IF NOT EXISTS setup_price_lists (
@@ -546,15 +617,498 @@ export function runMigrations(db) {
   `);
 
   migrateBranches(db);
+  migrateCanonicalBranchIds(db);
+  migrateTimestampStyleDocumentIds(db);
   migrateCoilMaterialOps(db);
   migrateWorkflowExtensions(db);
+  migrateWipBalancesBranchComposite(db);
   migratePrd101ToCoilAlu(db);
   migrateMaterialTypeLabels(db);
+  migrateProcurementCoilMaterials(db);
+  migrateCoilSkuProductsBranchGlobal(db);
   migrateUserProfileAndPasswordReset(db);
   migrateHrStaffProfileColumns(db);
   migrateAccountingLayer(db);
   migrateExpenseCategoriesToCanonical(db);
   migrateAccessoryOperations(db);
+  migratePriceListAndPayrollMd(db);
+  migrateProductionCompletionAdjustments(db);
+  migrateStoneCoatedAndPricingArch(db);
+  migrateProcurementOrderKind(db);
+  migrateHrExcellence2026(db);
+  migrateWorkspaceSearchIndexes(db);
+  migrateInterBranchLoans(db);
+}
+
+/** Inter-branch treasury lending (MD-approved disbursement + repayment history). */
+function migrateInterBranchLoans(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS inter_branch_loans (
+      loan_id TEXT PRIMARY KEY,
+      created_at_iso TEXT NOT NULL,
+      created_by_user_id TEXT,
+      created_by_name TEXT,
+      lender_branch_id TEXT NOT NULL,
+      borrower_branch_id TEXT NOT NULL,
+      principal_ngn INTEGER NOT NULL,
+      repaid_ngn INTEGER NOT NULL DEFAULT 0,
+      from_treasury_account_id INTEGER NOT NULL,
+      to_treasury_account_id INTEGER NOT NULL,
+      date_iso TEXT NOT NULL,
+      reference TEXT,
+      repayment_plan_json TEXT,
+      status TEXT NOT NULL,
+      proposed_note TEXT,
+      md_approved_at_iso TEXT,
+      md_approved_by_user_id TEXT,
+      md_approved_by_name TEXT,
+      md_rejected_at_iso TEXT,
+      md_reject_note TEXT,
+      treasury_batch_id TEXT,
+      executed_at_iso TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_inter_branch_loans_branches
+      ON inter_branch_loans(lender_branch_id, borrower_branch_id, status);
+    CREATE TABLE IF NOT EXISTS inter_branch_loan_repayments (
+      id TEXT PRIMARY KEY,
+      loan_id TEXT NOT NULL,
+      posted_at_iso TEXT NOT NULL,
+      amount_ngn INTEGER NOT NULL,
+      from_treasury_account_id INTEGER NOT NULL,
+      to_treasury_account_id INTEGER NOT NULL,
+      treasury_batch_id TEXT,
+      note TEXT,
+      created_by_user_id TEXT,
+      created_by_name TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_inter_branch_loan_repayments_loan
+      ON inter_branch_loan_repayments(loan_id, posted_at_iso);
+  `);
+}
+
+/** Branch equality filters for workspace quick search (after branch_id columns exist). */
+function migrateWorkspaceSearchIndexes(db) {
+  const hasBranchCol = (table) => {
+    try {
+      return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === 'branch_id');
+    } catch {
+      return false;
+    }
+  };
+  const ensure = (indexName, table) => {
+    if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`).get(table)) return;
+    if (!hasBranchCol(table)) return;
+    db.exec(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${table}(branch_id)`);
+  };
+  ensure('idx_ws_customers_branch', 'customers');
+  ensure('idx_ws_quotations_branch', 'quotations');
+  ensure('idx_ws_sales_receipts_branch', 'sales_receipts');
+  ensure('idx_ws_purchase_orders_branch', 'purchase_orders');
+  ensure('idx_ws_suppliers_branch', 'suppliers');
+  ensure('idx_ws_cutting_lists_branch', 'cutting_lists');
+  ensure('idx_ws_coil_lots_branch', 'coil_lots');
+  ensure('idx_ws_customer_refunds_branch', 'customer_refunds');
+  ensure('idx_ws_products_branch', 'products');
+  ensure('idx_ws_hr_staff_profiles_branch', 'hr_staff_profiles');
+}
+
+/** Coil vs stone-metre vs accessory PO classification for dashboards. */
+function migrateProcurementOrderKind(db) {
+  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='purchase_orders'`).get()) return;
+  const cols = new Set(db.prepare(`PRAGMA table_info(purchase_orders)`).all().map((c) => c.name));
+  if (!cols.has('procurement_kind')) {
+    db.exec(`ALTER TABLE purchase_orders ADD COLUMN procurement_kind TEXT NOT NULL DEFAULT 'coil'`);
+  }
+  const pos = db.prepare(`SELECT po_id FROM purchase_orders`).all();
+  const lineStmt = db.prepare(`SELECT product_id FROM purchase_order_lines WHERE po_id = ?`);
+  const upd = db.prepare(`UPDATE purchase_orders SET procurement_kind = ? WHERE po_id = ?`);
+  for (const { po_id } of pos) {
+    const lines = lineStmt.all(po_id);
+    const kind = deriveProcurementKindFromProductIds(lines.map((l) => l.product_id));
+    upd.run(kind, po_id);
+  }
+}
+
+/** Stone-coated routing, profile scoping, colours, accessory SKUs, extended price_list_items. */
+function migrateStoneCoatedAndPricingArch(db) {
+  const tableCols = (name) => {
+    try {
+      return new Set(db.prepare(`PRAGMA table_info(${name})`).all().map((c) => c.name));
+    } catch {
+      return new Set();
+    }
+  };
+
+  const mtCols = tableCols('setup_material_types');
+  if (mtCols.size && !mtCols.has('inventory_model')) {
+    db.exec(`ALTER TABLE setup_material_types ADD COLUMN inventory_model TEXT NOT NULL DEFAULT 'coil_kg'`);
+  }
+  if (db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='setup_material_types'`).get()) {
+    db.prepare(`UPDATE setup_material_types SET inventory_model = 'coil_kg' WHERE material_type_id IN ('MAT-001','MAT-002')`).run();
+    db.prepare(`UPDATE setup_material_types SET inventory_model = 'finished_good' WHERE material_type_id = 'MAT-003'`).run();
+    db.prepare(`UPDATE setup_material_types SET inventory_model = 'consumable' WHERE material_type_id = 'MAT-004'`).run();
+    const hasStone = db.prepare(`SELECT 1 FROM setup_material_types WHERE material_type_id = 'MAT-005'`).get();
+    if (!hasStone) {
+      db.prepare(
+        `INSERT INTO setup_material_types (material_type_id, name, density_kg_per_m3, width_m, active, sort_order, inventory_model)
+         VALUES ('MAT-005','Stone coated',0,0,1,4,'stone_meter')`
+      ).run();
+    } else {
+      db.prepare(`UPDATE setup_material_types SET inventory_model = 'stone_meter', name = 'Stone coated' WHERE material_type_id = 'MAT-005'`).run();
+    }
+  }
+
+  const prCols = tableCols('setup_profiles');
+  if (prCols.size && !prCols.has('material_type_id')) {
+    db.exec(`ALTER TABLE setup_profiles ADD COLUMN material_type_id TEXT`);
+  }
+  if (db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='setup_profiles'`).get()) {
+    db.prepare(
+      `UPDATE setup_profiles SET material_type_id = 'MAT-002' WHERE material_type_id IS NULL OR trim(material_type_id) = ''`
+    ).run();
+    const stoneProfiles = [
+      ['PROF-007', 'Milano', 7],
+      ['PROF-008', 'Bond', 8],
+      ['PROF-009', 'Classic', 9],
+      ['PROF-010', 'Shingle', 10],
+    ];
+    for (const [pid, pname, sort] of stoneProfiles) {
+      const ex = db.prepare(`SELECT 1 FROM setup_profiles WHERE profile_id = ?`).get(pid);
+      if (!ex) {
+        db.prepare(
+          `INSERT INTO setup_profiles (profile_id, name, active, sort_order, material_type_id) VALUES (?,?,1,?,'MAT-005')`
+        ).run(pid, pname, sort);
+      }
+    }
+  }
+
+  const colourPairs = [
+    ['Black', 'BLK'],
+    ['Coffee brown', 'CFB'],
+    ['Red', 'RED'],
+    ['Red mix black', 'RMB'],
+    ['Red patch black', 'RPB'],
+    ['Black patch white', 'BPW'],
+    ['Coffee mix black', 'CMB'],
+  ];
+  if (db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='setup_colours'`).get()) {
+    let n = 0;
+    const maxRow = db.prepare(`SELECT colour_id FROM setup_colours ORDER BY colour_id DESC`).all();
+    for (const r of maxRow || []) {
+      const m = String(r.colour_id || '').match(/(\d+)/);
+      if (m) n = Math.max(n, parseInt(m[1], 10));
+    }
+    for (const [cname, abbr] of colourPairs) {
+      const exists = db.prepare(`SELECT 1 FROM setup_colours WHERE lower(trim(name)) = lower(?)`).get(cname);
+      if (exists) continue;
+      n += 1;
+      const cid = `COL-ST-${String(n).padStart(3, '0')}`;
+      db.prepare(
+        `INSERT INTO setup_colours (colour_id, name, abbreviation, active, sort_order) VALUES (?,?,?,?,?)`
+      ).run(cid, cname, abbr, 1, 500 + n);
+    }
+  }
+
+  const pli = tableCols('price_list_items');
+  if (pli.size) {
+    if (!pli.has('material_type_key')) db.exec(`ALTER TABLE price_list_items ADD COLUMN material_type_key TEXT NOT NULL DEFAULT ''`);
+    if (!pli.has('colour_key')) db.exec(`ALTER TABLE price_list_items ADD COLUMN colour_key TEXT NOT NULL DEFAULT ''`);
+    if (!pli.has('profile_key')) db.exec(`ALTER TABLE price_list_items ADD COLUMN profile_key TEXT NOT NULL DEFAULT ''`);
+  }
+
+  const accessoryProducts = [
+    ['ACC-DRIVE-SCREW-PACK', 'Drive screw nail (pack)', 'pack'],
+    ['ACC-SILICON-TUBE', 'Silicon (tube)', 'tube'],
+    ['ACC-RIVET-PACK', 'Rivet pin (pack)', 'pack'],
+    ['ACC-CONCRETE-NAIL-PACK', 'Concrete nail (pack)', 'pack'],
+    ['ACC-COPPER-NAIL-PACK', 'Copper nail (pack)', 'pack'],
+    ['ACC-TAPPING-SCREW-PCS', 'Tapping screw nail (pcs)', 'pcs'],
+    ['ACC-HOOKS-PCS', 'Hooks (pcs)', 'pcs'],
+  ];
+  if (db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='products'`).get()) {
+    for (const [pid, pname, unit] of accessoryProducts) {
+      const ex = db.prepare(`SELECT 1 FROM products WHERE product_id = ?`).get(pid);
+      if (ex) continue;
+      const dash = JSON.stringify({ inventoryModel: 'consumable', accessoryKind: 'accessory' });
+      db.prepare(
+        `INSERT INTO products (product_id, name, stock_level, unit, low_stock_threshold, reorder_qty, gauge, colour, material_type, dashboard_attrs_json, branch_id)
+         VALUES (?,?,0,?,0,0,'','','Accessory',?, '')`
+      ).run(pid, pname, unit, dash);
+    }
+  }
+
+  const accessoryQuoteLinks = [
+    ['SQI-005', 'Tapping Screw', 'ACC-TAPPING-SCREW-PCS', 'pcs'],
+    ['SQI-006', 'Silicon Tube', 'ACC-SILICON-TUBE', 'tube'],
+    ['SQI-007', 'Rivets', 'ACC-RIVET-PACK', 'pack'],
+    ['SQI-012', 'Drive screw nail', 'ACC-DRIVE-SCREW-PACK', 'pack'],
+    ['SQI-013', 'Rivet pin', 'ACC-RIVET-PACK', 'pack'],
+    ['SQI-014', 'Concrete nail', 'ACC-CONCRETE-NAIL-PACK', 'pack'],
+    ['SQI-015', 'Copper nail', 'ACC-COPPER-NAIL-PACK', 'pack'],
+    ['SQI-016', 'Hooks', 'ACC-HOOKS-PCS', 'pcs'],
+  ];
+  if (db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='setup_quote_items'`).get()) {
+    for (const [itemId, , invPid, unit] of accessoryQuoteLinks) {
+      const ex = db.prepare(`SELECT 1 FROM setup_quote_items WHERE item_id = ?`).get(itemId);
+      if (ex) {
+        db.prepare(`UPDATE setup_quote_items SET inventory_product_id = ?, unit = ? WHERE item_id = ?`).run(
+          invPid,
+          unit,
+          itemId
+        );
+      }
+      // Do not INSERT here: pre-seed rows make seedMasterData skip the whole quote-items table,
+      // leaving core items (e.g. SQI-001) missing and breaking setup_price_lists FKs.
+    }
+  }
+}
+
+/** HR roadmap: three-step request workflow, policy store, holidays, branch history, payroll signing, discipline & appraisals. */
+function migrateHrExcellence2026(db) {
+  const tableCols = (name) => {
+    try {
+      const rows = db.prepare(`PRAGMA table_info(${name})`).all();
+      return new Set(rows.map((c) => c.name));
+    } catch {
+      return new Set();
+    }
+  };
+  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='hr_requests'`).get()) return;
+
+  const reqC = tableCols('hr_requests');
+  if (reqC.size && !reqC.has('gm_hr_reviewer_user_id')) {
+    db.exec(`ALTER TABLE hr_requests ADD COLUMN gm_hr_reviewer_user_id TEXT`);
+  }
+  if (reqC.size && !reqC.has('gm_hr_reviewer_note')) {
+    db.exec(`ALTER TABLE hr_requests ADD COLUMN gm_hr_reviewer_note TEXT`);
+  }
+  if (reqC.size && !reqC.has('gm_hr_reviewed_at_iso')) {
+    db.exec(`ALTER TABLE hr_requests ADD COLUMN gm_hr_reviewed_at_iso TEXT`);
+  }
+  try {
+    db.prepare(`UPDATE hr_requests SET status = 'branch_manager_review' WHERE status = 'manager_review'`).run();
+  } catch {
+    /* ignore */
+  }
+
+  const prof = tableCols('hr_staff_profiles');
+  if (prof.size && !prof.has('line_manager_user_id')) {
+    db.exec(`ALTER TABLE hr_staff_profiles ADD COLUMN line_manager_user_id TEXT`);
+  }
+  if (prof.size && !prof.has('leave_entitlement_band')) {
+    db.exec(`ALTER TABLE hr_staff_profiles ADD COLUMN leave_entitlement_band TEXT`);
+  }
+
+  const pr = tableCols('hr_payroll_runs');
+  if (pr.size && !pr.has('signed_at_iso')) {
+    db.exec(`ALTER TABLE hr_payroll_runs ADD COLUMN signed_at_iso TEXT`);
+  }
+  if (pr.size && !pr.has('signed_by_user_id')) {
+    db.exec(`ALTER TABLE hr_payroll_runs ADD COLUMN signed_by_user_id TEXT`);
+  }
+  if (pr.size && !pr.has('signature_kind')) {
+    db.exec(`ALTER TABLE hr_payroll_runs ADD COLUMN signature_kind TEXT`);
+  }
+  if (pr.size && !pr.has('signed_pdf_sha256')) {
+    db.exec(`ALTER TABLE hr_payroll_runs ADD COLUMN signed_pdf_sha256 TEXT`);
+  }
+  if (pr.size && !pr.has('filing_status')) {
+    db.exec(`ALTER TABLE hr_payroll_runs ADD COLUMN filing_status TEXT`);
+  }
+  if (pr.size && !pr.has('filing_reference')) {
+    db.exec(`ALTER TABLE hr_payroll_runs ADD COLUMN filing_reference TEXT`);
+  }
+  if (pr.size && !pr.has('filing_at_iso')) {
+    db.exec(`ALTER TABLE hr_payroll_runs ADD COLUMN filing_at_iso TEXT`);
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS hr_policy_config (
+      id TEXT PRIMARY KEY,
+      effective_from_iso TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      created_at_iso TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS hr_public_holidays (
+      day_iso TEXT NOT NULL,
+      label TEXT NOT NULL,
+      scope TEXT NOT NULL DEFAULT 'NG',
+      PRIMARY KEY (day_iso, scope)
+    );
+
+    CREATE TABLE IF NOT EXISTS hr_staff_branch_history (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      from_branch_id TEXT,
+      to_branch_id TEXT NOT NULL,
+      effective_from_iso TEXT NOT NULL,
+      reason TEXT,
+      actor_user_id TEXT,
+      created_at_iso TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_hr_branch_hist_user ON hr_staff_branch_history(user_id, created_at_iso DESC);
+
+    CREATE TABLE IF NOT EXISTS hr_discipline_cases (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      branch_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      offence_category TEXT,
+      summary TEXT,
+      opened_at_iso TEXT NOT NULL,
+      opened_by_user_id TEXT,
+      FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_hr_discipline_user ON hr_discipline_cases(user_id, opened_at_iso DESC);
+
+    CREATE TABLE IF NOT EXISTS hr_discipline_events (
+      id TEXT PRIMARY KEY,
+      case_id TEXT NOT NULL,
+      event_kind TEXT NOT NULL,
+      note TEXT,
+      actor_user_id TEXT,
+      created_at_iso TEXT NOT NULL,
+      FOREIGN KEY (case_id) REFERENCES hr_discipline_cases(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_hr_discipline_events_case ON hr_discipline_events(case_id, created_at_iso DESC);
+
+    CREATE TABLE IF NOT EXISTS hr_appraisal_cycles (
+      id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      year INTEGER NOT NULL,
+      due_by_iso TEXT,
+      status TEXT NOT NULL,
+      created_at_iso TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS hr_appraisal_forms (
+      id TEXT PRIMARY KEY,
+      cycle_id TEXT NOT NULL,
+      subject_user_id TEXT NOT NULL,
+      reviewer_user_id TEXT,
+      scores_json TEXT,
+      md_confirmed INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL,
+      created_at_iso TEXT NOT NULL,
+      updated_at_iso TEXT,
+      FOREIGN KEY (cycle_id) REFERENCES hr_appraisal_cycles(id) ON DELETE CASCADE,
+      FOREIGN KEY (subject_user_id) REFERENCES app_users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_hr_appraisal_subject ON hr_appraisal_forms(subject_user_id, cycle_id);
+
+    CREATE TABLE IF NOT EXISTS hr_feedback_notes (
+      id TEXT PRIMARY KEY,
+      subject_user_id TEXT NOT NULL,
+      author_user_id TEXT,
+      body TEXT NOT NULL,
+      created_at_iso TEXT NOT NULL,
+      FOREIGN KEY (subject_user_id) REFERENCES app_users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_hr_feedback_subject ON hr_feedback_notes(subject_user_id, created_at_iso DESC);
+
+    CREATE TABLE IF NOT EXISTS hr_job_runs (
+      id TEXT PRIMARY KEY,
+      job_key TEXT NOT NULL,
+      started_at_iso TEXT NOT NULL,
+      finished_at_iso TEXT,
+      status TEXT NOT NULL,
+      detail_json TEXT
+    );
+  `);
+
+  const holCount = db.prepare(`SELECT COUNT(*) AS c FROM hr_public_holidays`).get().c;
+  if (holCount === 0) {
+    const ins = db.prepare(`INSERT OR IGNORE INTO hr_public_holidays (day_iso, label, scope) VALUES (?,?,?)`);
+    const y = new Date().getFullYear();
+    const fixed = [
+      [`${y}-01-01`, "New Year's Day", 'NG'],
+      [`${y}-05-01`, 'Workers Day', 'NG'],
+      [`${y}-12-25`, 'Christmas Day', 'NG'],
+      [`${y}-12-26`, 'Boxing Day', 'NG'],
+    ];
+    for (const [d, l, s] of fixed) ins.run(d, l, s);
+  }
+
+  const pc = db.prepare(`SELECT COUNT(*) AS c FROM hr_policy_config`).get().c;
+  if (pc === 0) {
+    const id = `HRPOL-${Date.now().toString(36)}`;
+    const now = new Date().toISOString();
+    const payload = JSON.stringify({
+      loanMinServiceYears: 3,
+      loanMaxSalaryMonths: 4,
+      loanMaxRepaymentMonths: 12,
+      maxConcurrentBranchLoans: 5,
+      annualLeaveDaysSenior: 21,
+      annualLeaveDaysJunior: 14,
+      casualLeaveDaysPerYear: 7,
+      maternityLeaveDays: 60,
+    });
+    db.prepare(
+      `INSERT INTO hr_policy_config (id, effective_from_iso, payload_json, created_at_iso) VALUES (?,?,?,?)`
+    ).run(id, now.slice(0, 10), payload, now);
+  }
+}
+
+/** Finished-goods metre adjustments after completion (audit + stock_movements; original completion unchanged). */
+function migrateProductionCompletionAdjustments(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS production_completion_adjustments (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      branch_id TEXT,
+      delta_finished_goods_m REAL NOT NULL,
+      note TEXT NOT NULL,
+      at_iso TEXT NOT NULL,
+      created_by_user_id TEXT,
+      created_by_name TEXT,
+      FOREIGN KEY (job_id) REFERENCES production_jobs(job_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_production_completion_adj_job
+      ON production_completion_adjustments(job_id, at_iso DESC);
+  `);
+}
+
+/** Price list, payroll MD approval columns, HR self-service flag. */
+function migratePriceListAndPayrollMd(db) {
+  const tableCols = (name) => {
+    try {
+      const rows = db.prepare(`PRAGMA table_info(${name})`).all();
+      return new Set(rows.map((c) => c.name));
+    } catch {
+      return new Set();
+    }
+  };
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS price_list_items (
+      id TEXT PRIMARY KEY,
+      gauge_key TEXT NOT NULL,
+      design_key TEXT NOT NULL,
+      unit_price_per_meter_ngn INTEGER NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      notes TEXT,
+      branch_id TEXT,
+      effective_from_iso TEXT,
+      updated_at_iso TEXT,
+      updated_by_user_id TEXT,
+      material_type_key TEXT NOT NULL DEFAULT '',
+      colour_key TEXT NOT NULL DEFAULT '',
+      profile_key TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_price_list_gauge_design ON price_list_items(gauge_key, design_key, branch_id);
+  `);
+  const hr = tableCols('hr_staff_profiles');
+  if (hr.size && !hr.has('self_service_eligible')) {
+    db.exec(`ALTER TABLE hr_staff_profiles ADD COLUMN self_service_eligible INTEGER NOT NULL DEFAULT 0`);
+  }
+  const pr = tableCols('hr_payroll_runs');
+  if (pr.size && !pr.has('md_approved_at_iso')) {
+    db.exec(`ALTER TABLE hr_payroll_runs ADD COLUMN md_approved_at_iso TEXT`);
+  }
+  if (pr.size && !pr.has('md_approved_by_user_id')) {
+    db.exec(`ALTER TABLE hr_payroll_runs ADD COLUMN md_approved_by_user_id TEXT`);
+  }
 }
 
 /** Quote item → inventory SKU mapping; per-job accessory fulfillment for refunds and stock. */
@@ -1056,8 +1610,77 @@ function migrateCoilMaterialOps(db) {
       'Mixed',
       'Scrap',
       '{}',
-      'BR-KAD'
+      'BR-KD'
     );
+  }
+}
+
+/** Rename legacy branch rows: BR-KAD→BR-KD (code KD), BR-YOL→BR-YL (YL), BR-MAI→BR-MDG (MDG). */
+function migrateCanonicalBranchIds(db) {
+  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='branches'`).get()) return;
+  const hasLegacy = db
+    .prepare(`SELECT 1 FROM branches WHERE id IN ('BR-KAD','BR-YOL','BR-MAI') LIMIT 1`)
+    .get();
+  if (!hasLegacy) return;
+
+  const pairs = [
+    { old: 'BR-KAD', next: 'BR-KD', code: 'KD' },
+    { old: 'BR-YOL', next: 'BR-YL', code: 'YL' },
+    { old: 'BR-MAI', next: 'BR-MDG', code: 'MDG' },
+  ];
+
+  const tablesWithBranchId = [
+    'quotations',
+    'sales_receipts',
+    'ledger_entries',
+    'cutting_lists',
+    'purchase_orders',
+    'coil_lots',
+    'deliveries',
+    'production_jobs',
+    'customer_refunds',
+    'expenses',
+    'customers',
+    'customer_crm_interactions',
+    'suppliers',
+    'transport_agents',
+    'products',
+    'bank_reconciliation_lines',
+    'stock_movements',
+    'hr_staff_profiles',
+    'hr_requests',
+    'hr_daily_roll_calls',
+    'hr_attendance_events',
+    'hr_attendance_uploads',
+    'fixed_assets',
+    'gl_journal_entries',
+    'price_list_items',
+  ];
+
+  db.pragma('foreign_keys = OFF');
+  try {
+    for (const { old, next } of pairs) {
+      for (const t of tablesWithBranchId) {
+        if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`).get(t)) continue;
+        const cols = db.prepare(`PRAGMA table_info(${t})`).all();
+        if (!cols.some((c) => c.name === 'branch_id')) continue;
+        db.prepare(`UPDATE ${t} SET branch_id = ? WHERE branch_id = ?`).run(next, old);
+      }
+      if (db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_sessions'`).get()) {
+        const sc = db.prepare(`PRAGMA table_info(user_sessions)`).all();
+        if (sc.some((c) => c.name === 'current_branch_id')) {
+          db.prepare(`UPDATE user_sessions SET current_branch_id = ? WHERE current_branch_id = ?`).run(
+            next,
+            old
+          );
+        }
+      }
+    }
+    for (const { old, next, code } of pairs) {
+      db.prepare(`UPDATE branches SET id = ?, code = ? WHERE id = ?`).run(next, code, old);
+    }
+  } finally {
+    db.pragma('foreign_keys = ON');
   }
 }
 
@@ -1085,9 +1708,9 @@ function migrateBranches(db) {
   if (bc === 0) {
     db.exec(`
       INSERT INTO branches (id, code, name, active, sort_order) VALUES
-      ('BR-KAD', 'KAD', 'Kaduna (HQ)', 1, 1),
-      ('BR-YOL', 'YOL', 'Yola Factory', 1, 2),
-      ('BR-MAI', 'MAI', 'Maiduguri Factory', 1, 3);
+      ('BR-KD', 'KD', 'Kaduna (HQ)', 1, 1),
+      ('BR-YL', 'YL', 'Yola Factory', 1, 2),
+      ('BR-MDG', 'MDG', 'Maiduguri Factory', 1, 3);
     `);
   }
 
@@ -1099,7 +1722,7 @@ function migrateBranches(db) {
     db.exec(`ALTER TABLE user_sessions ADD COLUMN view_all_branches INTEGER NOT NULL DEFAULT 0`);
   }
 
-  const defaultBranch = 'BR-KAD';
+  const defaultBranch = 'BR-KD';
   const addBranch = (table) => {
     const cols = tableCols(table);
     if (!cols.size) return;
@@ -1127,6 +1750,88 @@ function migrateBranches(db) {
   addBranch('transport_agents');
   addBranch('products');
   addBranch('bank_reconciliation_lines');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS fixed_assets (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'other',
+      branch_id TEXT NOT NULL,
+      acquisition_date_iso TEXT NOT NULL,
+      cost_ngn INTEGER NOT NULL DEFAULT 0,
+      salvage_ngn INTEGER NOT NULL DEFAULT 0,
+      useful_life_months INTEGER NOT NULL DEFAULT 60,
+      depreciation_method TEXT NOT NULL DEFAULT 'straight_line',
+      status TEXT NOT NULL DEFAULT 'active',
+      disposal_date_iso TEXT,
+      treasury_reference TEXT,
+      notes TEXT,
+      created_at_iso TEXT NOT NULL,
+      updated_at_iso TEXT NOT NULL,
+      created_by_user_id TEXT,
+      updated_by_user_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_fixed_assets_branch ON fixed_assets(branch_id);
+    CREATE TABLE IF NOT EXISTS http_idempotency (
+      user_id TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      status_code INTEGER NOT NULL,
+      body_json TEXT NOT NULL,
+      created_at_iso TEXT NOT NULL,
+      PRIMARY KEY (user_id, scope, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_http_idempotency_created ON http_idempotency(created_at_iso);
+    CREATE TABLE IF NOT EXISTS product_standard_costs (
+      product_id TEXT PRIMARY KEY,
+      standard_material_cost_ngn_per_kg INTEGER,
+      standard_overhead_ngn_per_m INTEGER,
+      effective_from_iso TEXT NOT NULL,
+      notes TEXT,
+      updated_at_iso TEXT NOT NULL,
+      updated_by_user_id TEXT
+    );
+  `);
+}
+
+/**
+ * Scope WIP by branch (matches products.branch_id; empty string = shared catalogue SKUs).
+ * Idempotent: skips when composite primary key (branch_id, product_id) already exists.
+ */
+function migrateWipBalancesBranchComposite(db) {
+  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='wip_balances'`).get()) return;
+  const cols = db.prepare(`PRAGMA table_info(wip_balances)`).all();
+  const colSet = new Set(cols.map((c) => c.name));
+  const pkCols = cols.filter((c) => c.pk).map((c) => c.name);
+  const hasCompositePk =
+    colSet.has('branch_id') && pkCols.includes('branch_id') && pkCols.includes('product_id');
+  if (hasCompositePk) return;
+
+  db.transaction(() => {
+    if (!colSet.has('branch_id')) {
+      db.exec(`ALTER TABLE wip_balances ADD COLUMN branch_id TEXT NOT NULL DEFAULT ''`);
+    }
+    const allWip = db.prepare(`SELECT rowid, product_id FROM wip_balances`).all();
+    for (const w of allWip) {
+      const p = db.prepare(`SELECT branch_id FROM products WHERE product_id = ?`).get(w.product_id);
+      const bid = p ? String(p.branch_id ?? '').trim() : '';
+      db.prepare(`UPDATE wip_balances SET branch_id = ? WHERE rowid = ?`).run(bid, w.rowid);
+    }
+
+    db.exec(`DROP TABLE IF EXISTS wip_balances__new`);
+    db.exec(`CREATE TABLE wip_balances__new (
+      branch_id TEXT NOT NULL DEFAULT '',
+      product_id TEXT NOT NULL,
+      qty REAL NOT NULL DEFAULT 0,
+      PRIMARY KEY (branch_id, product_id)
+    )`);
+    db.exec(`
+      INSERT OR REPLACE INTO wip_balances__new (branch_id, product_id, qty)
+      SELECT TRIM(COALESCE(branch_id,'')), product_id, qty FROM wip_balances
+    `);
+    db.exec(`DROP TABLE wip_balances`);
+    db.exec(`ALTER TABLE wip_balances__new RENAME TO wip_balances`);
+  })();
 }
 
 /** Align setup material type names with product.material_type (Aluminium / Aluzinc). */
@@ -1173,7 +1878,7 @@ function migratePrd101ToCoilAlu(db) {
         'Per PO / coil (HMB, GB, TB, …)',
         'Aluminium',
         dashJson,
-        'BR-KAD'
+        ''
       );
     } else {
       const cur = db.prepare(`SELECT stock_level FROM products WHERE product_id = 'COIL-ALU'`).get();
@@ -1192,14 +1897,58 @@ function migratePrd101ToCoilAlu(db) {
       db.prepare(`UPDATE procurement_catalog SET product_id = 'COIL-ALU' WHERE product_id = 'PRD-101'`).run();
     }
 
-    const oldWip = db.prepare(`SELECT qty FROM wip_balances WHERE product_id = 'PRD-101'`).get();
-    if (oldWip) {
-      const newWip = db.prepare(`SELECT qty FROM wip_balances WHERE product_id = 'COIL-ALU'`).get();
-      const mergedWip = Number(newWip?.qty || 0) + Number(oldWip.qty || 0);
-      db.prepare(`DELETE FROM wip_balances WHERE product_id IN ('PRD-101', 'COIL-ALU')`).run();
-      db.prepare(`INSERT INTO wip_balances (product_id, qty) VALUES ('COIL-ALU', ?)`).run(mergedWip);
+    const prdWipRows = db.prepare(`SELECT branch_id, qty FROM wip_balances WHERE product_id = 'PRD-101'`).all();
+    for (const pr of prdWipRows) {
+      const br = String(pr.branch_id ?? '').trim();
+      const coilRow = db
+        .prepare(`SELECT qty FROM wip_balances WHERE product_id = 'COIL-ALU' AND branch_id = ?`)
+        .get(br);
+      const mergedWip = (Number(coilRow?.qty) || 0) + (Number(pr.qty) || 0);
+      db.prepare(`DELETE FROM wip_balances WHERE product_id = 'PRD-101' AND branch_id = ?`).run(br);
+      db.prepare(`DELETE FROM wip_balances WHERE product_id = 'COIL-ALU' AND branch_id = ?`).run(br);
+      db.prepare(`INSERT INTO wip_balances (branch_id, product_id, qty) VALUES (?, 'COIL-ALU', ?)`).run(
+        br,
+        mergedWip
+      );
     }
 
     db.prepare(`DELETE FROM products WHERE product_id = 'PRD-101'`).run();
   })();
+}
+
+/** Aluzinc (PPGI) labels and Stonecoated kg coil SKU for procurement conversion. */
+function migrateProcurementCoilMaterials(db) {
+  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='products'`).get()) return;
+
+  const row102 = db.prepare(`SELECT dashboard_attrs_json FROM products WHERE product_id = 'PRD-102'`).get();
+  if (row102) {
+    let attrs = {};
+    try {
+      attrs = JSON.parse(row102.dashboard_attrs_json || '{}');
+    } catch {
+      attrs = {};
+    }
+    const dashJson = JSON.stringify({
+      gauge: attrs.gauge ?? 'Per PO / coil',
+      colour: attrs.colour ?? 'Per PO / coil',
+      materialType: 'Aluzinc (PPGI)',
+    });
+    db.prepare(
+      `UPDATE products SET name = ?, material_type = ?, dashboard_attrs_json = ? WHERE product_id = 'PRD-102'`
+    ).run('Aluzinc (PPGI) coil (kg)', 'Aluzinc (PPGI)', dashJson);
+  }
+
+  /* Stone-coated stock is metre-based (STONE-* SKUs); legacy COIL-SC kg SKU is no longer seeded. */
+}
+
+/**
+ * Coil kg SKUs use a single products row for all branches (branch_id '').
+ * Otherwise only the branch stamped on that row (e.g. BR-KD) can import coils.
+ */
+function migrateCoilSkuProductsBranchGlobal(db) {
+  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='products'`).get()) return;
+  const cols = db.prepare(`PRAGMA table_info(products)`).all();
+  if (!cols.some((c) => c.name === 'branch_id')) return;
+  db.prepare(`UPDATE products SET branch_id = '' WHERE product_id IN ('COIL-ALU','PRD-102')`).run();
+  db.prepare(`UPDATE products SET branch_id = '' WHERE product_id LIKE 'STONE-%' OR product_id LIKE 'ACC-%'`).run();
 }

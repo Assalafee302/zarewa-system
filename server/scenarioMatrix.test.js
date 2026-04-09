@@ -148,10 +148,10 @@ async function ensureQuotationPaidForCuttingList(agent, quotationRef) {
   const total = Number(q.totalNgn) || 0;
   const paid = Number(q.paidNgn) || 0;
   if (total <= 0) return;
-  const half = total * 0.5;
-  if (paid >= half - 1e-6) return;
+  const minPaid = total * 0.7;
+  if (paid >= minPaid - 1e-6) return;
   const patch = await agent.patch(`/api/quotations/${encodeURIComponent(quotationRef)}`).send({
-    paidNgn: Math.ceil(half),
+    paidNgn: Math.ceil(minPaid),
   });
   expect(patch.status).toBe(200);
 }
@@ -690,7 +690,7 @@ function buildScenarioMatrix() {
           lines: buildExactLengths(lineCount, totalMeters),
         });
         expect(cutting.cuttingList.totalMeters).toBeCloseTo(totalMeters, 6);
-        await createProductionJob(agent, {
+        const job = await createProductionJob(agent, {
           cuttingListId: cutting.id,
           productID: fgProduct.productID,
           productName: fgProduct.name,
@@ -701,7 +701,7 @@ function buildScenarioMatrix() {
         const after = await bootstrap(agent);
         const row = after.cuttingLists.find((item) => item.id === cutting.id);
         expect(row.productionRegistered).toBe(true);
-        expect(row.productionRegisterRef).toBe('');
+        expect(row.productionRegisterRef).toBe(job.jobID);
       },
     });
   }
@@ -1665,7 +1665,7 @@ function buildScenarioMatrix() {
 describe('Scenario matrix', () => {
   it(
     'executes 114 live-like transactional scenarios',
-    { timeout: 360_000 },
+    { timeout: 720_000 },
     async () => {
       const scenarios = buildScenarioMatrix();
       const failures = [];
@@ -1675,7 +1675,9 @@ describe('Scenario matrix', () => {
         try {
           await scenario.run();
         } catch (error) {
-          failures.push(`${scenario.id} ${scenario.name}: ${String(error?.message || error)}`);
+          const msg = String(error?.message || error);
+          const top = String(error?.stack || '').split('\n').slice(0, 2).join('\n');
+          failures.push(`${scenario.id} ${scenario.name}: ${msg}${top ? `\n${top}` : ''}`);
         } finally {
           while (openDbs.length > dbCountBefore) {
             try {

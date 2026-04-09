@@ -79,7 +79,8 @@ export function sumForQuotation(quotationId, type) {
 }
 
 /**
- * Effective amount still due on a quotation (quotation paid + ledger receipts + ledger advance applied).
+ * Amount still due on a quotation (`totalNgn − paidNgn`). With live data, `paidNgn` is synced from receipts
+ * (and applied advances) on the server; update the quotation row after posting payments to match.
  * @param {{ id: string, totalNgn?: number, paidNgn?: number }} q
  */
 export function amountDueOnQuotation(q) {

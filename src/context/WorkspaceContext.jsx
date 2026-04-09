@@ -3,10 +3,11 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 import { apiFetch, apiUrl } from '../lib/apiBase';
 import { replaceLedgerEntries } from '../lib/customerLedgerStore';
 import { canAccessModuleWithPermissions, hasPermissionInList } from '../lib/moduleAccess';
+import { userCanApproveEditMutationsClient } from '../lib/editApprovalUi';
 
 const WorkspaceContext = createContext(null);
 
-const BOOTSTRAP_CACHE_KEY = 'zarewa.bootstrap.cache.v1';
+const BOOTSTRAP_CACHE_KEY = 'zarewa.bootstrap.cache.v2';
 
 function readBootstrapCache() {
   try {
@@ -46,6 +47,7 @@ export function WorkspaceProvider({ children }) {
   const [dashboardSummaryEtag, setDashboardSummaryEtag] = useState('');
   const [lastError, setLastError] = useState(null);
   const [refreshEpoch, setRefreshEpoch] = useState(0);
+  const [editApprovalsPendingCount, setEditApprovalsPendingCount] = useState(0);
 
   const applySnapshot = useCallback((data, mode = 'ok') => {
     setSnapshot(data);
@@ -268,9 +270,42 @@ export function WorkspaceProvider({ children }) {
   );
 
   const canAccessModule = useCallback(
-    (moduleKey) => canAccessModuleWithPermissions(permissions, moduleKey),
-    [permissions]
+    (moduleKey) => {
+      if (moduleKey === 'edit_approvals') {
+        return (
+          canAccessModuleWithPermissions(permissions, 'edit_approvals') &&
+          userCanApproveEditMutationsClient(session?.user?.roleKey, permissions)
+        );
+      }
+      return canAccessModuleWithPermissions(permissions, moduleKey);
+    },
+    [permissions, session?.user?.roleKey]
   );
+
+  const refreshEditApprovalsPending = useCallback(async () => {
+    const roleKey = session?.user?.roleKey;
+    if (
+      !userCanApproveEditMutationsClient(roleKey, permissions) ||
+      !canAccessModuleWithPermissions(permissions, 'edit_approvals')
+    ) {
+      setEditApprovalsPendingCount(0);
+      return;
+    }
+    const { ok, data } = await apiFetch('/api/edit-approvals/pending');
+    if (ok && data?.ok && Array.isArray(data.items)) {
+      setEditApprovalsPendingCount(data.items.length);
+    }
+  }, [permissions, session?.user?.roleKey]);
+
+  useEffect(() => {
+    if (status === 'checking' || status === 'auth_required') {
+      setEditApprovalsPendingCount(0);
+      return;
+    }
+    void refreshEditApprovalsPending();
+    const t = setInterval(() => void refreshEditApprovalsPending(), 45000);
+    return () => clearInterval(t);
+  }, [status, refreshEditApprovalsPending, refreshEpoch]);
 
   const canMutate = status === 'ok';
   const usingCachedData = status === 'degraded';
@@ -299,6 +334,8 @@ export function WorkspaceProvider({ children }) {
       permissions,
       hasPermission,
       canAccessModule,
+      editApprovalsPendingCount,
+      refreshEditApprovalsPending,
       login,
       forgotPassword,
       resetPassword,
@@ -322,6 +359,8 @@ export function WorkspaceProvider({ children }) {
       permissions,
       hasPermission,
       canAccessModule,
+      editApprovalsPendingCount,
+      refreshEditApprovalsPending,
       login,
       forgotPassword,
       resetPassword,

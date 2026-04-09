@@ -6,12 +6,12 @@
  *        set ZAREWA_DB=C:\path\to\file.sqlite && npm run db:legacy-demo
  */
 import fs from 'node:fs';
-import path from 'node:path';
 import Database from 'better-sqlite3';
 import { runMigrations } from './migrate.js';
 import { ensureLegacyDemoPack } from './ensureLegacyDemoPack.js';
+import { defaultDbPath } from './db.js';
 
-const dbPath = process.env.ZAREWA_DB || path.join(process.cwd(), 'data', 'zarewa.sqlite');
+const dbPath = process.env.ZAREWA_DB || defaultDbPath();
 
 if (!fs.existsSync(dbPath)) {
   console.error(`[zarewa] Database file not found: ${dbPath}`);

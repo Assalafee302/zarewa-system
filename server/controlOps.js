@@ -1,11 +1,14 @@
 import { accessoryFulfillmentSummaryForQuotation } from './accessoryFulfillment.js';
 import { actorId, actorName, userHasPermission } from './auth.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
+import {
+  nextApprovalActionHumanId,
+  nextAuditLogHumanId,
+  nextExpenseHumanId,
+  nextPaymentRequestHumanId,
+  nextRefundHumanId,
+} from './humanId.js';
 import { isAllowedExpenseCategory } from '../shared/expenseCategories.js';
-
-function nextControlId(prefix) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-}
 
 function roundMoney(value) {
   return Math.round(Number(value) || 0);
@@ -54,6 +57,220 @@ function quotedAmountPerMeter(linesJson) {
   return totalValue > 0 ? totalValue / totalMeters : null;
 }
 
+function quotationHasCompletedDelivery(db, quotationRef) {
+  if (!quotationRef) return false;
+  try {
+    const row = db
+      .prepare(
+        `SELECT 1 AS x FROM deliveries
+         WHERE quotation_ref = ?
+           AND (
+             TRIM(COALESCE(delivered_date_iso, '')) != ''
+             OR LOWER(TRIM(COALESCE(status, ''))) IN ('delivered', 'completed')
+             OR COALESCE(fulfillment_posted, 0) = 1
+           )
+         LIMIT 1`
+      )
+      .get(quotationRef);
+    return Boolean(row);
+  } catch {
+    return false;
+  }
+}
+
+function collectQuotationServices(db, quotationRef, quote) {
+  let list = [];
+  try {
+    const raw = quote?.lines_json;
+    const j = typeof raw === 'string' ? JSON.parse(raw || '{}') : raw;
+    if (Array.isArray(j?.services)) list = j.services.slice();
+  } catch {
+    list = [];
+  }
+  if (list.length === 0 && quotationRef) {
+    try {
+      const rows = db
+        .prepare(
+          `SELECT name, qty, unit_price_ngn FROM quotation_lines
+           WHERE quotation_id = ? AND category = 'services'
+           ORDER BY sort_order`
+        )
+        .all(quotationRef);
+      list = rows.map((r) => ({
+        id: `ql-${r.name}-${r.unit_price_ngn}`,
+        name: r.name,
+        qty: r.qty,
+        unitPrice: r.unit_price_ngn,
+      }));
+    } catch {
+      /* quotation_lines may be missing in some contexts */
+    }
+  }
+  return list;
+}
+
+function serviceNameLower(line) {
+  return String(line?.name ?? line?.description ?? '').trim().toLowerCase();
+}
+
+function serviceQtyAndUnitPriceNgn(line) {
+  const qty = Number(String(line?.qty ?? line?.quantity ?? '').replace(/,/g, '')) || 0;
+  let unit = 0;
+  if (line?.unitPrice != null) unit = Number(String(line.unitPrice).replace(/,/g, '')) || 0;
+  else if (line?.unit_price != null) unit = Number(String(line.unit_price).replace(/,/g, '')) || 0;
+  else if (line?.unit_price_ngn != null) unit = Number(line.unit_price_ngn) || 0;
+  let unitPrice = roundMoney(unit);
+  let amt = roundMoney(qty * unitPrice);
+  if (amt <= 0 && qty > 0) {
+    const lump = roundMoney(
+      Number(String(line?.value ?? line?.lineTotal ?? line?.line_total_ngn ?? '').replace(/,/g, '')) || 0
+    );
+    if (lump > 0) unitPrice = roundMoney(lump / qty);
+  } else if (amt <= 0) {
+    const lump = roundMoney(
+      Number(String(line?.value ?? line?.lineTotal ?? line?.line_total_ngn ?? '').replace(/,/g, '')) || 0
+    );
+    if (lump > 0) return { qty: 1, unitPrice: lump };
+  }
+  return { qty, unitPrice: roundMoney(unitPrice) };
+}
+
+function quotationJsonLineAmountNgn(row) {
+  const qty = Number(String(row?.qty ?? '').replace(/,/g, '')) || 0;
+  const unit = roundMoney(
+    Number(String(row?.unitPrice ?? row?.unit_price ?? row?.unit_price_ngn ?? '').replace(/,/g, '')) || 0
+  );
+  let amt = roundMoney(qty * unit);
+  if (amt <= 0) {
+    amt = roundMoney(
+      Number(String(row?.value ?? row?.lineTotal ?? row?.line_total_ngn ?? '').replace(/,/g, '')) || 0
+    );
+  }
+  return amt;
+}
+
+function sumQuotationLinesJsonFlexible(linesJson) {
+  let payload = linesJson;
+  if (typeof payload === 'string') {
+    try {
+      payload = JSON.parse(payload || '{}');
+    } catch {
+      return 0;
+    }
+  }
+  if (!payload || typeof payload !== 'object') return 0;
+  let s = 0;
+  for (const cat of ['products', 'accessories', 'services']) {
+    const arr = payload[cat];
+    if (!Array.isArray(arr)) continue;
+    for (const row of arr) {
+      if (!String(row?.name ?? '').trim()) continue;
+      s += quotationJsonLineAmountNgn(row);
+    }
+  }
+  return roundMoney(s);
+}
+
+function quotedProductNamesLower(linesJson) {
+  let payload = linesJson;
+  if (typeof payload === 'string') {
+    try {
+      payload = JSON.parse(payload || '{}');
+    } catch {
+      return [];
+    }
+  }
+  const prods = payload?.products;
+  if (!Array.isArray(prods)) return [];
+  return prods
+    .map((p) => String(p?.name ?? '').trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function normKeyPriceList(s) {
+  return String(s ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+/** Published list ₦/m for gauge + design (same rules as `pricingOps.floorPricePerMeterForGaugeDesign`; inlined to avoid circular imports). */
+function listPricePerMeterFromGaugeDesign(db, gaugeRaw, designRaw, branchId) {
+  const g = normKeyPriceList(gaugeRaw);
+  const d = normKeyPriceList(designRaw);
+  if (!g || !d) return null;
+  const bid = branchId && String(branchId).trim() ? String(branchId).trim() : null;
+  try {
+    const row = db
+      .prepare(
+        `SELECT unit_price_per_meter_ngn FROM price_list_items
+         WHERE gauge_key = ? AND design_key = ? AND (branch_id IS NULL OR branch_id = ? OR ? IS NULL)
+         ORDER BY CASE WHEN branch_id IS NOT NULL THEN 0 ELSE 1 END,
+                  COALESCE(effective_from_iso, '') DESC,
+                  sort_order ASC
+         LIMIT 1`
+      )
+      .get(g, d, bid, bid);
+    if (!row) return null;
+    return Math.round(Number(row.unit_price_per_meter_ngn) || 0) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve list ₦/m for the FG `products` row (gauge + colour / design). */
+function listPricePerMeterForProducedProduct(db, productId, branchId) {
+  const pid = String(productId ?? '').trim();
+  if (!pid) return null;
+  let row;
+  try {
+    row = db
+      .prepare(
+        `SELECT gauge, colour, material_type, dashboard_attrs_json FROM products WHERE product_id = ? LIMIT 1`
+      )
+      .get(pid);
+  } catch {
+    return null;
+  }
+  if (!row) return null;
+  let extra = {};
+  try {
+    extra = JSON.parse(row.dashboard_attrs_json || '{}');
+  } catch {
+    extra = {};
+  }
+  const gauge = String(row.gauge || extra.gauge || '').trim();
+  const design = String(
+    row.colour || extra.colour || row.material_type || extra.materialType || extra.profile || ''
+  ).trim();
+  if (!gauge || !design) return null;
+  return listPricePerMeterFromGaugeDesign(db, gauge, design, branchId);
+}
+
+function matchesTransportService(nameLower) {
+  if (!nameLower) return false;
+  return (
+    nameLower.includes('transport') ||
+    nameLower.includes('haulage') ||
+    nameLower.includes('hauling') ||
+    nameLower.includes('delivery') ||
+    nameLower.includes('logistic') ||
+    nameLower.includes('dispatch') ||
+    nameLower.includes('freight') ||
+    nameLower.includes('waybill')
+  );
+}
+
+function matchesInstallationService(nameLower) {
+  if (!nameLower) return false;
+  return (
+    nameLower.includes('install') ||
+    nameLower.includes('fitting') ||
+    nameLower.includes('erection') ||
+    nameLower.includes('mounting')
+  );
+}
+
 export function periodKeyFromDate(dateISO) {
   const raw = String(dateISO || '').trim();
   const base = raw || nowIso().slice(0, 10);
@@ -62,7 +279,7 @@ export function periodKeyFromDate(dateISO) {
 }
 
 export function appendAuditLog(db, payload) {
-  const id = nextControlId('AUD');
+  const id = nextAuditLogHumanId(db);
   const occurredAtISO = payload.occurredAtISO || nowIso();
   db.prepare(
     `INSERT INTO audit_log (
@@ -84,7 +301,7 @@ export function appendAuditLog(db, payload) {
 }
 
 export function recordApprovalAction(db, payload) {
-  const id = nextControlId('APR');
+  const id = nextApprovalActionHumanId(db);
   const actedAtISO = payload.actedAtISO || nowIso();
   db.prepare(
     `INSERT INTO approval_actions (
@@ -161,11 +378,6 @@ export function unlockAccountingPeriod(db, periodKey, actor, reason = '') {
   return { ok: true };
 }
 
-function nextPaymentRequestId() {
-  const year = new Date().getFullYear();
-  const salt = Math.random().toString(36).slice(2, 8).toUpperCase();
-  return `PREQ-${year}-${Date.now()}-${salt}`;
-}
 
 const MAX_PAYREQ_ATTACHMENT_B64_LEN = 4_500_000;
 
@@ -203,11 +415,6 @@ function parsePaymentRequestAttachment(payload) {
   return { name, mime, b64 };
 }
 
-function nextRefundId() {
-  const year = new Date().getFullYear();
-  const salt = Math.random().toString(36).slice(2, 8).toUpperCase();
-  return `RF-${year}-${Date.now()}-${salt}`;
-}
 
 export function insertPaymentRequest(db, payload, actor) {
   const providedRequestId = String(payload.requestID ?? '').trim();
@@ -269,16 +476,16 @@ export function insertPaymentRequest(db, payload, actor) {
     const requestID =
       providedRequestId ||
       (i === 0
-        ? nextPaymentRequestId()
-        : `${nextPaymentRequestId()}-${Math.random().toString(36).slice(2, 7)}`);
+        ? nextPaymentRequestHumanId(db, branchId)
+        : `${nextPaymentRequestHumanId(db, branchId)}-${Math.random().toString(36).slice(2, 7)}`);
     try {
       assertPeriodOpen(db, requestDate, 'Payment request date');
       db.transaction(() => {
         let expenseIdForRow = legacyExpenseID;
         if (lineItems.length > 0) {
-          let newExpId = `EXP-PREQ-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+          let newExpId = nextExpenseHumanId(db, branchId);
           for (let k = 0; k < 8 && db.prepare(`SELECT 1 FROM expenses WHERE expense_id = ?`).get(newExpId); k += 1) {
-            newExpId = `EXP-PREQ-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+            newExpId = nextExpenseHumanId(db, branchId);
           }
           db.prepare(
             `INSERT INTO expenses (expense_id, expense_type, amount_ngn, date, category, payment_method, reference, branch_id)
@@ -387,12 +594,14 @@ export function decidePaymentRequest(db, requestID, payload, actor) {
   }
 }
 
-export function insertRefundRequest(db, payload, actor, branchId = 'BR-KAD') {
+export function insertRefundRequest(db, payload, actor, branchId = DEFAULT_BRANCH_ID) {
   const customerID = String(payload.customerID ?? '').trim();
   const amountNgn = roundMoney(payload.amountNgn);
   if (!customerID) return { ok: false, error: 'Customer is required.' };
   if (amountNgn <= 0) return { ok: false, error: 'Refund amount must be positive.' };
-  const refundID = String(payload.refundID ?? '').trim() || nextRefundId(db);
+  const refundID =
+    String(payload.refundID ?? '').trim() ||
+    nextRefundHumanId(db, String(branchId || DEFAULT_BRANCH_ID).trim());
   const requestedAtISO = String(payload.requestedAtISO ?? '').trim() || nowIso();
   try {
     assertPeriodOpen(db, requestedAtISO, 'Refund request date');
@@ -420,6 +629,13 @@ export function insertRefundRequest(db, payload, actor, branchId = 'BR-KAD') {
             return { ok: false, error: `A refund request for category "${row.reason_category}" already exists for this quotation.` };
           }
         }
+      }
+
+      if (requestedCats.includes('Order cancellation') && quotationHasCompletedDelivery(db, quotationRef)) {
+        return {
+          ok: false,
+          error: 'Order cancellation is not allowed after material has been delivered for this quotation.',
+        };
       }
     }
 
@@ -465,7 +681,7 @@ export function insertRefundRequest(db, payload, actor, branchId = 'BR-KAD') {
         '',
         '',
         '',
-        String(branchId || 'BR-KAD').trim()
+        String(branchId || DEFAULT_BRANCH_ID).trim()
       );
       appendAuditLog(db, {
         actor,
@@ -601,8 +817,23 @@ export function previewRefundRequest(db, payload) {
   if (!customerID && !quotationRef) return { ok: false, error: 'Customer or Quotation is required.' };
 
   const receipts = quotationRef
-    ? db.prepare(`SELECT * FROM sales_receipts WHERE quotation_ref = ?`).all(quotationRef)
+    ? db
+        .prepare(
+          `SELECT * FROM sales_receipts WHERE quotation_ref = ?
+           AND (status IS NULL OR TRIM(LOWER(status)) NOT IN ('reversed'))`
+        )
+        .all(quotationRef)
     : [];
+
+  const overpayRow =
+    quotationRef &&
+    db
+      .prepare(
+        `SELECT COALESCE(SUM(amount_ngn), 0) AS s FROM ledger_entries
+         WHERE type = 'OVERPAY_ADVANCE' AND quotation_ref = ?`
+      )
+      .get(quotationRef);
+  const overpayAdvanceNgn = roundMoney(overpayRow?.s ?? 0);
 
   const productionJobs = quotationRef
     ? db.prepare(`SELECT * FROM production_jobs WHERE quotation_ref = ? AND status = 'Completed'`).all(quotationRef)
@@ -624,6 +855,7 @@ export function previewRefundRequest(db, payload) {
   });
 
   const paidOnQuoteNgn = receipts.reduce((sum, row) => sum + roundMoney(row.amount_ngn), 0);
+  const quotationCashInNgn = roundMoney(paidOnQuoteNgn + overpayAdvanceNgn);
   const quoteTotalNgn = roundMoney(quote?.total_ngn);
 
   // Quoted vs Actual Produced (optional payload overrides for tools/tests)
@@ -641,6 +873,14 @@ export function previewRefundRequest(db, payload) {
 
   const suggestedLines = [];
   const warnings = [];
+  const materialDelivered = quotationRef ? quotationHasCompletedDelivery(db, quotationRef) : false;
+  const blockedRefundCategories = [];
+  if (materialDelivered) {
+    blockedRefundCategories.push('Order cancellation');
+    warnings.push(
+      'Material has been marked delivered for this quotation; order cancellation refunds are not allowed.'
+    );
+  }
 
   const requestedPpm = positiveNumber(payload.pricePerMeterNgn);
   if (derivedPricePerMeter && requestedPpm && derivedPricePerMeter > 0) {
@@ -652,53 +892,79 @@ export function previewRefundRequest(db, payload) {
     }
   }
 
-  // 1. Overpayment Auto-detection
-  if (!refundedCategories.has('Overpayment') && paidOnQuoteNgn > quoteTotalNgn && quoteTotalNgn > 0) {
+  // 1. Overpayment Auto-detection (RECEIPT total + OVERPAY_ADVANCE from split-till posting)
+  if (
+    !refundedCategories.has('Overpayment') &&
+    quotationCashInNgn > quoteTotalNgn &&
+    quoteTotalNgn > 0
+  ) {
     suggestedLines.push({
       label: `Overpayment on ${quotationRef || 'quotation'}`,
-      amountNgn: paidOnQuoteNgn - quoteTotalNgn,
+      amountNgn: quotationCashInNgn - quoteTotalNgn,
       category: 'Overpayment'
     });
   }
 
-  // 2. Unproduced / Substituted Meterage
+  // 2. Unproduced / Substituted Meterage (blocked after customer delivery is recorded)
   if (quotedMeters > 0 && pricePerMeter) {
-    // If production is finished, we can calculate precisely
     const unproducedPotential = Math.max(0, quotedMeters - actualMeters);
-    if (unproducedPotential > 0 && !refundedCategories.has('Order cancellation')) {
-       suggestedLines.push({
+    if (
+      unproducedPotential > 0 &&
+      !refundedCategories.has('Order cancellation') &&
+      !materialDelivered
+    ) {
+      suggestedLines.push({
         label: `Unproduced metres (${unproducedPotential.toFixed(2)}m @ ₦${Math.round(pricePerMeter).toLocaleString()})`,
         amountNgn: Math.round(unproducedPotential * pricePerMeter),
-        category: 'Order cancellation'
+        category: 'Order cancellation',
       });
     }
   }
 
-  // 3. Service Refunds (Transport/Installation)
-  // We check the quote lines for these services
-  let quoteLines = [];
-  try {
-    quoteLines = JSON.parse(quote?.lines_json || '{}').services || [];
-  } catch {
-    quoteLines = [];
-  }
-  
-  const transportService = quoteLines.find(s => s.name.toLowerCase().includes('transport'));
-  if (transportService && !refundedCategories.has('Transport issue')) {
-    suggestedLines.push({
-      label: `Unclaimed Transport: ${transportService.name}`,
-      amountNgn: roundMoney(transportService.unitPrice * transportService.qty),
-      category: 'Transport issue'
-    });
-  }
+  // 3. Service refunds — transport / installation (JSON lines_json + quotation_lines fallback; broad name matching)
+  const quoteLines = collectQuotationServices(db, quotationRef, quote);
+  for (const s of quoteLines) {
+    const nl = serviceNameLower(s);
+    const { qty, unitPrice } = serviceQtyAndUnitPriceNgn(s);
+    const amt = roundMoney(qty * unitPrice);
+    if (amt <= 0) continue;
 
-  const installService = quoteLines.find(s => s.name.toLowerCase().includes('install'));
-  if (installService && !refundedCategories.has('Installation issue')) {
-    suggestedLines.push({
-      label: `Unclaimed Installation: ${installService.name}`,
-      amountNgn: roundMoney(installService.unitPrice * installService.qty),
-      category: 'Installation issue'
-    });
+    const isTransport = matchesTransportService(nl);
+    const isInstall = matchesInstallationService(nl);
+
+    if (isTransport && isInstall) {
+      const needTransport = !refundedCategories.has('Transport issue');
+      const needInstall = !refundedCategories.has('Installation issue');
+      const appliesToCategories = [];
+      if (needTransport) appliesToCategories.push('Transport issue');
+      if (needInstall) appliesToCategories.push('Installation issue');
+      if (appliesToCategories.length > 0) {
+        suggestedLines.push({
+          label: `Transport & installation service: ${String(s?.name ?? 'Service').trim() || 'Service'}`,
+          amountNgn: amt,
+          category: 'Transport issue',
+          appliesToCategories,
+        });
+        warnings.push(
+          'This quotation bundles transport and installation on one line; adjust amounts or add manual lines if refunding only part of the bundle.'
+        );
+      }
+      continue;
+    }
+    if (isTransport && !refundedCategories.has('Transport issue')) {
+      suggestedLines.push({
+        label: `Unclaimed transport: ${String(s?.name ?? 'Service').trim() || 'Service'}`,
+        amountNgn: amt,
+        category: 'Transport issue',
+      });
+    }
+    if (isInstall && !refundedCategories.has('Installation issue')) {
+      suggestedLines.push({
+        label: `Unclaimed installation: ${String(s?.name ?? 'Service').trim() || 'Service'}`,
+        amountNgn: amt,
+        category: 'Installation issue',
+      });
+    }
   }
 
   if (quotationRef && !refundedCategories.has('Accessory shortfall')) {
@@ -714,6 +980,110 @@ export function previewRefundRequest(db, payload) {
         amountNgn,
         category: 'Accessory shortfall',
       });
+    }
+  }
+
+  if (quote && quotationRef && !refundedCategories.has('Calculation error')) {
+    const lineSum = sumQuotationLinesJsonFlexible(quote.lines_json);
+    if (lineSum > 0) {
+      const diff = roundMoney(quoteTotalNgn - lineSum);
+      if (Math.abs(diff) >= 1) {
+        suggestedLines.push({
+          label: `Quotation total vs line-item sum (${diff > 0 ? 'header higher' : 'lines higher'} by ₦${Math.abs(diff).toLocaleString('en-NG')})`,
+          amountNgn: Math.abs(diff),
+          category: 'Calculation error',
+        });
+      }
+    }
+  }
+
+  /** Substitution: credit = max(0, quoted ₦/m − produced list ₦/m) × produced metres (per completed job whose FG name ≠ quoted product names). */
+  const substitutionPerMeterBreakdown = [];
+  if (quotationRef && !refundedCategories.has('Substitution Difference')) {
+    const qNames = quotedProductNamesLower(quote?.lines_json);
+    if (qNames.length && productionJobs.length) {
+      const branchId = quote?.branch_id != null ? String(quote.branch_id).trim() || null : null;
+      const overrideSubPpm = positiveNumber(payload.substitutePricePerMeterNgn);
+      let totalCredit = 0;
+      let anyMismatch = false;
+      const missingListPriceLabels = [];
+      let noPositiveDelta = false;
+
+      for (const j of productionJobs) {
+        const pn = String(j.product_name ?? '').trim().toLowerCase();
+        if (!pn) continue;
+        const match = qNames.some((qn) => pn.includes(qn) || qn.includes(pn));
+        if (match) continue;
+        anyMismatch = true;
+        const m = Number(j.actual_meters) || 0;
+        const jobLabel = String(j.product_name || j.job_id || 'Production job').trim();
+
+        if (!pricePerMeter) {
+          continue;
+        }
+        if (m <= 0) continue;
+
+        const producedPpm = overrideSubPpm ?? listPricePerMeterForProducedProduct(db, j.product_id, branchId);
+        if (producedPpm == null || producedPpm <= 0) {
+          missingListPriceLabels.push(jobLabel);
+          continue;
+        }
+
+        const deltaPpm = pricePerMeter - producedPpm;
+        if (deltaPpm <= 0) {
+          noPositiveDelta = true;
+          continue;
+        }
+
+        const credit = roundMoney(deltaPpm * m);
+        totalCredit += credit;
+        substitutionPerMeterBreakdown.push({
+          jobId: j.job_id,
+          productName: String(j.product_name || '').trim(),
+          meters: m,
+          quotedPricePerMeterNgn: Math.round(pricePerMeter),
+          producedListPricePerMeterNgn: producedPpm,
+          deltaPerMeterNgn: Math.round(deltaPpm),
+          creditNgn: credit,
+        });
+      }
+
+      if (anyMismatch) {
+        const fmtN = (n) => `₦${Math.round(n).toLocaleString('en-NG')}`;
+        let label;
+        if (substitutionPerMeterBreakdown.length > 0) {
+          const parts = substitutionPerMeterBreakdown.map(
+            (b) => `${b.meters.toFixed(2)}m × ${fmtN(b.deltaPerMeterNgn)}/m (${String(b.productName || 'FG').trim()})`
+          );
+          label = `Substitution credit (quoted ${fmtN(pricePerMeter)}/m minus produced list rate × metres): ${parts.join('; ')}`;
+        } else if (!pricePerMeter) {
+          label =
+            'Produced FG may differ from quoted roofing lines — add product lines with qty and unitPrice to derive quoted ₦/m, or enter credit manually';
+        } else {
+          label =
+            'Produced FG may differ from quoted roofing lines — no automatic credit (set substitutePricePerMeterNgn, add price list + gauge/colour on FG product, or enter amount manually)';
+        }
+        suggestedLines.push({
+          label,
+          amountNgn: totalCredit,
+          category: 'Substitution Difference',
+        });
+        if (!pricePerMeter) {
+          warnings.push(
+            'Substitution: cannot compute per-metre delta without a quotation blended ₦/m (product lines with qty and unitPrice), or pass pricePerMeterNgn in preview.'
+          );
+        } else if (missingListPriceLabels.length > 0 && !overrideSubPpm) {
+          const uniq = [...new Set(missingListPriceLabels)];
+          warnings.push(
+            `Substitution: could not resolve list ₦/m for ${uniq.join(', ')}. Add gauge/colour on the FG product and a matching price list row, or pass substitutePricePerMeterNgn when calling preview.`
+          );
+        }
+        if (noPositiveDelta && substitutionPerMeterBreakdown.length === 0 && pricePerMeter && !missingListPriceLabels.length) {
+          warnings.push(
+            'Substitution: produced list rate is not below the quotation blended ₦/m — per-metre delta credit is zero.'
+          );
+        }
+      }
     }
   }
 
@@ -740,13 +1110,18 @@ export function previewRefundRequest(db, payload) {
       quotationRef,
       quoteTotalNgn,
       paidOnQuoteNgn,
+      overpayAdvanceNgn,
+      quotationCashInNgn,
       quotedMeters,
       actualMeters,
       pricePerMeterNgn: pricePerMeter ? Math.round(pricePerMeter) : null,
+      substitutePricePerMeterNgn: positiveNumber(payload.substitutePricePerMeterNgn),
+      substitutionPerMeterBreakdown,
       suggestedAmountNgn,
       suggestedLines,
       warnings,
-      alreadyRefundedCategories: Array.from(refundedCategories)
+      alreadyRefundedCategories: Array.from(refundedCategories),
+      blockedRefundCategories,
     },
   };
 }

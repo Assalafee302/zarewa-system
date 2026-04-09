@@ -87,6 +87,10 @@ test.describe('HR leave policy enforcement', () => {
       data: { approve: true, note: 'Final ok', reasonCode: 'policy' },
     });
     expect(mgr.status()).toBe(200);
+    const gm = await page.request.patch(`/api/hr/requests/${encodeURIComponent(requestId)}/manager-review`, {
+      data: { approve: true, note: 'GM ok', reasonCode: 'policy' },
+    });
+    expect(gm.status()).toBe(200);
 
     // Recompute should be blocked due to negative balances.
     const recompute = await page.request.post('/api/hr/leave/recompute', {

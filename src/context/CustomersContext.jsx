@@ -11,7 +11,7 @@ export function CustomersProvider({ children }) {
   const { show: showToast } = useToast();
   const [customers, setCustomers] = useState([]);
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     const s = ws?.snapshot;
     if (!s) {
@@ -21,7 +21,7 @@ export function CustomersProvider({ children }) {
     const list = s.customers;
     setCustomers(Array.isArray(list) ? list.map((c) => ({ ...c })) : []);
   }, [ws?.snapshot]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   const addCustomer = useCallback(
     async (record) => {

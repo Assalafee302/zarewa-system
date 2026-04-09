@@ -1,39 +1,39 @@
-import { amountDueOnQuotationFromEntries } from '../src/lib/customerLedgerCore.js';
 import { isAllowedExpenseCategory } from '../shared/expenseCategories.js';
 import {
   tryPostCustomerAdvanceReversalGl,
   tryPostCustomerReceiptReversalGl,
+  tryPostCustomerRefundPayoutGlTx,
   tryPostGrnInventoryJournal,
+  tryPostInventoryReceiptJournal,
 } from './glOps.js';
+import { ensureStoneProduct, isStoneMeterProductRow } from './stoneInventory.js';
+import { deriveProcurementKindFromProductIds } from './procurementPoKind.js';
 import { normalizeCustomerEmailKey, normalizeCustomerPhoneKey } from '../shared/customerPhoneKey.js';
-import { actorName } from './auth.js';
+import { actorId, actorName, userHasPermission } from './auth.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
+import {
+  enrichSalesReceiptRowsWithCashFromLedger,
+  listLedgerEntries,
+  listSalesReceipts,
+} from './readModel.js';
 import { appendAuditLog, assertPeriodOpen, insertPaymentRequest } from './controlOps.js';
-import { listLedgerEntries } from './readModel.js';
-
-function nextLedgerId() {
-  return `LE-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-}
-
-function nextMvId() {
-  return `MV-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-}
-
-function nextTreasuryMovementId() {
-  return `TM-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-}
-
-function nextCuttingListIdValue() {
-  return `CL-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-}
-
-function nextProductionJobIdValue() {
-  return `PRO-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-}
-
-function nextDeliveryIdValue() {
-  return `DN-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-}
+import {
+  nextBankReconLineHumanId,
+  nextCoilRequestHumanId,
+  nextCrmInteractionHumanId,
+  nextCustomerHumanId,
+  nextCuttingListHumanId,
+  nextDeliveryHumanId,
+  nextExpenseHumanId,
+  nextLedgerEntryId,
+  nextProductionJobHumanId,
+  nextPostingBatchHumanId,
+  nextPurchaseOrderHumanId,
+  nextQuotationHumanId,
+  nextStockMovementHumanId,
+  nextTreasuryMovementHumanId,
+  nextTreasuryTransferBatchHumanId,
+} from './humanId.js';
 
 function roundMoney(value) {
   return Math.round(Number(value) || 0);
@@ -56,8 +56,11 @@ function normalizeIsoTimestamp(value) {
 /**
  * @param {import('better-sqlite3').Database} db
  * @param {Array<Record<string, unknown>>} planRows
+ * @param {string | null} branchId
+ * @param {{ allowPerRowBranchId?: boolean }} [opts] When false (default), ignore `branchId` on each row so callers cannot override booking branch.
  */
-export function insertLedgerRows(db, planRows, branchId = null) {
+export function insertLedgerRows(db, planRows, branchId = null, opts = {}) {
+  const allowPerRow = Boolean(opts.allowPerRowBranchId);
   const ins = db.prepare(`
     INSERT INTO ledger_entries (
       id, at_iso, type, customer_id, customer_name, amount_ngn, quotation_ref,
@@ -86,9 +89,13 @@ export function insertLedgerRows(db, planRows, branchId = null) {
         }
       }
 
-      const id = nextLedgerId();
+      const bid = allowPerRow
+        ? r.branchId != null && String(r.branchId).trim()
+          ? String(r.branchId).trim()
+          : branchId
+        : branchId;
+      const id = nextLedgerEntryId(db, bid || DEFAULT_BRANCH_ID);
       const atIso = r.atISO || new Date().toISOString();
-      const bid = r.branchId != null && String(r.branchId).trim() ? String(r.branchId).trim() : branchId;
       ins.run(
         id,
         atIso,
@@ -128,8 +135,86 @@ export function insertLedgerRows(db, planRows, branchId = null) {
   return run(planRows);
 }
 
+/**
+ * Customer advance / overpay credit from ledger only (matches `advanceBalanceFromEntries` in customerLedgerCore.js).
+ * @param {import('better-sqlite3').Database} db
+ */
+export function advanceBalanceNgnForCustomerDb(db, customerID) {
+  const id = String(customerID || '').trim();
+  if (!id) return 0;
+  const rows = db.prepare(`SELECT type, amount_ngn FROM ledger_entries WHERE customer_id = ?`).all(id);
+  let s = 0;
+  for (const e of rows) {
+    const n = roundMoney(e.amount_ngn);
+    switch (String(e.type || '')) {
+      case 'ADVANCE_IN':
+      case 'OVERPAY_ADVANCE':
+        s += n;
+        break;
+      case 'ADVANCE_APPLIED':
+      case 'REFUND_ADVANCE':
+      case 'ADVANCE_REVERSAL':
+        s -= n;
+        break;
+      default:
+        break;
+    }
+  }
+  return s;
+}
+
+/**
+ * Set quotations.paid_ngn and payment_status from **sales receipts** (what you record in Sales → Receipts).
+ * Optionally adds ADVANCE_APPLIED ledger rows for the same quote (customer deposit applied to this job)
+ * so one “paid” number drives cutting lists, production gates, refunds, and AR.
+ * Bank reconciliation matches treasury to those receipt lines; it does not define quotation paid.
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} quotationId
+ */
+export function syncQuotationPaidFromReceipts(db, quotationId) {
+  const qid = String(quotationId || '').trim();
+  if (!qid) return { ok: false, error: 'Quotation id required.' };
+  const row = db.prepare(`SELECT total_ngn FROM quotations WHERE id = ?`).get(qid);
+  if (!row) return { ok: false, error: 'Quotation not found.' };
+
+  const r1 = db
+    .prepare(
+      `SELECT COALESCE(SUM(amount_ngn), 0) AS s FROM sales_receipts
+       WHERE quotation_ref = ?
+         AND (status IS NULL OR TRIM(LOWER(status)) NOT IN ('reversed'))`
+    )
+    .get(qid);
+  const receiptSum = Math.round(Number(r1?.s) || 0);
+
+  const r2 = db
+    .prepare(
+      `SELECT COALESCE(SUM(amount_ngn), 0) AS s FROM ledger_entries
+       WHERE type = 'ADVANCE_APPLIED' AND quotation_ref = ?`
+    )
+    .get(qid);
+  const advanceApplied = Math.round(Number(r2?.s) || 0);
+
+  const paidTotal = receiptSum + advanceApplied;
+  const total = Math.round(Number(row.total_ngn) || 0);
+  let paymentStatus;
+  if (paidTotal <= 0) paymentStatus = 'Unpaid';
+  else if (total > 0 && paidTotal >= total) paymentStatus = 'Paid';
+  else paymentStatus = 'Partial';
+  db.prepare(`UPDATE quotations SET paid_ngn = ?, payment_status = ? WHERE id = ?`).run(
+    paidTotal,
+    paymentStatus,
+    qid
+  );
+  return { ok: true, paidNgn: paidTotal, paymentStatus, receiptSumNgn: receiptSum, advanceAppliedNgn: advanceApplied };
+}
+
+/** @deprecated Use syncQuotationPaidFromReceipts — kept name for existing API routes. */
+export function syncQuotationPaidFromLedger(db, quotationId) {
+  return syncQuotationPaidFromReceipts(db, quotationId);
+}
+
 function appendMovementTx(db, entry) {
-  const id = nextMvId();
+  const id = nextStockMovementHumanId(db);
   const atISO = new Date().toISOString().slice(0, 19);
   db.prepare(
     `INSERT INTO stock_movements (id, at_iso, type, ref, product_id, qty, detail, date_iso, unit_price_ngn, value_ngn)
@@ -153,24 +238,31 @@ function treasuryAccountRow(db, treasuryAccountId) {
   return db.prepare(`SELECT * FROM treasury_accounts WHERE id = ?`).get(treasuryAccountId);
 }
 
-function adjustTreasuryBalanceTx(db, treasuryAccountId, deltaNgn) {
+function adjustTreasuryBalanceTx(db, treasuryAccountId, deltaNgn, opts = {}) {
   const row = treasuryAccountRow(db, treasuryAccountId);
   if (!row) throw new Error('Treasury account not found.');
   const nextBalance = roundMoney(row.balance) + roundMoney(deltaNgn);
-  if (nextBalance < 0) {
+  if (nextBalance < 0 && !opts.allowNegativeBalance) {
     throw new Error(`Insufficient balance in ${row.name}.`);
   }
   db.prepare(`UPDATE treasury_accounts SET balance = ? WHERE id = ?`).run(nextBalance, treasuryAccountId);
   return { ...row, balance: nextBalance };
 }
 
-function insertTreasuryMovementTx(db, payload) {
+export function insertTreasuryMovementTx(db, payload) {
   const treasuryAccountId = Number(payload.treasuryAccountId);
   if (!treasuryAccountId) throw new Error('treasuryAccountId is required.');
   const amountNgn = roundMoney(payload.amountNgn);
   if (amountNgn === 0) throw new Error('Treasury movement amount must be non-zero.');
-  const account = adjustTreasuryBalanceTx(db, treasuryAccountId, amountNgn);
-  const id = String(payload.id ?? '').trim() || nextTreasuryMovementId();
+  const allowNeg =
+    payload.allowNegativeBalance === true || payload.type === 'BANK_RECON_ADJUSTMENT';
+  const account = adjustTreasuryBalanceTx(db, treasuryAccountId, amountNgn, {
+    allowNegativeBalance: allowNeg,
+  });
+  const branchForTm = String(
+    payload.workspaceBranchId || payload.branchId || DEFAULT_BRANCH_ID
+  ).trim();
+  const id = String(payload.id ?? '').trim() || nextTreasuryMovementHumanId(db, branchForTm);
   const postedAtISO = normalizeIsoTimestamp(payload.postedAtISO);
   db.prepare(
     `INSERT INTO treasury_movements (
@@ -211,7 +303,7 @@ function insertTreasuryMovementTx(db, payload) {
 
 function insertTreasurySplitTx(db, lines, base) {
   const rows = [];
-  const batchId = base.batchId || `TB-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const batchId = base.batchId || nextPostingBatchHumanId(db);
   for (const line of lines || []) {
     const amountNgn = roundMoney(line.amountNgn);
     if (!amountNgn) continue;
@@ -359,7 +451,7 @@ function assertNoDuplicateCustomerIdentity(db, branchId, payload, excludeCustome
 
 /** @param {import('better-sqlite3').Database} db */
 export function insertCustomer(db, row, branchId = DEFAULT_BRANCH_ID) {
-  const id = row.customerID || `CUS-${Date.now()}`;
+  const id = row.customerID || nextCustomerHumanId(db, String(branchId || DEFAULT_BRANCH_ID).trim());
   assertNoDuplicateCustomerIdentity(
     db,
     branchId,
@@ -636,12 +728,13 @@ export function insertPurchaseOrder(db, payload, branchId = DEFAULT_BRANCH_ID) {
     status,
     lines,
   } = payload;
+  const kind = deriveProcurementKindFromProductIds((lines || []).map((l) => l.productID));
   const insPo = db.prepare(`
     INSERT INTO purchase_orders (
       po_id, supplier_id, supplier_name, order_date_iso, expected_delivery_iso, status,
       invoice_no, invoice_date_iso, delivery_date_iso, transport_agent_id, transport_agent_name,
-      transport_paid, transport_paid_at_iso, supplier_paid_ngn, branch_id
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      transport_paid, transport_paid_at_iso, supplier_paid_ngn, branch_id, procurement_kind
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `);
   const insL = db.prepare(`
     INSERT INTO purchase_order_lines (
@@ -666,7 +759,8 @@ export function insertPurchaseOrder(db, payload, branchId = DEFAULT_BRANCH_ID) {
       0,
       '',
       0,
-      String(branchId || DEFAULT_BRANCH_ID).trim()
+      String(branchId || DEFAULT_BRANCH_ID).trim(),
+      kind
     );
     for (const l of lines || []) {
       insL.run(
@@ -689,9 +783,161 @@ export function insertPurchaseOrder(db, payload, branchId = DEFAULT_BRANCH_ID) {
       ref: poID,
       detail: `${supplierName} · ${(lines || []).length} line(s)`,
     });
+    syncAccountsPayableFromPurchaseOrder(db, poID);
   })();
 
   return { ok: true, poID };
+}
+
+/**
+ * Keeps `accounts_payable` aligned with coil/PO supplier balances for Finance → Payables.
+ * - Inserts a row when none exists for this PO (ap_id AP-PO-{po_id}).
+ * - Updates paid_ngn from purchase_orders.supplier_paid_ngn for any row with matching po_ref.
+ * - Refreshes amount from PO lines only for auto rows (ap_id LIKE 'AP-PO-%') so seeded/demo AP amounts stay intact.
+ * - Removes payables when the PO is Rejected.
+ * @param {import('better-sqlite3').Database} db
+ */
+export function syncAccountsPayableFromPurchaseOrder(db, poID) {
+  const row = db.prepare(`SELECT * FROM purchase_orders WHERE po_id = ?`).get(poID);
+  if (!row) return;
+  const st = String(row.status || '').trim();
+  if (st === 'Rejected') {
+    db.prepare(`DELETE FROM accounts_payable WHERE po_ref = ?`).run(poID);
+    return;
+  }
+  const lineRows = db
+    .prepare(
+      `SELECT qty_ordered, unit_price_ngn, unit_price_per_kg_ngn FROM purchase_order_lines WHERE po_id = ?`
+    )
+    .all(poID);
+  let amountNgn = 0;
+  for (const l of lineRows) {
+    const qty = Number(l.qty_ordered) || 0;
+    const up = roundMoney(l.unit_price_ngn ?? l.unit_price_per_kg_ngn);
+    amountNgn += roundMoney(qty * up);
+  }
+  const paidNgn = roundMoney(row.supplier_paid_ngn);
+  const inv = String(row.invoice_no || '').trim();
+  const due = String(row.expected_delivery_iso || row.order_date_iso || '').slice(0, 10);
+  const existing = db.prepare(`SELECT ap_id FROM accounts_payable WHERE po_ref = ? LIMIT 1`).get(poID);
+  if (existing) {
+    db.prepare(
+      `UPDATE accounts_payable SET supplier_name = ?, paid_ngn = ?,
+         invoice_ref = CASE WHEN ? != '' THEN ? ELSE invoice_ref END,
+         due_date_iso = CASE WHEN ? != '' THEN ? ELSE due_date_iso END
+       WHERE po_ref = ?`
+    ).run(row.supplier_name, paidNgn, inv, inv, due, due, poID);
+    db.prepare(`UPDATE accounts_payable SET amount_ngn = ? WHERE po_ref = ? AND ap_id LIKE 'AP-PO-%'`).run(
+      amountNgn,
+      poID
+    );
+  } else {
+    db.prepare(
+      `INSERT INTO accounts_payable (ap_id, supplier_name, po_ref, invoice_ref, amount_ngn, paid_ngn, due_date_iso, payment_method)
+       VALUES (?,?,?,?,?,?,?,NULL)`
+    ).run(`AP-PO-${poID}`, row.supplier_name, poID, inv, amountNgn, paidNgn, due);
+  }
+}
+
+/**
+ * Replace PO header and line rows. For each line_key that already existed, qty_received is carried
+ * forward (capped by the new qty_ordered) so GRN history is not wiped.
+ * @param {import('better-sqlite3').Database} db
+ */
+export function updatePurchaseOrderCoilDraft(db, poID, payload, branchId = DEFAULT_BRANCH_ID) {
+  const id = String(poID || '').trim();
+  if (!id) return { ok: false, error: 'PO id required.' };
+  const row = db.prepare(`SELECT * FROM purchase_orders WHERE po_id = ?`).get(id);
+  if (!row) return { ok: false, error: 'Purchase order not found.' };
+  const bid = String(branchId || DEFAULT_BRANCH_ID).trim();
+  if (String(row.branch_id || '').trim() !== bid) {
+    return { ok: false, error: 'PO is not in the current branch.' };
+  }
+
+  const prevLines = db.prepare(`SELECT * FROM purchase_order_lines WHERE po_id = ?`).all(id);
+  const prevByKey = new Map(prevLines.map((r) => [String(r.line_key || '').trim(), r]));
+
+  const { supplierID, supplierName, orderDateISO, expectedDeliveryISO, lines } = payload || {};
+  const sid = String(supplierID || '').trim();
+  const sname = String(supplierName || '').trim();
+  if (!sid || !sname) {
+    return { ok: false, error: 'Supplier is required.' };
+  }
+  const normLines = Array.isArray(lines) ? lines : [];
+  if (!normLines.length) {
+    return { ok: false, error: 'At least one line is required.' };
+  }
+  for (const l of normLines) {
+    const lk = String(l.lineKey || '').trim();
+    if (!lk) return { ok: false, error: 'Each line needs a lineKey.' };
+    const pid = String(l.productID || '').trim();
+    if (!pid) return { ok: false, error: 'Each line needs a product.' };
+    const qty = Number(l.qtyOrdered);
+    if (!Number.isFinite(qty) || qty <= 0) return { ok: false, error: 'Each line needs ordered qty > 0.' };
+  }
+
+  const insL = db.prepare(`
+    INSERT INTO purchase_order_lines (
+      po_id, line_key, product_id, product_name, color, gauge, meters_offered, conversion_kg_per_m,
+      unit_price_per_kg_ngn, unit_price_ngn, qty_ordered, qty_received
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+  `);
+
+  const nextKind = deriveProcurementKindFromProductIds(normLines.map((l) => l.productID));
+
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE purchase_orders SET supplier_id = ?, supplier_name = ?, order_date_iso = ?, expected_delivery_iso = ?, procurement_kind = ? WHERE po_id = ?`
+    ).run(
+      sid,
+      sname,
+      orderDateISO || row.order_date_iso || new Date().toISOString().slice(0, 10),
+      expectedDeliveryISO !== undefined ? String(expectedDeliveryISO) : String(row.expected_delivery_iso || ''),
+      nextKind,
+      id
+    );
+    db.prepare(`DELETE FROM purchase_order_lines WHERE po_id = ?`).run(id);
+    for (const l of normLines) {
+      const lk = String(l.lineKey).trim();
+      const qtyOrd = Number(l.qtyOrdered);
+      const prev = prevByKey.get(lk);
+      const wasRec = prev ? Number(prev.qty_received) || 0 : 0;
+      const qtyRec = Math.min(qtyOrd, wasRec);
+      const perKg = l.unitPricePerKgNgn ?? l.unitPriceNgn;
+      const unitNgn = l.unitPriceNgn ?? perKg;
+      insL.run(
+        id,
+        lk,
+        String(l.productID).trim(),
+        String(l.productName || l.productID).trim(),
+        l.color ?? '',
+        l.gauge ?? '',
+        l.metersOffered ?? null,
+        l.conversionKgPerM ?? null,
+        perKg,
+        unitNgn,
+        qtyOrd,
+        qtyRec
+      );
+    }
+    appendMovementTx(db, {
+      type: 'PO_UPDATED',
+      ref: id,
+      detail: `${sname} · ${normLines.length} line(s) revised`,
+    });
+    syncAccountsPayableFromPurchaseOrder(db, id);
+  })();
+
+  return { ok: true, poID: id };
+}
+
+/** @param {import('better-sqlite3').Database} db */
+export function backfillAccountsPayableFromPurchaseOrders(db) {
+  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='purchase_orders'`).get()) return;
+  const ids = db.prepare(`SELECT po_id FROM purchase_orders`).all().map((r) => r.po_id);
+  for (const id of ids) {
+    syncAccountsPayableFromPurchaseOrder(db, id);
+  }
 }
 
 /** @param {import('better-sqlite3').Database} db */
@@ -840,6 +1086,7 @@ export function recordSupplierPayment(db, poID, amountNgn, note, opts = {}) {
         note: note || 'Supplier settlement recorded',
         details: { amountNgn: amt, treasuryAccountId: opts.treasuryAccountId ?? null },
       });
+      syncAccountsPayableFromPurchaseOrder(db, poID);
     })();
     return { ok: true };
   } catch (e) {
@@ -851,6 +1098,7 @@ export function setPoStatus(db, poID, status) {
   const r = db.prepare(`UPDATE purchase_orders SET status = ? WHERE po_id = ?`).run(status, poID);
   if (r.changes === 0) return { ok: false, error: 'PO not found.' };
   appendMovementTx(db, { type: 'PO_STATUS', ref: poID, detail: status });
+  syncAccountsPayableFromPurchaseOrder(db, poID);
   return { ok: true };
 }
 
@@ -863,6 +1111,7 @@ export function attachSupplierInvoice(db, poID, invoiceNo, invoiceDateISO, deliv
     ref: poID,
     detail: invoiceNo?.trim() || '—',
   });
+  syncAccountsPayableFromPurchaseOrder(db, poID);
   return { ok: true };
 }
 
@@ -996,6 +1245,16 @@ export function confirmGrn(
   if (!allowConvSkip) {
     for (const e of entries) {
       const line = findPoLine(lines, e);
+      const prodRow = products.find((row) => row.product_id === e.productID);
+      const isStone =
+        prodRow != null
+          ? isStoneMeterProductRow(prodRow)
+          : /^STONE-/i.test(String(e.productID || '').trim());
+      const isAcc =
+        prodRow != null
+          ? /^ACC-/i.test(String(prodRow.product_id || '').trim())
+          : /^ACC-/i.test(String(e.productID || '').trim());
+      if (isStone || isAcc) continue;
       const lc = Number(line.conversion_kg_per_m);
       const ec =
         e.supplierConversionKgPerM != null && e.supplierConversionKgPerM !== ''
@@ -1056,6 +1315,7 @@ export function confirmGrn(
   );
   const updProd = db.prepare(`UPDATE products SET stock_level = stock_level + ? WHERE product_id = ?`);
   const existingLots = db.prepare(`SELECT COUNT(*) AS c FROM coil_lots`).get().c;
+  const coilYy = String(new Date().getFullYear()).slice(-2);
 
   const coilNumbers = [];
 
@@ -1065,12 +1325,83 @@ export function confirmGrn(
       const e = entries[i];
       const line = findPoLine(lines, e);
       const qty = Number(e.qtyReceived);
+      const product = products.find((row) => row.product_id === e.productID);
+      const isStone =
+        product != null
+          ? isStoneMeterProductRow(product)
+          : /^STONE-/i.test(String(e.productID || '').trim());
+      const isAcc =
+        product != null
+          ? /^ACC-/i.test(String(product.product_id || '').trim())
+          : /^ACC-/i.test(String(e.productID || '').trim());
+
+      if (isStone) {
+        const stoneRef = `ST-${String(poID).replace(/[^A-Za-z0-9-]/g, '')}-${String(line.line_key || i)}`;
+        coilNumbers.push(stoneRef);
+        const upM = Math.round(Number(line.unit_price_ngn) || 0);
+        const landedStone = upM > 0 && qty > 0 ? Math.round(qty * upM) : null;
+        updLine.run(qty, poID, line.line_key);
+        appendMovementTx(db, {
+          type: 'STORE_GRN_STONE',
+          ref: poID,
+          productID: e.productID,
+          qty,
+          detail: `${stoneRef} · ${qty} m · ${e.location || 'main store'}`,
+          dateISO: grnDateISO,
+          unitPriceNgn: upM || null,
+          valueNgn: landedStone,
+        });
+        const glS = tryPostInventoryReceiptJournal(db, {
+          entryDateISO: grnDateISO,
+          sourceKind: 'STONE_GRN',
+          sourceId: stoneRef,
+          landedCostNgn: landedStone,
+          branchId: coilBranch,
+          createdByUserId: glUserId,
+          memo: `Stone-coated GRN ${stoneRef}`,
+        });
+        if (landedStone && glS && glS.ok === false) {
+          throw new Error(glS.error || 'Could not post stone GRN to general ledger.');
+        }
+        continue;
+      }
+
+      if (isAcc) {
+        const accRef = `AC-${String(poID).replace(/[^A-Za-z0-9-]/g, '')}-${String(line.line_key || i)}`;
+        coilNumbers.push(accRef);
+        const upEach = Math.round(Number(line.unit_price_ngn) || 0);
+        const landedAcc = upEach > 0 && qty > 0 ? Math.round(qty * upEach) : null;
+        updLine.run(qty, poID, line.line_key);
+        appendMovementTx(db, {
+          type: 'STORE_GRN_ACCESSORY',
+          ref: poID,
+          productID: e.productID,
+          qty,
+          detail: `${accRef} · ${qty} u · ${e.location || 'main store'}`,
+          dateISO: grnDateISO,
+          unitPriceNgn: upEach || null,
+          valueNgn: landedAcc,
+        });
+        const glA = tryPostInventoryReceiptJournal(db, {
+          entryDateISO: grnDateISO,
+          sourceKind: 'ACCESSORY_GRN',
+          sourceId: accRef,
+          landedCostNgn: landedAcc,
+          branchId: coilBranch,
+          createdByUserId: glUserId,
+          memo: `Accessory GRN ${accRef}`,
+        });
+        if (landedAcc && glA && glA.ok === false) {
+          throw new Error(glA.error || 'Could not post accessory GRN to general ledger.');
+        }
+        continue;
+      }
+
       seq += 1;
       const coilNo =
-        e.coilNo?.trim() || `CL-2026-${String(seq).padStart(4, '0')}`;
+        e.coilNo?.trim() || `CL-${coilYy}-${String(seq).padStart(4, '0')}`;
       coilNumbers.push(coilNo);
       const w = e.weightKg != null && e.weightKg !== '' ? Number(e.weightKg) : null;
-      const product = products.find((row) => row.product_id === e.productID);
       const effectiveWeightKg = w != null && !Number.isNaN(w) ? w : qty;
       const supplierExpectedMeters =
         e.supplierExpectedMeters != null && e.supplierExpectedMeters !== ''
@@ -1143,13 +1474,417 @@ export function confirmGrn(
       deltaByProduct[e.productID] = (deltaByProduct[e.productID] || 0) + Number(e.qtyReceived);
     }
     for (const pid of Object.keys(deltaByProduct)) {
-      if (products.some((p) => p.product_id === pid)) {
-        updProd.run(deltaByProduct[pid], pid);
-      }
+      const exists = db.prepare(`SELECT 1 FROM products WHERE product_id = ?`).get(pid);
+      if (exists) updProd.run(deltaByProduct[pid], pid);
     }
   })();
 
   return { ok: true, coilNos: coilNumbers };
+}
+
+/**
+ * Direct stone-coated receipt (metres) without a PO — optional supplier for traceability.
+ * @param {import('better-sqlite3').Database} db
+ */
+export function postStoneInventoryReceipt(db, payload, branchFallback = DEFAULT_BRANCH_ID, opts = {}) {
+  const designLabel = String(payload?.designLabel ?? '').trim();
+  const colourLabel = String(payload?.colourLabel ?? '').trim();
+  const gaugeLabel = String(payload?.gaugeLabel ?? '').trim();
+  const metres = Number(payload?.metresReceived ?? payload?.qtyReceived);
+  if (!designLabel || !colourLabel || !gaugeLabel) {
+    return { ok: false, error: 'Design, colour, and gauge are required.' };
+  }
+  if (!Number.isFinite(metres) || metres <= 0) {
+    return { ok: false, error: 'Enter a valid metres received.' };
+  }
+  const bid = String(branchFallback || DEFAULT_BRANCH_ID).trim();
+  const productId = ensureStoneProduct(db, { designLabel, colourLabel, gaugeLabel, branchId: bid });
+  const upM = Math.round(Number(payload?.unitPricePerMeterNgn) || 0);
+  const landed = upM > 0 ? Math.round(metres * upM) : null;
+  const dateISO = String(payload?.dateISO || new Date().toISOString()).slice(0, 10);
+  const glUserId = opts?.actor?.id != null ? String(opts.actor.id) : null;
+  const supplierNote = String(payload?.supplierName ?? payload?.supplier_name ?? '').trim();
+  const detail = [supplierNote || 'Stone receipt', `${metres} m`].filter(Boolean).join(' · ');
+
+  try {
+    db.transaction(() => {
+      db.prepare(`UPDATE products SET stock_level = stock_level + ? WHERE product_id = ?`).run(metres, productId);
+      appendMovementTx(db, {
+        type: 'STORE_STONE_DIRECT',
+        ref: String(payload?.refNote ?? '').trim() || 'DIRECT',
+        productID: productId,
+        qty: metres,
+        detail,
+        dateISO,
+        unitPriceNgn: upM || null,
+        valueNgn: landed,
+      });
+      const src = `STONE-DIR-${productId}-${dateISO}-${Date.now()}`;
+      const glS = tryPostInventoryReceiptJournal(db, {
+        entryDateISO: dateISO,
+        sourceKind: 'STONE_RECEIPT',
+        sourceId: src,
+        landedCostNgn: landed,
+        branchId: bid,
+        createdByUserId: glUserId,
+        memo: `Stone-coated receipt ${productId}`,
+      });
+      if (landed && glS && glS.ok === false) throw new Error(glS.error || 'GL failed.');
+    })();
+    return { ok: true, productId, metresReceived: metres };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+}
+
+/**
+ * Accessory stock receipt (pcs / pack / tube). No supplier required.
+ */
+export function postAccessoryInventoryReceipt(db, payload, branchFallback = DEFAULT_BRANCH_ID, opts = {}) {
+  const productID = String(payload?.productID ?? '').trim();
+  const qty = Number(payload?.qtyReceived ?? payload?.qty);
+  if (!productID) return { ok: false, error: 'productID is required.' };
+  if (!Number.isFinite(qty) || qty <= 0) return { ok: false, error: 'Enter a valid quantity received.' };
+  const row = db.prepare(`SELECT * FROM products WHERE product_id = ?`).get(productID);
+  if (!row) return { ok: false, error: 'Product not found.' };
+  const up = Math.round(Number(payload?.unitCostNgn) || 0);
+  const landed = up > 0 ? Math.round(qty * up) : null;
+  const dateISO = String(payload?.dateISO || new Date().toISOString()).slice(0, 10);
+  const glUserId = opts?.actor?.id != null ? String(opts.actor.id) : null;
+  const bid = String(branchFallback || DEFAULT_BRANCH_ID).trim();
+
+  try {
+    db.transaction(() => {
+      db.prepare(`UPDATE products SET stock_level = stock_level + ? WHERE product_id = ?`).run(qty, productID);
+      appendMovementTx(db, {
+        type: 'STORE_ACCESSORY_DIRECT',
+        ref: String(payload?.refNote ?? '').trim() || 'ACCESSORY',
+        productID,
+        qty,
+        detail: String(payload?.note ?? '').trim() || 'Accessory receipt',
+        dateISO,
+        unitPriceNgn: up || null,
+        valueNgn: landed,
+      });
+      const src = `ACC-DIR-${productID}-${dateISO}-${Date.now()}`;
+      const glS = tryPostInventoryReceiptJournal(db, {
+        entryDateISO: dateISO,
+        sourceKind: 'ACCESSORY_RECEIPT',
+        sourceId: src,
+        landedCostNgn: landed,
+        branchId: bid,
+        createdByUserId: glUserId,
+        memo: `Accessory receipt ${productID}`,
+      });
+      if (landed && glS && glS.ok === false) throw new Error(glS.error || 'GL failed.');
+    })();
+    return { ok: true, productID, qtyReceived: qty };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+}
+
+function pragmaHasColumn(db, table, col) {
+  try {
+    return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
+  } catch {
+    return false;
+  }
+}
+
+function productExistsForBranch(db, productId, branchId) {
+  const hasPb = pragmaHasColumn(db, 'products', 'branch_id');
+  if (!hasPb) {
+    return Boolean(db.prepare(`SELECT 1 FROM products WHERE product_id = ? LIMIT 1`).get(productId));
+  }
+  const bid = String(branchId || '').trim();
+  return Boolean(
+    db
+      .prepare(
+        `SELECT 1 FROM products WHERE product_id = ? AND (branch_id IS NULL OR TRIM(COALESCE(branch_id,'')) = '' OR branch_id = ?) LIMIT 1`
+      )
+      .get(productId, bid)
+  );
+}
+
+function reconcileCoilProductStockFromLots(db, productID, branchId) {
+  const hasB = pragmaHasColumn(db, 'coil_lots', 'branch_id');
+  const bid = String(branchId || '').trim();
+  const prow = db.prepare(`SELECT branch_id FROM products WHERE product_id = ?`).get(productID);
+  const pBranch = prow != null ? String(prow.branch_id ?? '').trim() : '';
+  const productIsGlobalCatalog = prow != null && pBranch === '';
+
+  let sumRow;
+  if (productIsGlobalCatalog) {
+    sumRow = db.prepare(`SELECT COALESCE(SUM(qty_remaining), 0) AS s FROM coil_lots WHERE product_id = ?`).get(productID);
+  } else if (hasB && bid) {
+    sumRow = db
+      .prepare(
+        `SELECT COALESCE(SUM(qty_remaining), 0) AS s FROM coil_lots WHERE product_id = ? AND (branch_id IS NULL OR TRIM(COALESCE(branch_id,'')) = '' OR branch_id = ?)`
+      )
+      .get(productID, bid);
+  } else {
+    sumRow = db.prepare(`SELECT COALESCE(SUM(qty_remaining), 0) AS s FROM coil_lots WHERE product_id = ?`).get(productID);
+  }
+  const total = Math.round(Number(sumRow?.s) || 0);
+  const hasPb = pragmaHasColumn(db, 'products', 'branch_id');
+  if (productIsGlobalCatalog || !hasPb) {
+    db.prepare(`UPDATE products SET stock_level = ? WHERE product_id = ?`).run(total, productID);
+    return;
+  }
+  if (hasPb && bid) {
+    const u1 = db.prepare(`UPDATE products SET stock_level = ? WHERE product_id = ? AND branch_id = ?`).run(total, productID, bid);
+    if (u1.changes === 0) {
+      db.prepare(`UPDATE products SET stock_level = ? WHERE product_id = ?`).run(total, productID);
+    }
+  } else {
+    db.prepare(`UPDATE products SET stock_level = ? WHERE product_id = ?`).run(total, productID);
+  }
+}
+
+/**
+ * Bulk upsert coil opening balances from spreadsheet-style rows (no purchase order, no GL).
+ * Rows use camelCase or snake_case. Required: coilNo, productID, currentKg (on-hand kg).
+ */
+export function importCoilLotsFromSpreadsheet(db, payload, branchId = DEFAULT_BRANCH_ID, actor = null) {
+  const rowsIn = Array.isArray(payload?.rows) ? payload.rows : [];
+  if (!rowsIn.length) return { ok: false, error: 'No rows to import.' };
+  const insertOnly = Boolean(payload?.insertOnly);
+  const bid = String(branchId || DEFAULT_BRANCH_ID).trim();
+  const hasCoilBranch = pragmaHasColumn(db, 'coil_lots', 'branch_id');
+
+  const normalized = [];
+  const rowErrors = [];
+  for (let i = 0; i < rowsIn.length; i++) {
+    const r = rowsIn[i];
+    const coilNo = String(r.coilNo ?? r.coil_no ?? '').trim();
+    const productID = String(r.productID ?? r.product_id ?? '').trim();
+    if (!coilNo) {
+      rowErrors.push({ row: i + 1, error: 'Missing coil number.' });
+      continue;
+    }
+    if (!productID) {
+      rowErrors.push({ row: i + 1, error: 'Missing product ID.' });
+      continue;
+    }
+    if (!productExistsForBranch(db, productID, bid)) {
+      rowErrors.push({ row: i + 1, error: `Unknown product for this branch: ${productID}` });
+      continue;
+    }
+    const currentKg = Number(r.currentKg ?? r.current_kg ?? r.qtyRemaining ?? r.qty_remaining);
+    if (!Number.isFinite(currentKg) || currentKg < 0) {
+      rowErrors.push({ row: i + 1, error: 'Current kg must be a non-negative number.' });
+      continue;
+    }
+    const qtyReserved = Math.max(0, Number(r.qtyReserved ?? r.qty_reserved ?? 0) || 0);
+    if (qtyReserved > currentKg + 1e-6) {
+      rowErrors.push({ row: i + 1, error: 'Qty reserved cannot exceed current kg.' });
+      continue;
+    }
+    const qtyReceivedRaw = Number(r.qtyReceived ?? r.qty_received);
+    const qtyReceived = Number.isFinite(qtyReceivedRaw) && qtyReceivedRaw >= 0 ? qtyReceivedRaw : currentKg;
+    const wRaw = r.weightKg ?? r.weight_kg;
+    const weightKg = wRaw != null && wRaw !== '' ? Number(wRaw) : null;
+    if (weightKg != null && !Number.isFinite(weightKg)) {
+      rowErrors.push({ row: i + 1, error: 'Invalid weight kg.' });
+      continue;
+    }
+    const colour = String(r.colour ?? r.color ?? '').trim() || null;
+    const gaugeLabel = String(r.gaugeLabel ?? r.gauge_label ?? r.gauge ?? '').trim() || null;
+    const location = String(r.location ?? '').trim() || null;
+    const supplierName = String(r.supplierName ?? r.supplier_name ?? '').trim() || null;
+    const supplierID = String(r.supplierID ?? r.supplier_id ?? '').trim() || null;
+    const receivedAtISO =
+      String(r.receivedAtISO ?? r.received_at_iso ?? r.receivedDate ?? '').slice(0, 10) ||
+      new Date().toISOString().slice(0, 10);
+    const unitCostNgnPerKg = roundMoney(r.unitCostNgnPerKg ?? r.unit_cost_ngn_per_kg ?? 0);
+    const landedCostNgn = roundMoney(r.landedCostNgn ?? r.landed_cost_ngn ?? 0);
+    const materialTypeName = String(r.materialTypeName ?? r.material_type_name ?? '').trim() || null;
+    const semRaw = r.supplierExpectedMeters ?? r.supplier_expected_meters;
+    const supplierExpectedMeters =
+      semRaw != null && semRaw !== '' && Number.isFinite(Number(semRaw)) ? Number(semRaw) : null;
+    const scRaw = r.supplierConversionKgPerM ?? r.supplier_conversion_kg_per_m;
+    const supplierConversionKgPerM =
+      scRaw != null && scRaw !== '' && Number.isFinite(Number(scRaw)) ? Number(scRaw) : null;
+    let currentStatus = String(r.currentStatus ?? r.current_status ?? 'Available').trim() || 'Available';
+    const allowed = new Set(['Available', 'Reserved', 'Consumed']);
+    if (!allowed.has(currentStatus)) currentStatus = 'Available';
+    const materialOriginNote = String(r.note ?? r.materialOriginNote ?? r.material_origin_note ?? '').trim() || null;
+    const parentCoilNo = String(r.parentCoilNo ?? r.parent_coil_no ?? '').trim() || null;
+
+    normalized.push({
+      coilNo,
+      productID,
+      qty_received: qtyReceived,
+      weight_kg: weightKg != null && !Number.isNaN(weightKg) ? weightKg : null,
+      colour,
+      gauge_label: gaugeLabel,
+      material_type_name: materialTypeName,
+      supplier_expected_meters: supplierExpectedMeters,
+      supplier_conversion_kg_per_m: supplierConversionKgPerM,
+      qty_remaining: currentKg,
+      qty_reserved: qtyReserved,
+      current_weight_kg: currentKg,
+      current_status: currentStatus,
+      location,
+      po_id: null,
+      supplier_id: supplierID,
+      supplier_name: supplierName,
+      received_at_iso: receivedAtISO,
+      parent_coil_no: parentCoilNo,
+      material_origin_note: materialOriginNote,
+      landed_cost_ngn: landedCostNgn > 0 ? landedCostNgn : null,
+      unit_cost_ngn_per_kg: unitCostNgnPerKg > 0 ? unitCostNgnPerKg : null,
+      branch_id: hasCoilBranch ? bid : null,
+    });
+  }
+
+  if (!normalized.length) {
+    return { ok: false, error: 'No valid rows to import.', errors: rowErrors };
+  }
+
+  const baseCols = `coil_no, product_id, line_key, qty_received, weight_kg, colour, gauge_label, material_type_name,
+      supplier_expected_meters, supplier_conversion_kg_per_m, qty_remaining, qty_reserved, current_weight_kg,
+      current_status, location, po_id, supplier_id, supplier_name, received_at_iso,
+      parent_coil_no, material_origin_note, landed_cost_ngn, unit_cost_ngn_per_kg`;
+  const upsertSql = hasCoilBranch
+    ? `INSERT INTO coil_lots (${baseCols}, branch_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(coil_no) DO UPDATE SET
+      product_id = excluded.product_id,
+      line_key = excluded.line_key,
+      qty_received = excluded.qty_received,
+      weight_kg = excluded.weight_kg,
+      colour = excluded.colour,
+      gauge_label = excluded.gauge_label,
+      material_type_name = excluded.material_type_name,
+      supplier_expected_meters = excluded.supplier_expected_meters,
+      supplier_conversion_kg_per_m = excluded.supplier_conversion_kg_per_m,
+      qty_remaining = excluded.qty_remaining,
+      qty_reserved = excluded.qty_reserved,
+      current_weight_kg = excluded.current_weight_kg,
+      current_status = excluded.current_status,
+      location = excluded.location,
+      po_id = excluded.po_id,
+      supplier_id = excluded.supplier_id,
+      supplier_name = excluded.supplier_name,
+      received_at_iso = excluded.received_at_iso,
+      parent_coil_no = excluded.parent_coil_no,
+      material_origin_note = excluded.material_origin_note,
+      landed_cost_ngn = excluded.landed_cost_ngn,
+      unit_cost_ngn_per_kg = excluded.unit_cost_ngn_per_kg,
+      branch_id = excluded.branch_id`
+    : `INSERT INTO coil_lots (${baseCols}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(coil_no) DO UPDATE SET
+      product_id = excluded.product_id,
+      line_key = excluded.line_key,
+      qty_received = excluded.qty_received,
+      weight_kg = excluded.weight_kg,
+      colour = excluded.colour,
+      gauge_label = excluded.gauge_label,
+      material_type_name = excluded.material_type_name,
+      supplier_expected_meters = excluded.supplier_expected_meters,
+      supplier_conversion_kg_per_m = excluded.supplier_conversion_kg_per_m,
+      qty_remaining = excluded.qty_remaining,
+      qty_reserved = excluded.qty_reserved,
+      current_weight_kg = excluded.current_weight_kg,
+      current_status = excluded.current_status,
+      location = excluded.location,
+      po_id = excluded.po_id,
+      supplier_id = excluded.supplier_id,
+      supplier_name = excluded.supplier_name,
+      received_at_iso = excluded.received_at_iso,
+      parent_coil_no = excluded.parent_coil_no,
+      material_origin_note = excluded.material_origin_note,
+      landed_cost_ngn = excluded.landed_cost_ngn,
+      unit_cost_ngn_per_kg = excluded.unit_cost_ngn_per_kg`;
+
+  const insertOnlySql = hasCoilBranch
+    ? `INSERT INTO coil_lots (${baseCols}, branch_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    : `INSERT INTO coil_lots (${baseCols}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
+
+  const stmtUpsert = db.prepare(upsertSql);
+  const stmtInsert = db.prepare(insertOnlySql);
+
+  const bind = (n) => {
+    const base = [
+      n.coilNo,
+      n.productID,
+      null,
+      n.qty_received,
+      n.weight_kg,
+      n.colour,
+      n.gauge_label,
+      n.material_type_name,
+      n.supplier_expected_meters,
+      n.supplier_conversion_kg_per_m,
+      n.qty_remaining,
+      n.qty_reserved,
+      n.current_weight_kg,
+      n.current_status,
+      n.location,
+      n.po_id,
+      n.supplier_id,
+      n.supplier_name,
+      n.received_at_iso,
+      n.parent_coil_no,
+      n.material_origin_note,
+      n.landed_cost_ngn,
+      n.unit_cost_ngn_per_kg,
+    ];
+    if (hasCoilBranch) base.push(n.branch_id);
+    return base;
+  };
+
+  let imported = 0;
+  const skipped = [];
+  const productsToReconcile = new Set();
+
+  try {
+    db.transaction(() => {
+      for (const n of normalized) {
+        if (insertOnly) {
+          const exists = db.prepare(`SELECT 1 FROM coil_lots WHERE coil_no = ?`).get(n.coilNo);
+          if (exists) {
+            skipped.push({ coilNo: n.coilNo, reason: 'Already exists (insert-only mode).' });
+            continue;
+          }
+          try {
+            stmtInsert.run(...bind(n));
+            imported += 1;
+            productsToReconcile.add(n.productID);
+          } catch (e) {
+            skipped.push({ coilNo: n.coilNo, reason: String(e.message || e) });
+          }
+        } else {
+          stmtUpsert.run(...bind(n));
+          imported += 1;
+          productsToReconcile.add(n.productID);
+        }
+      }
+      for (const pid of productsToReconcile) {
+        reconcileCoilProductStockFromLots(db, pid, bid);
+      }
+    })();
+  } catch (e) {
+    return { ok: false, error: String(e.message || e), errors: rowErrors };
+  }
+
+  appendAuditLog(db, {
+    actor,
+    action: 'coil_lots.import_spreadsheet',
+    entityKind: 'inventory',
+    entityId: 'coil_lots',
+    note: `Imported ${imported} coil row(s)`,
+    details: { imported, skippedCount: skipped.length, insertOnly, branchId: bid },
+  });
+
+  return {
+    ok: true,
+    imported,
+    skipped,
+    errors: rowErrors.length ? rowErrors : undefined,
+    reconciledProductIDs: [...productsToReconcile],
+  };
 }
 
 export function adjustStock(db, productID, type, qty, reasonCode, note, dateISO) {
@@ -1173,13 +1908,14 @@ export function adjustStock(db, productID, type, qty, reasonCode, note, dateISO)
 export function transferToProduction(db, productID, qty, productionOrderId, dateISO) {
   const q = Number(qty);
   if (Number.isNaN(q) || q <= 0) return { ok: false, error: 'Invalid quantity.' };
-  const p = db.prepare(`SELECT stock_level FROM products WHERE product_id = ?`).get(productID);
+  const p = db.prepare(`SELECT stock_level, branch_id FROM products WHERE product_id = ?`).get(productID);
   if (!p || p.stock_level < q) return { ok: false, error: 'Insufficient stock in store.' };
+  const wipBranch = String(p.branch_id ?? '').trim();
   db.prepare(`UPDATE products SET stock_level = stock_level - ? WHERE product_id = ?`).run(q, productID);
   db.prepare(
-    `INSERT INTO wip_balances (product_id, qty) VALUES (?, ?)
-     ON CONFLICT(product_id) DO UPDATE SET qty = wip_balances.qty + excluded.qty`
-  ).run(productID, q);
+    `INSERT INTO wip_balances (branch_id, product_id, qty) VALUES (?,?,?)
+     ON CONFLICT(branch_id, product_id) DO UPDATE SET qty = wip_balances.qty + excluded.qty`
+  ).run(wipBranch, productID, q);
   appendMovementTx(db, {
     type: 'TRANSFER_TO_PRODUCTION',
     productID,
@@ -1208,13 +1944,15 @@ export function receiveFinishedGoods(
 
   if (src) {
     const wq = Number(wqRaw);
-    const wrow = db.prepare(`SELECT qty FROM wip_balances WHERE product_id = ?`).get(src);
+    const srcProd = db.prepare(`SELECT branch_id FROM products WHERE product_id = ?`).get(src);
+    const wipBranch = String(srcProd?.branch_id ?? '').trim();
+    const wrow = db.prepare(`SELECT qty FROM wip_balances WHERE product_id = ? AND branch_id = ?`).get(src, wipBranch);
     const cur = wrow?.qty || 0;
     if (Number.isNaN(wq) || wq <= 0) {
       return { ok: false, error: 'Enter WIP consumed for the selected source.' };
     }
     if (wq > cur) return { ok: false, error: `Insufficient WIP on ${src}.` };
-    db.prepare(`UPDATE wip_balances SET qty = qty - ? WHERE product_id = ?`).run(wq, src);
+    db.prepare(`UPDATE wip_balances SET qty = qty - ? WHERE product_id = ? AND branch_id = ?`).run(wq, src, wipBranch);
     appendMovementTx(db, {
       type: 'WIP_CONSUMED',
       productID: src,
@@ -1564,7 +2302,7 @@ export function returnCoilMaterialToStock(db, payload = {}, opts = {}) {
 }
 
 export function addCoilRequest(db, payload) {
-  const id = `CR-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const id = nextCoilRequestHumanId(db, DEFAULT_BRANCH_ID);
   db.prepare(
     `INSERT INTO coil_requests (id, status, created_at_iso, gauge, colour, material_type, requested_kg, note)
      VALUES (?,?,?,?,?,?,?,?)`
@@ -1610,10 +2348,8 @@ export function replaceTreasuryAccounts(db, accounts) {
   return { ok: true };
 }
 
-export function nextPoIdFromDb() {
-  const year = new Date().getFullYear();
-  const salt = Math.random().toString(36).slice(2, 8).toUpperCase();
-  return `PO-${year}-${Date.now()}-${salt}`;
+export function nextPoIdFromDb(db, branchId = DEFAULT_BRANCH_ID) {
+  return nextPurchaseOrderHumanId(db, branchId);
 }
 
 export function nextSupplierIdFromDb(db) {
@@ -1812,38 +2548,233 @@ export function replaceAccountsPayable(db, list) {
 export function replaceBankReconciliation(db, list) {
   db.prepare(`DELETE FROM bank_reconciliation_lines`).run();
   const ins = db.prepare(
-    `INSERT INTO bank_reconciliation_lines (id, bank_date_iso, description, amount_ngn, system_match, status, branch_id) VALUES (?,?,?,?,?,?,?)`
+    `INSERT INTO bank_reconciliation_lines (
+      id, bank_date_iso, description, amount_ngn, system_match, status, branch_id,
+      settled_amount_ngn, matched_system_amount_ngn, variance_ngn, variance_percent,
+      treasury_account_id, treasury_adjustment_movement_id,
+      manager_cleared_at_iso, manager_cleared_by_user_id, manager_cleared_by_name
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   );
   for (const b of list || []) {
     const bid = String(b.branchId ?? DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID;
-    ins.run(b.id, b.bankDateISO, b.description, b.amountNgn, b.systemMatch, b.status, bid);
+    ins.run(
+      b.id,
+      b.bankDateISO,
+      b.description,
+      b.amountNgn,
+      b.systemMatch,
+      b.status,
+      bid,
+      b.settledAmountNgn ?? null,
+      b.matchedSystemAmountNgn ?? null,
+      b.varianceNgn ?? null,
+      b.variancePercent ?? null,
+      b.treasuryAccountId ?? null,
+      b.treasuryAdjustmentMovementId ?? null,
+      b.managerClearedAtISO ?? null,
+      b.managerClearedByUserId ?? null,
+      b.managerClearedByName ?? null
+    );
   }
 }
 
+/** Strictly above 0.1%: |variance| * 1000 > |expected| (integer naira). */
+function bankReconVarianceNeedsManagerClearance(varianceNgn, expectedNgn) {
+  const ev = Math.abs(roundMoney(expectedNgn));
+  const base = Math.max(ev, 1);
+  return Math.abs(roundMoney(varianceNgn)) * 1000 > base;
+}
+
+/** Map typo/graphical dashes to ASCII hyphen so LE–… / RC–… match stored ids (Word, PDF paste). */
+function normalizeReceiptMatchDashes(s) {
+  return String(s || '')
+    .replace(/\u2013/g, '-')
+    .replace(/\u2014/g, '-')
+    .replace(/\u2212/g, '-');
+}
+
 /**
- * When status is Matched and system match starts with RC-, require a real sales receipt (same branch when both set).
+ * First whitespace-/bullet-separated token from the system match field (tolerates copy/paste noise).
+ * Do not split on en/em dash — those often replace hyphens inside receipt ids.
+ */
+function firstSystemMatchToken(systemMatch) {
+  let raw = String(systemMatch ?? '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim();
+  if (!raw) return '';
+  let chunk = String(raw.split(/\s+/)[0] || '').trim();
+  for (const sep of ['·', '\u2219', '\u2022', '\u2023', '•']) {
+    const i = chunk.indexOf(sep);
+    if (i !== -1) chunk = chunk.slice(0, i).trim();
+  }
+  return chunk.trim();
+}
+
+/**
+ * Resolve to canonical sales_receipts.id for settlement / variance (posted receipts are often LE-…).
  * @param {import('better-sqlite3').Database} db
  */
-function validateBankReconMatchedReceipt(db, systemMatch, lineBranchId) {
+function resolveSalesReceiptIdFromSystemMatch(db, systemMatch) {
+  const token = normalizeReceiptMatchDashes(firstSystemMatchToken(systemMatch));
+  if (!token) return null;
+  const byId = db.prepare(`SELECT id FROM sales_receipts WHERE id = ?`).get(token);
+  if (byId?.id) return String(byId.id);
+  const byIdCi = db.prepare(`SELECT id FROM sales_receipts WHERE lower(id) = lower(?)`).get(token);
+  if (byIdCi?.id) return String(byIdCi.id);
+  const byLedger = db.prepare(`SELECT id FROM sales_receipts WHERE ledger_entry_id = ?`).get(token);
+  if (byLedger?.id) return String(byLedger.id);
+  const byLedgerCi = db
+    .prepare(`SELECT id FROM sales_receipts WHERE ledger_entry_id IS NOT NULL AND lower(ledger_entry_id) = lower(?)`)
+    .get(token);
+  return byLedgerCi?.id ? String(byLedgerCi.id) : null;
+}
+
+function expectedReceiptSettlementNgn(db, receiptId) {
+  const row = db.prepare(`SELECT amount_ngn FROM sales_receipts WHERE id = ?`).get(receiptId);
+  const treasSum = db
+    .prepare(
+      `SELECT COALESCE(SUM(amount_ngn), 0) AS s FROM treasury_movements
+       WHERE source_kind = 'LEDGER_RECEIPT' AND source_id = ?`
+    )
+    .get(receiptId);
+  const t = roundMoney(treasSum?.s);
+  if (t !== 0) return t;
+  return roundMoney(row?.amount_ngn || 0);
+}
+
+function primaryTreasuryAccountForReceipt(db, receiptId) {
+  const rows = db
+    .prepare(
+      `SELECT treasury_account_id, amount_ngn FROM treasury_movements
+       WHERE source_kind = 'LEDGER_RECEIPT' AND source_id = ?
+       ORDER BY ABS(amount_ngn) DESC`
+    )
+    .all(receiptId);
+  const first = rows.find((r) => Number(r.treasury_account_id) > 0);
+  return first ? Number(first.treasury_account_id) : 0;
+}
+
+/** Fallback when a receipt has no LEDGER_RECEIPT treasury split (e.g. legacy import). */
+function firstTreasuryAccountId(db) {
+  const r = db.prepare(`SELECT id FROM treasury_accounts ORDER BY id ASC LIMIT 1`).get();
+  return r?.id ? Number(r.id) : 0;
+}
+
+function postBankReconTreasuryVariance(db, params) {
+  const {
+    lineId,
+    deltaNgn,
+    treasuryAccountId,
+    receiptId,
+    actor,
+    postedAtISO,
+    customerName,
+  } = params;
+  const d = roundMoney(deltaNgn);
+  if (d === 0) return { ok: true, movementId: null };
+  const tid = Number(treasuryAccountId);
+  if (!tid) return { ok: false, error: 'Treasury account is required to post a settlement variance.' };
+  const mv = insertTreasuryMovementTx(db, {
+    type: 'BANK_RECON_ADJUSTMENT',
+    treasuryAccountId: tid,
+    amountNgn: d,
+    postedAtISO: postedAtISO || new Date().toISOString(),
+    reference: lineId,
+    counterpartyKind: 'BANK_RECON',
+    counterpartyId: lineId,
+    counterpartyName: customerName || 'Bank reconciliation',
+    sourceKind: 'BANK_RECON_LINE',
+    sourceId: lineId,
+    note: `Receipt ${receiptId} settlement vs books`,
+    createdBy: actorName(actor),
+  });
+  return { ok: true, movementId: mv.id };
+}
+
+/**
+ * When status is Matched and system match looks like a receipt id, require a real sales receipt.
+ * Branch is not enforced — HQ often reconciles one bank statement against receipts from any branch.
+ * @param {import('better-sqlite3').Database} db
+ */
+function validateBankReconMatchedReceipt(db, systemMatch) {
   const raw = String(systemMatch ?? '').trim();
   if (!raw) return { ok: true };
-  const token = String(raw.split(/\s+/)[0] || '')
-    .split('·')[0]
-    .trim();
-  if (!/^RC-/i.test(token)) return { ok: true };
-  const r = db.prepare(`SELECT id, branch_id FROM sales_receipts WHERE id = ?`).get(token);
-  if (!r) {
-    return {
-      ok: false,
-      error: `No sales receipt found for id "${token}". Use a valid receipt id or leave system match blank until identified.`,
-    };
-  }
-  const lb = String(lineBranchId || DEFAULT_BRANCH_ID).trim();
-  const rb = String(r.branch_id || '').trim();
-  if (lb && rb && rb !== lb) {
-    return { ok: false, error: `Receipt "${token}" belongs to another branch.` };
+  const tokenRaw = firstSystemMatchToken(systemMatch);
+  if (!tokenRaw) return { ok: true };
+  const token = normalizeReceiptMatchDashes(tokenRaw);
+  const resolvedId = resolveSalesReceiptIdFromSystemMatch(db, systemMatch);
+  if (!resolvedId) {
+    if (/^(RC-|RCP-|LE-)/i.test(token)) {
+      return {
+        ok: false,
+        error: `No sales receipt found for "${tokenRaw}". Use the receipt id from Sales — posted receipts are usually LE-… (legacy imports may show RC-…).`,
+      };
+    }
+    return { ok: true };
   }
   return { ok: true };
+}
+
+function splitCsvLine(line) {
+  const out = [];
+  let cur = '';
+  let inQ = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const c = line[i];
+    if (c === '"') {
+      inQ = !inQ;
+    } else if (c === ',' && !inQ) {
+      out.push(cur.trim());
+      cur = '';
+    } else {
+      cur += c;
+    }
+  }
+  out.push(cur.trim());
+  return out.map((s) => s.replace(/^"|"$/g, ''));
+}
+
+/**
+ * Parse bank-statement CSV: optional header (bankDateISO, description, amountNgn).
+ * Each data row: YYYY-MM-DD, description (commas allowed if quoted), amount (integer naira; negative = debit).
+ * @param {string} csvText
+ */
+export function parseBankReconciliationCsvText(csvText) {
+  const rows = String(csvText || '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (rows.length === 0) return { ok: false, error: 'Empty CSV.' };
+  let start = 0;
+  const h = rows[0].toLowerCase();
+  if (
+    h.includes('bankdateiso') ||
+    (h.includes('date') && h.includes('description') && (h.includes('amount') || h.includes('amountngn')))
+  ) {
+    start = 1;
+  }
+  if (start >= rows.length) return { ok: false, error: 'No data rows after header.' };
+  const lines = [];
+  const parseErrors = [];
+  for (let idx = start; idx < rows.length; idx += 1) {
+    const parts = splitCsvLine(rows[idx]);
+    if (parts.length < 3) {
+      parseErrors.push({ line: idx + 1, error: 'Need date, description, and amount columns.' });
+      continue;
+    }
+    const bankDateISO = parts[0].slice(0, 10);
+    const amountNgn = roundMoney(Number(String(parts[parts.length - 1]).replace(/,/g, '')));
+    const description = parts.slice(1, -1).join(',').trim();
+    lines.push({ bankDateISO, description, amountNgn });
+  }
+  if (lines.length === 0) {
+    return {
+      ok: false,
+      error: parseErrors[0]?.error || 'No valid rows.',
+      parseErrors,
+    };
+  }
+  return { ok: true, lines, parseErrors };
 }
 
 /**
@@ -1871,10 +2802,10 @@ export function insertBankReconciliationLine(db, payload, branchId = DEFAULT_BRA
   if (!['Matched', 'Review', 'Excluded'].includes(status)) status = 'Review';
   const bid = String(branchId || DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID;
   if (status === 'Matched') {
-    const v = validateBankReconMatchedReceipt(db, systemMatch, bid);
+    const v = validateBankReconMatchedReceipt(db, systemMatch);
     if (!v.ok) return v;
   }
-  const id = `BR-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const id = nextBankReconLineHumanId(db, bid);
   db.prepare(
     `INSERT INTO bank_reconciliation_lines (id, bank_date_iso, description, amount_ngn, system_match, status, branch_id) VALUES (?,?,?,?,?,?,?)`
   ).run(id, bankDateISO, description, amountNgn, systemMatch || null, status, bid);
@@ -1896,30 +2827,298 @@ export function updateBankReconciliationLine(db, lineId, payload, actor) {
   if (!id) return { ok: false, error: 'Line id is required.' };
   const row = db.prepare(`SELECT * FROM bank_reconciliation_lines WHERE id = ?`).get(id);
   if (!row) return { ok: false, error: 'Bank line not found.' };
+
   const systemMatch =
-    payload.systemMatch !== undefined ? String(payload.systemMatch ?? '').trim() : row.system_match;
-  const status = payload.status !== undefined ? String(payload.status ?? '').trim() : row.status;
-  if (!['Matched', 'Review', 'Excluded'].includes(status)) {
-    return { ok: false, error: 'Status must be Matched, Review, or Excluded.' };
+    payload.systemMatch !== undefined ? String(payload.systemMatch ?? '').trim() : row.system_match || '';
+  const requestedStatus = payload.status !== undefined ? String(payload.status ?? '').trim() : row.status;
+  if (!['Matched', 'Review', 'Excluded', 'PendingManager'].includes(requestedStatus)) {
+    return { ok: false, error: 'Status must be Matched, Review, Excluded, or PendingManager.' };
   }
-  const lineBranchId = row.branch_id != null && String(row.branch_id).trim() ? row.branch_id : DEFAULT_BRANCH_ID;
-  if (status === 'Matched') {
-    const v = validateBankReconMatchedReceipt(db, systemMatch, lineBranchId);
+
+  const settledOverride =
+    payload.settledAmountNgn !== undefined && payload.settledAmountNgn !== null && payload.settledAmountNgn !== ''
+      ? roundMoney(payload.settledAmountNgn)
+      : null;
+  const treasuryOverride =
+    payload.treasuryAccountId !== undefined &&
+    payload.treasuryAccountId !== null &&
+    String(payload.treasuryAccountId).trim() !== ''
+      ? Number(payload.treasuryAccountId)
+      : null;
+
+  const upd = db.prepare(
+    `UPDATE bank_reconciliation_lines SET
+      system_match = ?,
+      status = ?,
+      settled_amount_ngn = ?,
+      matched_system_amount_ngn = ?,
+      variance_ngn = ?,
+      variance_percent = ?,
+      treasury_account_id = ?,
+      treasury_adjustment_movement_id = ?,
+      manager_cleared_at_iso = ?,
+      manager_cleared_by_user_id = ?,
+      manager_cleared_by_name = ?
+    WHERE id = ?`
+  );
+
+  if (requestedStatus === 'Review' || requestedStatus === 'Excluded') {
+    const clearSettlement = requestedStatus === 'Excluded';
+    upd.run(
+      systemMatch || null,
+      requestedStatus,
+      clearSettlement ? null : row.settled_amount_ngn,
+      clearSettlement ? null : row.matched_system_amount_ngn,
+      clearSettlement ? null : row.variance_ngn,
+      clearSettlement ? null : row.variance_percent,
+      clearSettlement ? null : row.treasury_account_id,
+      clearSettlement ? null : row.treasury_adjustment_movement_id,
+      clearSettlement ? null : row.manager_cleared_at_iso,
+      clearSettlement ? null : row.manager_cleared_by_user_id,
+      clearSettlement ? null : row.manager_cleared_by_name,
+      id
+    );
+    appendAuditLog(db, {
+      actor,
+      action: 'bank_reconciliation.update',
+      entityKind: 'bank_reconciliation_line',
+      entityId: id,
+      note: `Bank line ${requestedStatus}${systemMatch ? `: ${systemMatch}` : ''}`,
+      status: 'success',
+      details: { systemMatch, status: requestedStatus },
+    });
+    return { ok: true, status: requestedStatus };
+  }
+
+  if (requestedStatus === 'PendingManager') {
+    const v = validateBankReconMatchedReceipt(db, systemMatch);
     if (!v.ok) return v;
+    upd.run(
+      systemMatch || null,
+      'PendingManager',
+      row.settled_amount_ngn,
+      row.matched_system_amount_ngn,
+      row.variance_ngn,
+      row.variance_percent,
+      row.treasury_account_id,
+      row.treasury_adjustment_movement_id,
+      row.manager_cleared_at_iso,
+      row.manager_cleared_by_user_id,
+      row.manager_cleared_by_name,
+      id
+    );
+    appendAuditLog(db, {
+      actor,
+      action: 'bank_reconciliation.update',
+      entityKind: 'bank_reconciliation_line',
+      entityId: id,
+      note: 'Bank line set to awaiting manager clearance',
+      status: 'success',
+      details: { systemMatch, status: 'PendingManager' },
+    });
+    return { ok: true, status: 'PendingManager' };
   }
-  db.prepare(
-    `UPDATE bank_reconciliation_lines SET system_match = ?, status = ? WHERE id = ?`
-  ).run(systemMatch || null, status, id);
-  appendAuditLog(db, {
-    actor,
-    action: 'bank_reconciliation.update',
-    entityKind: 'bank_reconciliation_line',
-    entityId: id,
-    note: `Bank line ${status}${systemMatch ? `: ${systemMatch}` : ''}`,
-    status: 'success',
-    details: { systemMatch, status },
-  });
-  return { ok: true };
+
+  const v = validateBankReconMatchedReceipt(db, systemMatch);
+  if (!v.ok) return v;
+
+  const bankAmt = roundMoney(row.amount_ngn);
+  const rc = resolveSalesReceiptIdFromSystemMatch(db, systemMatch);
+
+  if (!rc || bankAmt <= 0) {
+    upd.run(
+      systemMatch || null,
+      'Matched',
+      null,
+      null,
+      null,
+      null,
+      null,
+      row.treasury_adjustment_movement_id,
+      row.manager_cleared_at_iso,
+      row.manager_cleared_by_user_id,
+      row.manager_cleared_by_name,
+      id
+    );
+    appendAuditLog(db, {
+      actor,
+      action: 'bank_reconciliation.update',
+      entityKind: 'bank_reconciliation_line',
+      entityId: id,
+      note: `Bank line Matched${systemMatch ? `: ${systemMatch}` : ''}`,
+      status: 'success',
+      details: { systemMatch, status: 'Matched' },
+    });
+    return { ok: true, status: 'Matched' };
+  }
+
+  const receiptRow = db.prepare(`SELECT customer_name FROM sales_receipts WHERE id = ?`).get(rc);
+  const expected = expectedReceiptSettlementNgn(db, rc);
+  const settled = settledOverride != null ? settledOverride : bankAmt;
+  const variance = settled - expected;
+  const base = Math.max(Math.abs(expected), 1);
+  const variancePct = (Math.abs(variance) / base) * 100;
+
+  let treasuryId = treasuryOverride || primaryTreasuryAccountForReceipt(db, rc);
+  if (Math.abs(variance) >= 1 && !treasuryId) treasuryId = firstTreasuryAccountId(db);
+  if (Math.abs(variance) >= 1 && !treasuryId) {
+    return {
+      ok: false,
+      error:
+        'Choose the treasury (bank) account for this settlement. No treasury accounts exist yet.',
+    };
+  }
+
+  const needsManager =
+    Math.abs(variance) >= 1 && bankReconVarianceNeedsManagerClearance(variance, expected);
+
+  if (needsManager) {
+    upd.run(
+      systemMatch || null,
+      'PendingManager',
+      settled,
+      expected,
+      variance,
+      variancePct,
+      treasuryId || null,
+      null,
+      null,
+      null,
+      null,
+      id
+    );
+    appendAuditLog(db, {
+      actor,
+      action: 'bank_reconciliation.pending_manager',
+      entityKind: 'bank_reconciliation_line',
+      entityId: id,
+      note: `Variance ${variance} naira (${variancePct.toFixed(4)}%) awaits manager clearance`,
+      status: 'success',
+      details: { receiptId: rc, expected, settled, variance, variancePct },
+    });
+    return {
+      ok: true,
+      status: 'PendingManager',
+      needsManagerClearance: true,
+      varianceNgn: variance,
+      variancePercent: variancePct,
+      matchedSystemAmountNgn: expected,
+      settledAmountNgn: settled,
+    };
+  }
+
+  try {
+    let movementId = row.treasury_adjustment_movement_id || null;
+    db.transaction(() => {
+      if (Math.abs(variance) >= 1 && !movementId) {
+        const p = postBankReconTreasuryVariance(db, {
+          lineId: id,
+          deltaNgn: variance,
+          treasuryAccountId: treasuryId,
+          receiptId: rc,
+          actor,
+          postedAtISO: normalizeIsoTimestamp(row.bank_date_iso),
+          customerName: receiptRow?.customer_name || '',
+        });
+        if (!p.ok) throw new Error(p.error);
+        movementId = p.movementId;
+      }
+      upd.run(
+        systemMatch || null,
+        'Matched',
+        Math.abs(variance) >= 1 ? settled : null,
+        Math.abs(variance) >= 1 ? expected : null,
+        Math.abs(variance) >= 1 ? variance : null,
+        Math.abs(variance) >= 1 ? variancePct : null,
+        Math.abs(variance) >= 1 ? treasuryId : null,
+        movementId,
+        row.manager_cleared_at_iso,
+        row.manager_cleared_by_user_id,
+        row.manager_cleared_by_name,
+        id
+      );
+    })();
+    appendAuditLog(db, {
+      actor,
+      action: 'bank_reconciliation.update',
+      entityKind: 'bank_reconciliation_line',
+      entityId: id,
+      note: `Bank line Matched${systemMatch ? `: ${systemMatch}` : ''}${Math.abs(variance) >= 1 ? ` · variance ${variance}` : ''}`,
+      status: 'success',
+      details: { systemMatch, status: 'Matched', variance, movementId },
+    });
+    return { ok: true, status: 'Matched', varianceNgn: variance, treasuryAdjustmentMovementId: movementId };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+}
+
+/**
+ * Manager / finance approver: post stored variance and mark line Matched.
+ * @param {import('better-sqlite3').Database} db
+ */
+export function approveBankReconciliationVariance(db, lineId, actor) {
+  const id = String(lineId ?? '').trim();
+  if (!id) return { ok: false, error: 'Line id is required.' };
+  const row = db.prepare(`SELECT * FROM bank_reconciliation_lines WHERE id = ?`).get(id);
+  if (!row) return { ok: false, error: 'Bank line not found.' };
+  if (String(row.status || '') !== 'PendingManager') {
+    return { ok: false, error: 'This line is not awaiting manager clearance.' };
+  }
+  if (row.treasury_adjustment_movement_id) {
+    return { ok: false, error: 'Treasury adjustment was already posted for this line.' };
+  }
+  const rc = resolveSalesReceiptIdFromSystemMatch(db, row.system_match);
+  if (!rc) return { ok: false, error: 'Receipt id missing on bank line.' };
+  const variance = roundMoney(row.variance_ngn);
+  let tid = Number(row.treasury_account_id);
+  if (!tid && Math.abs(variance) >= 1) tid = firstTreasuryAccountId(db);
+  if (!tid && Math.abs(variance) >= 1) {
+    return { ok: false, error: 'Treasury account is not set and no default bank account exists.' };
+  }
+  const receiptRow = db.prepare(`SELECT customer_name FROM sales_receipts WHERE id = ?`).get(rc);
+
+  const upd = db.prepare(
+    `UPDATE bank_reconciliation_lines SET
+      status = 'Matched',
+      treasury_adjustment_movement_id = ?,
+      manager_cleared_at_iso = ?,
+      manager_cleared_by_user_id = ?,
+      manager_cleared_by_name = ?
+    WHERE id = ?`
+  );
+
+  try {
+    let movementId = null;
+    db.transaction(() => {
+      if (Math.abs(variance) >= 1) {
+        const p = postBankReconTreasuryVariance(db, {
+          lineId: id,
+          deltaNgn: variance,
+          treasuryAccountId: tid,
+          receiptId: rc,
+          actor,
+          postedAtISO: normalizeIsoTimestamp(row.bank_date_iso),
+          customerName: receiptRow?.customer_name || '',
+        });
+        if (!p.ok) throw new Error(p.error);
+        movementId = p.movementId;
+      }
+      upd.run(movementId, new Date().toISOString(), actorId(actor), actorName(actor), id);
+    })();
+    appendAuditLog(db, {
+      actor,
+      action: 'bank_reconciliation.manager_clear',
+      entityKind: 'bank_reconciliation_line',
+      entityId: id,
+      note: `Manager cleared bank recon variance ${variance}`,
+      status: 'success',
+      details: { movementId, variance },
+    });
+    return { ok: true, status: 'Matched', treasuryAdjustmentMovementId: movementId };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
 }
 
 /** @param {import('better-sqlite3').Database} db */
@@ -1936,7 +3135,7 @@ export function insertCustomerCrmInteraction(db, customerID, payload, actor, bra
   const kind = String(payload.kind ?? 'note').trim() || 'note';
   const title = String(payload.title ?? '').trim();
   const atIso = String(payload.atIso ?? '').trim() || new Date().toISOString();
-  const id = `CRM-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const id = nextCrmInteractionHumanId(db, bid);
   const createdByName = actor?.displayName || actor?.username || '';
   db.prepare(
     `INSERT INTO customer_crm_interactions (id, customer_id, at_iso, kind, title, detail, created_by_name, branch_id)
@@ -2105,6 +3304,8 @@ export function reverseReceiptEntry(db, entryId, note = '', actor = null) {
         note: reversalNote,
         details: { reversalEntryId: reversal?.id ?? '' },
       });
+      const qref = String(target.quotation_ref || '').trim();
+      if (qref) syncQuotationPaidFromLedger(db, qref);
     })();
     return { ok: true, entry: reversal };
   } catch (e) {
@@ -2224,16 +3425,6 @@ function syncCuttingListLineRows(db, cuttingListId, lines) {
   }
 }
 
-export function nextCuttingListId(db) {
-  const rows = db.prepare(`SELECT id FROM cutting_lists`).all();
-  let max = 0;
-  for (const row of rows) {
-    const m = String(row.id).match(/(\d+)\s*$/);
-    if (m) max = Math.max(max, parseInt(m[1], 10));
-  }
-  return max > 0 ? `CL-2026-${String(max + 1).padStart(3, '0')}` : nextCuttingListIdValue();
-}
-
 /** Coil rows for this product in the workspace branch only. */
 export function countCoilLotsForProductInWorkspace(db, productID, workspaceBranchId) {
   const pid = String(productID ?? '').trim();
@@ -2250,20 +3441,41 @@ export function countCoilLotsForProductInWorkspace(db, productID, workspaceBranc
 function validateQuotationForCuttingList(db, quotationRef, excludeCuttingListId) {
   const qref = String(quotationRef ?? '').trim();
   if (!qref) return { ok: false, error: 'Link a quotation.' };
-  const qrow = db.prepare(`SELECT total_ngn, paid_ngn FROM quotations WHERE id = ?`).get(qref);
+  const qrow = db
+    .prepare(
+      `SELECT total_ngn, paid_ngn, manager_production_approved_at_iso FROM quotations WHERE id = ?`
+    )
+    .get(qref);
   if (!qrow) return { ok: false, error: 'Quotation not found.' };
   const total = Number(qrow.total_ngn) || 0;
   if (total <= 0) return { ok: false, error: 'Quotation total must be greater than zero.' };
-  const entries = listLedgerEntries(db, 'ALL');
-  const qLite = {
-    id: qref,
-    totalNgn: total,
-    paidNgn: Number(qrow.paid_ngn) || 0,
-  };
-  const due = amountDueOnQuotationFromEntries(entries, qLite);
-  const paidToward = total - due;
-  if (paidToward < total * 0.5 - 1e-6) {
-    return { ok: false, error: 'At least 50% of the quotation must be paid before creating a cutting list.' };
+  const managerOk = Boolean(qrow.manager_production_approved_at_iso);
+  const bookPaid = Number(qrow.paid_ngn) || 0;
+  const threshold = total * 0.7 - 1e-6;
+  if (!managerOk && bookPaid < threshold) {
+    const receiptRows = listSalesReceipts(db, 'ALL').filter(
+      (r) => String(r.quotationRef || '').trim() === qref
+    );
+    const ledgerRows = listLedgerEntries(db, 'ALL');
+    const enriched = enrichSalesReceiptRowsWithCashFromLedger(receiptRows, ledgerRows);
+    const cashFromReceipts = enriched.reduce(
+      (sum, r) => sum + Math.round(Number(r.cashReceivedNgn ?? r.amountNgn) || 0),
+      0
+    );
+    const advRow = db
+      .prepare(
+        `SELECT COALESCE(SUM(amount_ngn), 0) AS s FROM ledger_entries WHERE type = 'ADVANCE_APPLIED' AND quotation_ref = ?`
+      )
+      .get(qref);
+    const advanceApplied = Math.round(Number(advRow?.s) || 0);
+    const cashPaidTotal = cashFromReceipts + advanceApplied;
+    if (cashPaidTotal < threshold) {
+      return {
+        ok: false,
+        error:
+          'At least 70% of the quotation must be paid (recorded receipts / applied advances on file) before creating a cutting list.',
+      };
+    }
   }
   const existing = excludeCuttingListId
     ? db
@@ -2291,7 +3503,9 @@ export function insertCuttingList(db, payload, branchFallback = DEFAULT_BRANCH_I
   if (!qCheck.ok) return qCheck;
   const lines = normalizeCuttingListLines(payload.lines);
   if (!lines.length) return { ok: false, error: 'Add at least one valid cutting line.' };
-  const id = String(payload.id ?? '').trim() || nextCuttingListId(db);
+  const branchId =
+    String(quote?.branch_id || '').trim() || String(branchFallback || DEFAULT_BRANCH_ID).trim();
+  const id = String(payload.id ?? '').trim() || nextCuttingListHumanId(db, branchId);
   const dateISO = String(payload.dateISO ?? '').trim() || new Date().toISOString().slice(0, 10);
   const dateLabel = shortDateFromIso(dateISO);
   const totalMeters = Number(
@@ -2305,8 +3519,6 @@ export function insertCuttingList(db, payload, branchFallback = DEFAULT_BRANCH_I
   const machineName = String(payload.machineName ?? '').trim();
   const status = 'Waiting';
   const handledBy = String(payload.handledBy ?? '').trim() || 'Sales';
-  const branchId =
-    String(quote?.branch_id || '').trim() || String(branchFallback || DEFAULT_BRANCH_ID).trim();
   const productionReleasePending =
     Boolean(payload.holdForProductionApproval) || Boolean(payload.holdProductionRelease) ? 1 : 0;
 
@@ -2457,16 +3669,6 @@ export function updateCuttingList(db, cuttingListId, payload) {
   return { ok: true, id: cuttingListId };
 }
 
-export function nextProductionJobId(db) {
-  const rows = db.prepare(`SELECT job_id FROM production_jobs`).all();
-  let max = 0;
-  for (const row of rows) {
-    const m = String(row.job_id).match(/(\d+)\s*$/);
-    if (m) max = Math.max(max, parseInt(m[1], 10));
-  }
-  return max > 0 ? `PRO-2026-${String(max + 1).padStart(3, '0')}` : nextProductionJobIdValue();
-}
-
 export function insertProductionJob(db, payload, branchFallback = DEFAULT_BRANCH_ID) {
   const cuttingListId = String(payload.cuttingListId ?? '').trim();
   const cuttingList = cuttingListId
@@ -2483,7 +3685,6 @@ export function insertProductionJob(db, payload, branchFallback = DEFAULT_BRANCH
         'This cutting list is waiting on operations approval before it can join the production queue. Clear the hold first.',
     };
   }
-  const jobID = String(payload.jobID ?? '').trim() || nextProductionJobId(db);
   const quotationRef = String(payload.quotationRef ?? cuttingList?.quotation_ref ?? '').trim();
   const customerID = String(payload.customerID ?? cuttingList?.customer_id ?? '').trim();
   const customerName = String(payload.customerName ?? cuttingList?.customer_name ?? '').trim();
@@ -2500,6 +3701,8 @@ export function insertProductionJob(db, payload, branchFallback = DEFAULT_BRANCH
   const createdAtISO = new Date().toISOString();
   const branchId =
     String(cuttingList?.branch_id || '').trim() || String(branchFallback || DEFAULT_BRANCH_ID).trim();
+  const jobID =
+    String(payload.jobID ?? '').trim() || nextProductionJobHumanId(db, branchId);
 
   db.transaction(() => {
     db.prepare(
@@ -2538,7 +3741,7 @@ export function insertProductionJob(db, payload, branchFallback = DEFAULT_BRANCH
         `UPDATE cutting_lists
          SET production_registered = 1, production_register_ref = ?, status = ?
          WHERE id = ?`
-      ).run('', 'Waiting', cuttingListId);
+      ).run(jobID, 'Waiting', cuttingListId);
     }
   })();
 
@@ -2556,31 +3759,37 @@ export function setProductionJobStatus(db, jobID, status) {
   if (nextStatus === 'Completed') {
     return { ok: false, error: 'Use the completion flow with coil readings to finish this job.' };
   }
-  const completedAtISO = nextStatus === 'Completed' ? new Date().toISOString() : null;
   db.transaction(() => {
     db.prepare(`UPDATE production_jobs SET status = ?, completed_at_iso = ? WHERE job_id = ?`).run(
       nextStatus,
-      completedAtISO,
+      null,
       jobID
     );
     if (row.cutting_list_id) {
-      db.prepare(`UPDATE cutting_lists SET status = ? WHERE id = ?`).run(
-        nextStatus === 'Completed' ? 'Finished' : 'In production',
-        row.cutting_list_id
-      );
+      db.prepare(`UPDATE cutting_lists SET status = ? WHERE id = ?`).run('In production', row.cutting_list_id);
     }
   })();
   return { ok: true };
 }
 
-export function nextDeliveryId(db) {
-  const rows = db.prepare(`SELECT id FROM deliveries`).all();
-  let max = 0;
-  for (const row of rows) {
-    const m = String(row.id).match(/(\d+)\s*$/);
-    if (m) max = Math.max(max, parseInt(m[1], 10));
-  }
-  return max > 0 ? `DN-2026-${String(max + 1).padStart(3, '0')}` : nextDeliveryIdValue();
+/** Fill missing cutting-list header product from the linked production job (common after production register). */
+function cuttingListRowForDelivery(db, cuttingListRow, cuttingListId) {
+  if (!cuttingListRow || !cuttingListId) return cuttingListRow;
+  const pid = String(cuttingListRow.product_id ?? '').trim();
+  if (pid) return cuttingListRow;
+  const job = db
+    .prepare(
+      `SELECT product_id, product_name FROM production_jobs
+       WHERE cutting_list_id = ? ORDER BY created_at_iso DESC LIMIT 1`
+    )
+    .get(cuttingListId);
+  const jp = String(job?.product_id ?? '').trim();
+  if (!jp) return cuttingListRow;
+  return {
+    ...cuttingListRow,
+    product_id: jp,
+    product_name: String(job?.product_name ?? cuttingListRow.product_name ?? '').trim() || cuttingListRow.product_name,
+  };
 }
 
 function normalizeDeliveryLines(payloadLines, cuttingListRow, cuttingListLines) {
@@ -2596,15 +3805,37 @@ function normalizeDeliveryLines(payloadLines, cuttingListRow, cuttingListLines) 
       }))
       .filter((line) => line.productID && line.qty > 0);
   }
-  if (!cuttingListRow || !cuttingListLines.length || !cuttingListRow.product_id) return [];
-  return cuttingListLines.map((line) => ({
-    sortOrder: line.sort_order,
-    productID: cuttingListRow.product_id,
-    productName: cuttingListRow.product_name || cuttingListRow.product_id,
-    qty: Number(line.total_m) || 0,
-    unit: 'm',
-    cuttingListLineNo: line.sort_order,
-  }));
+  if (!cuttingListRow) return [];
+  const productID = String(cuttingListRow.product_id ?? '').trim();
+  const productName = String(cuttingListRow.product_name ?? '').trim() || productID;
+  if (!productID) return [];
+
+  const fromLines = cuttingListLines
+    .map((line) => ({
+      sortOrder: line.sort_order,
+      productID,
+      productName,
+      qty: Number(line.total_m) || 0,
+      unit: 'm',
+      cuttingListLineNo: line.sort_order,
+    }))
+    .filter((line) => line.qty > 0);
+  if (fromLines.length) return fromLines;
+
+  const headerM = Number(cuttingListRow.total_meters) || 0;
+  if (headerM > 0) {
+    return [
+      {
+        sortOrder: 1,
+        productID,
+        productName,
+        qty: headerM,
+        unit: 'm',
+        cuttingListLineNo: null,
+      },
+    ];
+  }
+  return [];
 }
 
 function syncDeliveryLineRows(db, deliveryId, lines) {
@@ -2628,7 +3859,6 @@ function syncDeliveryLineRows(db, deliveryId, lines) {
 }
 
 export function insertDelivery(db, payload, branchFallback = DEFAULT_BRANCH_ID) {
-  const id = String(payload.id ?? '').trim() || nextDeliveryId(db);
   const cuttingListId = String(payload.cuttingListId ?? '').trim();
   const cuttingList = cuttingListId
     ? db.prepare(`SELECT * FROM cutting_lists WHERE id = ?`).get(cuttingListId)
@@ -2646,7 +3876,8 @@ export function insertDelivery(db, payload, branchFallback = DEFAULT_BRANCH_ID) 
     payload.customerName ?? cuttingList?.customer_name ?? quote?.customer_name ?? ''
   ).trim();
   if (!customerName) return { ok: false, error: 'Customer is required.' };
-  const lines = normalizeDeliveryLines(payload.lines, cuttingList, cuttingListLines);
+  const listRowForLines = cuttingListRowForDelivery(db, cuttingList, cuttingListId);
+  const lines = normalizeDeliveryLines(payload.lines, listRowForLines, cuttingListLines);
   if (!lines.length) return { ok: false, error: 'Add at least one delivery line.' };
   const status = String(payload.status ?? '').trim() || 'Scheduled';
   const destination = String(payload.destination ?? '').trim();
@@ -2656,6 +3887,7 @@ export function insertDelivery(db, payload, branchFallback = DEFAULT_BRANCH_ID) 
   const eta = String(payload.eta ?? '').trim() || shipDate;
   const branchId =
     String(cuttingList?.branch_id || '').trim() || String(branchFallback || DEFAULT_BRANCH_ID).trim();
+  const id = String(payload.id ?? '').trim() || nextDeliveryHumanId(db, branchId);
 
   db.transaction(() => {
     db.prepare(
@@ -2692,7 +3924,8 @@ export function insertDelivery(db, payload, branchFallback = DEFAULT_BRANCH_ID) 
 }
 
 export function insertExpenseEntry(db, payload, branchId = DEFAULT_BRANCH_ID) {
-  const expenseID = String(payload.expenseID ?? '').trim() || `EXP-${Date.now()}`;
+  const bid = String(branchId || DEFAULT_BRANCH_ID).trim();
+  const expenseID = String(payload.expenseID ?? '').trim() || nextExpenseHumanId(db, bid);
   const category = String(payload.category ?? '').trim();
   const amountNgn = roundMoney(payload.amountNgn);
   if (!category) return { ok: false, error: 'Expense category is required.' };
@@ -2714,7 +3947,7 @@ export function insertExpenseEntry(db, payload, branchId = DEFAULT_BRANCH_ID) {
         category,
         payload.paymentMethod ?? '',
         payload.reference ?? '',
-        String(branchId || DEFAULT_BRANCH_ID).trim()
+        bid
       );
       if (payload.treasuryAccountId) {
         insertTreasuryMovementTx(db, {
@@ -2730,6 +3963,7 @@ export function insertExpenseEntry(db, payload, branchId = DEFAULT_BRANCH_ID) {
           sourceId: expenseID,
           note: payload.expenseType || category,
           createdBy: payload.createdBy ?? 'Finance',
+          workspaceBranchId: bid,
         });
       }
       appendAuditLog(db, {
@@ -2755,7 +3989,7 @@ export function transferTreasuryFunds(db, payload) {
     return { ok: false, error: 'Choose two different accounts.' };
   }
   if (amountNgn <= 0) return { ok: false, error: 'Transfer amount must be positive.' };
-  const batchId = `TR-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const batchId = nextTreasuryTransferBatchHumanId(db);
   try {
     assertPeriodOpen(db, payload.dateISO || new Date().toISOString().slice(0, 10), 'Transfer date');
     const movements = db.transaction(() => {
@@ -2860,7 +4094,11 @@ export function payPaymentRequest(db, requestID, payload) {
     .get(row.expense_id);
   const workspaceBranchId = String(payload.workspaceBranchId || '').trim();
   const workspaceViewAll = Boolean(payload.workspaceViewAll);
-  if (!workspaceViewAll && linkedExpense?.branch_id && workspaceBranchId) {
+  const actor = payload.actor;
+  const canPayCrossBranch =
+    workspaceViewAll ||
+    (actor && (userHasPermission(actor, '*') || userHasPermission(actor, 'finance.cross_branch_post')));
+  if (!canPayCrossBranch && linkedExpense?.branch_id && workspaceBranchId) {
     const reqBranch = String(linkedExpense.branch_id || '').trim();
     if (reqBranch && reqBranch !== workspaceBranchId) {
       return {
@@ -2985,6 +4223,10 @@ export function payAccountsPayable(db, apId, payload) {
         note: payload.reference || row.invoice_ref || 'Supplier payment',
         details: { amountApplied: apply, treasuryAccountId: payload.treasuryAccountId },
       });
+      if (row.po_ref) {
+        const poOk = db.prepare(`SELECT po_id FROM purchase_orders WHERE po_id = ?`).get(row.po_ref);
+        if (poOk) syncAccountsPayableFromPurchaseOrder(db, row.po_ref);
+      }
     })();
     return { ok: true, amountApplied: apply };
   } catch (e) {
@@ -3079,6 +4321,45 @@ export function payRefundEntry(db, refundId, payload) {
           treasuryAccountIds: movements.map((movement) => movement.treasuryAccountId),
         },
       });
+      const glPay = tryPostCustomerRefundPayoutGlTx(db, {
+        refundId,
+        payoutAmountNgn,
+        cumulativePaidNgn: nextPaidAmountNgn,
+        entryDateISO: paidAtISO.slice(0, 10),
+        branchId: row.branch_id ?? null,
+        createdByUserId: payload.actor?.id != null ? String(payload.actor.id) : null,
+      });
+      if (!glPay.ok && !glPay.skipped && !glPay.duplicate) {
+        throw new Error(glPay.error || 'Refund payout GL failed.');
+      }
+      const cid = String(row.customer_id || '').trim();
+      if (cid && payoutAmountNgn > 0) {
+        const advBal = advanceBalanceNgnForCustomerDb(db, cid);
+        const refundAdvanceAmt = Math.min(payoutAmountNgn, Math.max(0, advBal));
+        if (refundAdvanceAmt > 0) {
+          const wb = String(row.branch_id || DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID;
+          insertLedgerRows(
+            db,
+            [
+              {
+                type: 'REFUND_ADVANCE',
+                customerID: cid,
+                customerName: String(row.customer_name || '').trim() || null,
+                amountNgn: refundAdvanceAmt,
+                quotationRef: '',
+                paymentMethod: null,
+                bankReference: refundId,
+                purpose: 'Sales refund payout',
+                note: `Refund ${refundId} — reduces customer advance/overpay credit (₦${refundAdvanceAmt.toLocaleString()} of ₦${payoutAmountNgn.toLocaleString()} payout).`,
+                atISO: normalizeIsoTimestamp(paidAtISO),
+                createdByUserId: payload.actor?.id ?? null,
+                createdByName: paidBy,
+              },
+            ],
+            wb
+          );
+        }
+      }
       return { movements, nextPaidAmountNgn, fullyPaid };
     })();
     const outstandingAfterNgn = approvedAmountNgn - result.nextPaidAmountNgn;
@@ -3120,16 +4401,6 @@ function parseQuotationLinesJsonObject(raw) {
   }
 }
 
-export function nextQuotationId(db) {
-  const rows = db.prepare(`SELECT id FROM quotations`).all();
-  let max = 0;
-  for (const r of rows) {
-    const m = String(r.id).match(/(\d+)\s*$/);
-    if (m) max = Math.max(max, parseInt(m[1], 10));
-  }
-  return `QT-2026-${String(max + 1).padStart(3, '0')}`;
-}
-
 function syncQuotationLineRows(db, quotationId, linesJson) {
   db.prepare(`DELETE FROM quotation_lines WHERE quotation_id = ?`).run(quotationId);
   const ins = db.prepare(`
@@ -3167,8 +4438,10 @@ export function insertQuotation(db, payload, branchId = DEFAULT_BRANCH_ID) {
   if (payload.materialGauge !== undefined) linesJson.materialGauge = String(payload.materialGauge ?? '').trim();
   if (payload.materialColor !== undefined) linesJson.materialColor = String(payload.materialColor ?? '').trim();
   if (payload.materialDesign !== undefined) linesJson.materialDesign = String(payload.materialDesign ?? '').trim();
+  if (payload.materialTypeId !== undefined) linesJson.materialTypeId = String(payload.materialTypeId ?? '').trim();
   const totalNgn = sumQuotationLinesJson(linesJson);
-  const id = String(payload.id ?? '').trim() || nextQuotationId(db);
+  const bid = String(branchId || DEFAULT_BRANCH_ID).trim();
+  const id = String(payload.id ?? '').trim() || nextQuotationHumanId(db, bid);
   const dateISO = payload.dateISO || new Date().toISOString().slice(0, 10);
   const dateLabel = shortDateFromIso(dateISO);
   const dueDateISO = payload.dueDateISO || '';
@@ -3211,7 +4484,7 @@ export function insertQuotation(db, payload, branchId = DEFAULT_BRANCH_ID) {
       handledBy,
       projectName,
       linesStr,
-      String(branchId || DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID
+      bid
     );
     syncQuotationLineRows(db, id, linesJson);
   })();
@@ -3222,6 +4495,10 @@ export function insertQuotation(db, payload, branchId = DEFAULT_BRANCH_ID) {
 export function updateQuotation(db, quotationId, payload) {
   const existing = db.prepare(`SELECT * FROM quotations WHERE id = ?`).get(quotationId);
   if (!existing) throw new Error('Quotation not found.');
+  const st0 = String(existing.status || '').trim();
+  if (st0 === 'Expired' || st0 === 'Void') {
+    throw new Error('This quotation is archived (expired or void). Use Revive to restore it to the active pipeline.');
+  }
 
   const prior = parseQuotationLinesJsonObject(existing.lines_json);
   const linesJson = { ...prior };
@@ -3233,6 +4510,7 @@ export function updateQuotation(db, quotationId, payload) {
   if (payload.materialGauge !== undefined) linesJson.materialGauge = String(payload.materialGauge ?? '').trim();
   if (payload.materialColor !== undefined) linesJson.materialColor = String(payload.materialColor ?? '').trim();
   if (payload.materialDesign !== undefined) linesJson.materialDesign = String(payload.materialDesign ?? '').trim();
+  if (payload.materialTypeId !== undefined) linesJson.materialTypeId = String(payload.materialTypeId ?? '').trim();
 
   const totalNgn = payload.lines != null ? sumQuotationLinesJson(linesJson) : existing.total_ngn;
   const customerID =
@@ -3311,6 +4589,19 @@ export function updateQuotation(db, quotationId, payload) {
   return quotationId;
 }
 
+export function reviveQuotation(db, quotationId) {
+  const row = db.prepare(`SELECT * FROM quotations WHERE id = ?`).get(quotationId);
+  if (!row) throw new Error('Quotation not found.');
+  const st = String(row.status || '').trim();
+  if (st !== 'Expired' && st !== 'Void') {
+    throw new Error('Only expired or void quotations can be revived.');
+  }
+  db.prepare(
+    `UPDATE quotations SET status = 'Pending', archived = 0, quotation_lifecycle_note = NULL WHERE id = ?`
+  ).run(quotationId);
+  return quotationId;
+}
+
 export function replaceRefunds(db, refunds) {
   db.prepare(`DELETE FROM customer_refunds`).run();
   const ins = db.prepare(`
@@ -3350,5 +4641,99 @@ export function replaceRefunds(db, refunds) {
       );
     }
   })();
+  return { ok: true };
+}
+
+/**
+ * Cashier: mark mirror receipt row as confirmed against bank deposit.
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} receiptId
+ * @param {boolean} confirmed
+ * @param {object | null} actor
+ */
+export function patchSalesReceiptBankConfirmation(db, receiptId, confirmed, actor = null) {
+  const id = String(receiptId || '').trim();
+  if (!id) return { ok: false, error: 'Receipt id required.' };
+  const row = db.prepare(`SELECT id FROM sales_receipts WHERE id = ?`).get(id);
+  if (!row) return { ok: false, error: 'Receipt not found.' };
+  const now = new Date().toISOString();
+  if (confirmed) {
+    db.prepare(
+      `UPDATE sales_receipts SET bank_confirmed_at_iso = ?, bank_confirmed_by_user_id = ? WHERE id = ?`
+    ).run(now, actor?.id ?? null, id);
+  } else {
+    db.prepare(
+      `UPDATE sales_receipts SET bank_confirmed_at_iso = NULL, bank_confirmed_by_user_id = NULL WHERE id = ?`
+    ).run(id);
+  }
+  appendAuditLog(db, {
+    actor,
+    action: 'receipt.bank_confirmation',
+    entityKind: 'sales_receipt',
+    entityId: id,
+    note: confirmed ? 'Confirmed in bank' : 'Bank confirmation cleared',
+  });
+  return { ok: true };
+}
+
+/**
+ * Finance: record amount actually received in bank and optionally clear receipt for delivery.
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} receiptId
+ * @param {{ bankReceivedAmountNgn?: number | string | null, clearForDelivery?: boolean }} payload
+ * @param {object | null} actor
+ */
+export function patchSalesReceiptFinanceSettlement(db, receiptId, payload, actor = null) {
+  const id = String(receiptId || '').trim();
+  if (!id) return { ok: false, error: 'Receipt id required.' };
+  const row = db.prepare(`SELECT * FROM sales_receipts WHERE id = ?`).get(id);
+  if (!row) return { ok: false, error: 'Receipt not found.' };
+
+  const clearForDelivery = Boolean(payload?.clearForDelivery);
+  const rawAmt = payload?.bankReceivedAmountNgn;
+  const hasBankAmt =
+    rawAmt !== undefined && rawAmt !== null && String(rawAmt).trim() !== '';
+  let nextBankReceived =
+    row.bank_received_amount_ngn != null ? roundMoney(row.bank_received_amount_ngn) : null;
+  if (hasBankAmt) {
+    const n = roundMoney(rawAmt);
+    if (n < 0) return { ok: false, error: 'Bank received amount cannot be negative.' };
+    nextBankReceived = n;
+  }
+
+  const now = new Date().toISOString();
+  const uid = actor?.id ?? null;
+
+  db.prepare(
+    `UPDATE sales_receipts SET
+      bank_received_amount_ngn = ?,
+      finance_delivery_cleared_at_iso = ?,
+      finance_delivery_cleared_by_user_id = ?,
+      bank_confirmed_at_iso = ?,
+      bank_confirmed_by_user_id = ?
+     WHERE id = ?`
+  ).run(
+    nextBankReceived,
+    clearForDelivery ? now : null,
+    clearForDelivery ? uid : null,
+    clearForDelivery ? now : null,
+    clearForDelivery ? uid : null,
+    id
+  );
+
+  appendAuditLog(db, {
+    actor,
+    action: 'receipt.finance_settlement',
+    entityKind: 'sales_receipt',
+    entityId: id,
+    note: clearForDelivery
+      ? `Cleared for delivery; bank received ₦${nextBankReceived ?? row.amount_ngn}`
+      : `Bank received amount updated`,
+    details: {
+      bankReceivedAmountNgn: nextBankReceived,
+      bookAmountNgn: row.amount_ngn,
+      clearForDelivery,
+    },
+  });
   return { ok: true };
 }

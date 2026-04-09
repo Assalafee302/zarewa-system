@@ -1,4 +1,5 @@
 import { appendAuditLog } from './controlOps.js';
+import { voidRecentQuotationsAfterMasterPriceChange } from './quotationLifecycleOps.js';
 
 function roundMoney(value) {
   return Math.round(Number(value) || 0);
@@ -77,19 +78,21 @@ const MASTER_DATA_CONFIG = {
         id: 'SQI-005',
         itemType: 'accessory',
         name: 'Tapping Screw',
-        unit: 'box',
+        unit: 'pcs',
         defaultUnitPriceNgn: 0,
         active: true,
         sortOrder: 10,
+        inventoryProductId: 'ACC-TAPPING-SCREW-PCS',
       },
       {
         id: 'SQI-006',
         itemType: 'accessory',
         name: 'Silicon Tube',
-        unit: 'piece',
+        unit: 'tube',
         defaultUnitPriceNgn: 0,
         active: true,
         sortOrder: 11,
+        inventoryProductId: 'ACC-SILICON-TUBE',
       },
       {
         id: 'SQI-007',
@@ -99,6 +102,7 @@ const MASTER_DATA_CONFIG = {
         defaultUnitPriceNgn: 0,
         active: true,
         sortOrder: 12,
+        inventoryProductId: 'ACC-RIVET-PACK',
       },
       {
         id: 'SQI-008',
@@ -108,6 +112,56 @@ const MASTER_DATA_CONFIG = {
         defaultUnitPriceNgn: 0,
         active: true,
         sortOrder: 13,
+      },
+      {
+        id: 'SQI-012',
+        itemType: 'accessory',
+        name: 'Drive screw nail',
+        unit: 'pack',
+        defaultUnitPriceNgn: 0,
+        active: true,
+        sortOrder: 14,
+        inventoryProductId: 'ACC-DRIVE-SCREW-PACK',
+      },
+      {
+        id: 'SQI-013',
+        itemType: 'accessory',
+        name: 'Rivet pin',
+        unit: 'pack',
+        defaultUnitPriceNgn: 0,
+        active: true,
+        sortOrder: 15,
+        inventoryProductId: 'ACC-RIVET-PACK',
+      },
+      {
+        id: 'SQI-014',
+        itemType: 'accessory',
+        name: 'Concrete nail',
+        unit: 'pack',
+        defaultUnitPriceNgn: 0,
+        active: true,
+        sortOrder: 16,
+        inventoryProductId: 'ACC-CONCRETE-NAIL-PACK',
+      },
+      {
+        id: 'SQI-015',
+        itemType: 'accessory',
+        name: 'Copper nail',
+        unit: 'pack',
+        defaultUnitPriceNgn: 0,
+        active: true,
+        sortOrder: 17,
+        inventoryProductId: 'ACC-COPPER-NAIL-PACK',
+      },
+      {
+        id: 'SQI-016',
+        itemType: 'accessory',
+        name: 'Hooks',
+        unit: 'pcs',
+        defaultUnitPriceNgn: 0,
+        active: true,
+        sortOrder: 18,
+        inventoryProductId: 'ACC-HOOKS-PCS',
       },
       {
         id: 'SQI-009',
@@ -254,6 +308,7 @@ const MASTER_DATA_CONFIG = {
         widthM: 1.2,
         active: true,
         sortOrder: 1,
+        inventoryModel: 'coil_kg',
       },
       {
         id: 'MAT-002',
@@ -262,6 +317,7 @@ const MASTER_DATA_CONFIG = {
         widthM: 1.2,
         active: true,
         sortOrder: 2,
+        inventoryModel: 'coil_kg',
       },
       {
         id: 'MAT-003',
@@ -270,6 +326,7 @@ const MASTER_DATA_CONFIG = {
         widthM: 1.2,
         active: true,
         sortOrder: 3,
+        inventoryModel: 'finished_good',
       },
       {
         id: 'MAT-004',
@@ -278,15 +335,27 @@ const MASTER_DATA_CONFIG = {
         widthM: 0,
         active: true,
         sortOrder: 10,
+        inventoryModel: 'consumable',
+      },
+      {
+        id: 'MAT-005',
+        name: 'Stone coated',
+        densityKgPerM3: 0,
+        widthM: 0,
+        active: true,
+        sortOrder: 4,
+        inventoryModel: 'stone_meter',
       },
     ],
     normalizePayload(payload, fallbackSort = 0) {
+      const inv = trimText(payload.inventoryModel || payload.inventory_model || 'coil_kg') || 'coil_kg';
       return {
         name: requireName(payload.name, 'Material type'),
         densityKgPerM3: Number(decimalOrNull(payload.densityKgPerM3) ?? 0),
         widthM: Number(decimalOrNull(payload.widthM) ?? 0),
         active: boolFlag(payload.active),
         sortOrder: sortNumber(payload.sortOrder, fallbackSort),
+        inventoryModel: inv,
       };
     },
     toClient(row) {
@@ -297,6 +366,7 @@ const MASTER_DATA_CONFIG = {
         widthM: Number(row.width_m) || 0,
         active: Boolean(row.active),
         sortOrder: Number(row.sort_order) || 0,
+        inventoryModel: row.inventory_model != null ? String(row.inventory_model) : 'coil_kg',
       };
     },
   },
@@ -307,18 +377,23 @@ const MASTER_DATA_CONFIG = {
     auditKind: 'setup_profile',
     orderBy: 'sort_order ASC, name ASC, profile_id ASC',
     defaults: [
-      { id: 'PROF-001', name: 'Longspan (Indus6)', active: true, sortOrder: 1 },
-      { id: 'PROF-002', name: 'Metrotile', active: true, sortOrder: 2 },
-      { id: 'PROF-003', name: 'Steptile', active: true, sortOrder: 3 },
-      { id: 'PROF-004', name: 'Capping', active: true, sortOrder: 4 },
-      { id: 'PROF-005', name: 'Ridge Cap', active: true, sortOrder: 5 },
-      { id: 'PROF-006', name: 'Flat Sheet', active: true, sortOrder: 6 },
+      { id: 'PROF-001', name: 'Longspan (Indus6)', active: true, sortOrder: 1, materialTypeId: 'MAT-002' },
+      { id: 'PROF-002', name: 'Metrotile', active: true, sortOrder: 2, materialTypeId: 'MAT-002' },
+      { id: 'PROF-003', name: 'Steptile', active: true, sortOrder: 3, materialTypeId: 'MAT-002' },
+      { id: 'PROF-004', name: 'Capping', active: true, sortOrder: 4, materialTypeId: 'MAT-002' },
+      { id: 'PROF-005', name: 'Ridge Cap', active: true, sortOrder: 5, materialTypeId: 'MAT-002' },
+      { id: 'PROF-006', name: 'Flat Sheet', active: true, sortOrder: 6, materialTypeId: 'MAT-002' },
+      { id: 'PROF-007', name: 'Milano', active: true, sortOrder: 7, materialTypeId: 'MAT-005' },
+      { id: 'PROF-008', name: 'Bond', active: true, sortOrder: 8, materialTypeId: 'MAT-005' },
+      { id: 'PROF-009', name: 'Classic', active: true, sortOrder: 9, materialTypeId: 'MAT-005' },
+      { id: 'PROF-010', name: 'Shingle', active: true, sortOrder: 10, materialTypeId: 'MAT-005' },
     ],
     normalizePayload(payload, fallbackSort = 0) {
       return {
         name: requireName(payload.name, 'Profile name'),
         active: boolFlag(payload.active),
         sortOrder: sortNumber(payload.sortOrder, fallbackSort),
+        materialTypeId: trimText(payload.materialTypeId ?? payload.material_type_id ?? ''),
       };
     },
     toClient(row) {
@@ -327,6 +402,7 @@ const MASTER_DATA_CONFIG = {
         name: row.name,
         active: Boolean(row.active),
         sortOrder: Number(row.sort_order) || 0,
+        materialTypeId: row.material_type_id != null ? String(row.material_type_id) : '',
       };
     },
   },
@@ -557,15 +633,15 @@ function getStatements(kind, row) {
       };
     case 'material-types':
       return {
-        values: [row.name, row.densityKgPerM3, row.widthM, row.active, row.sortOrder],
-        insertSql: `INSERT INTO setup_material_types (material_type_id, name, density_kg_per_m3, width_m, active, sort_order) VALUES (?,?,?,?,?,?)`,
-        updateSql: `UPDATE setup_material_types SET name = ?, density_kg_per_m3 = ?, width_m = ?, active = ?, sort_order = ? WHERE material_type_id = ?`,
+        values: [row.name, row.densityKgPerM3, row.widthM, row.active, row.sortOrder, row.inventoryModel || 'coil_kg'],
+        insertSql: `INSERT INTO setup_material_types (material_type_id, name, density_kg_per_m3, width_m, active, sort_order, inventory_model) VALUES (?,?,?,?,?,?,?)`,
+        updateSql: `UPDATE setup_material_types SET name = ?, density_kg_per_m3 = ?, width_m = ?, active = ?, sort_order = ?, inventory_model = ? WHERE material_type_id = ?`,
       };
     case 'profiles':
       return {
-        values: [row.name, row.active, row.sortOrder],
-        insertSql: `INSERT INTO setup_profiles (profile_id, name, active, sort_order) VALUES (?,?,?,?)`,
-        updateSql: `UPDATE setup_profiles SET name = ?, active = ?, sort_order = ? WHERE profile_id = ?`,
+        values: [row.name, row.active, row.sortOrder, row.materialTypeId || null],
+        insertSql: `INSERT INTO setup_profiles (profile_id, name, active, sort_order, material_type_id) VALUES (?,?,?,?,?)`,
+        updateSql: `UPDATE setup_profiles SET name = ?, active = ?, sort_order = ?, material_type_id = ? WHERE profile_id = ?`,
       };
     case 'price-list':
       return {
@@ -629,7 +705,16 @@ export function upsertMasterDataRecord(db, kind, payload, actor) {
     if (existing) {
       db.prepare(stmt.updateSql).run(...stmt.values, id);
     } else {
-      db.prepare(stmt.insertSql).run(id, ...stmt.values);
+      try {
+        db.prepare(stmt.insertSql).run(id, ...stmt.values);
+      } catch (e) {
+        // Windows / WAL edge cases: row may exist though pre-insert SELECT missed it.
+        if (e && (e.code === 'SQLITE_CONSTRAINT_PRIMARYKEY' || e.code === 'SQLITE_CONSTRAINT_UNIQUE')) {
+          db.prepare(stmt.updateSql).run(...stmt.values, id);
+        } else {
+          throw e;
+        }
+      }
     }
     if (actor) {
       appendAuditLog(db, {
@@ -642,6 +727,13 @@ export function upsertMasterDataRecord(db, kind, payload, actor) {
       });
     }
   })();
+  if (resolved === 'quote-items' || resolved === 'price-list') {
+    try {
+      voidRecentQuotationsAfterMasterPriceChange(db, 'ALL');
+    } catch (e) {
+      console.error('[zarewa] void quotations after master price change failed', e);
+    }
+  }
   return { ok: true, id };
 }
 
@@ -663,6 +755,13 @@ export function deleteMasterDataRecord(db, kind, recordId, actor) {
       details: { collection: resolved },
     });
   })();
+  if (resolved === 'quote-items' || resolved === 'price-list') {
+    try {
+      voidRecentQuotationsAfterMasterPriceChange(db, 'ALL');
+    } catch (e) {
+      console.error('[zarewa] void quotations after master price delete failed', e);
+    }
+  }
   return { ok: true };
 }
 

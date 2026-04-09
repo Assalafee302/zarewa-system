@@ -1,5 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, useNavigate, Link, useParams, Navigate } from 'react-router-dom';
+import {
+  BrowserRouter as Router,
+  Routes,
+  Route,
+  useNavigate,
+  Link,
+  useParams,
+  Navigate,
+} from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
 import Sales from './pages/Sales';
@@ -22,12 +30,15 @@ import HrSalaryWelfare from './pages/hr/HrSalaryWelfare';
 import HrPayroll from './pages/hr/HrPayroll';
 import HrTime from './pages/hr/HrTime';
 import HrTalent from './pages/hr/HrTalent';
+import HrHome from './pages/hr/HrHome';
 import HrCompliance from './pages/hr/HrCompliance';
 import HrNextDirectory from './pages/hr/HrNextDirectory';
 import HrNextUatChecklist from './pages/hr/HrNextUatChecklist';
 import LoginScreen from './components/auth/LoginScreen';
 import ModuleRouteGuard from './components/ModuleRouteGuard';
 import ManagerDashboard from './pages/ManagerDashboard';
+import ExecDashboard from './pages/ExecDashboard';
+import PriceListAdmin from './pages/PriceListAdmin';
 import AccountingRouteGuard from './components/AccountingRouteGuard';
 import AccountingLayout from './pages/accounting/AccountingLayout';
 import AccountingOverview from './pages/accounting/AccountingOverview';
@@ -37,17 +48,6 @@ import AccountingLedger from './pages/accounting/AccountingLedger';
 import AccountingStatements from './pages/accounting/AccountingStatements';
 import AccountingControls from './pages/accounting/AccountingControls';
 import DocumentTitleSync from './components/DocumentTitleSync';
-
-function HrStaffProfileRoute() {
-  const { userId } = useParams();
-  return <StaffProfile key={userId} />;
-}
-function HrEntryIndexRoute() {
-  return <Navigate to="/hr/my-profile" replace />;
-}
-function AccountingIndexRoute() {
-  return <Navigate to="/accounting/overview" replace />;
-}
 import { Search, Bell, Command, Menu } from 'lucide-react';
 import { CustomersProvider } from './context/CustomersContext';
 import { InventoryProvider } from './context/InventoryContext';
@@ -57,9 +57,22 @@ import { useInventory } from './context/InventoryContext';
 import { useWorkspace } from './context/WorkspaceContext';
 import { ZAREWA_LOGO_SRC } from './Data/companyQuotation';
 import { BranchWorkspaceBar } from './components/layout/BranchWorkspaceBar';
+import { ModalFrame } from './components/layout';
 import { apiFetch } from './lib/apiBase';
+import { AiAssistantDock } from './components/AiAssistantDock';
 import { buildWorkspaceNotifications } from './lib/workspaceNotifications';
 import { searchWorkspaceSnapshot } from './lib/workspaceSearchLocal';
+
+function HrStaffProfileRoute() {
+  const { userId } = useParams();
+  return <StaffProfile key={userId} />;
+}
+function HrEntryIndexRoute() {
+  return <Navigate to="/hr/home" replace />;
+}
+function AccountingIndexRoute() {
+  return <Navigate to="/accounting/overview" replace />;
+}
 
 function PolicyAckGate() {
   const ws = useWorkspace();
@@ -181,6 +194,18 @@ function PolicyAckGate() {
   );
 }
 
+function HomeRoute() {
+  const ws = useWorkspace();
+  const rk = ws?.session?.user?.roleKey;
+  if (rk === 'ceo') {
+    return <Navigate to="/exec" replace />;
+  }
+  if (rk === 'md' || rk === 'sales_manager') {
+    return <Navigate to="/manager" replace />;
+  }
+  return <Dashboard />;
+}
+
 function AppShell() {
   const navigate = useNavigate();
   const { products } = useInventory();
@@ -207,9 +232,12 @@ function AppShell() {
   const [headerSearch, setHeaderSearch] = useState('');
   const [searchHits, setSearchHits] = useState([]);
   const [searchBusy, setSearchBusy] = useState(false);
+  /** True when dropdown results came from cached snapshot (offline / API error), not live `/api/workspace/search`. */
+  const [searchFromCache, setSearchFromCache] = useState(false);
   const searchDebounceRef = useRef(null);
   const [notifOpen, setNotifOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
       return window.localStorage.getItem('zarewa.sidebarCollapsed') === '1';
@@ -260,17 +288,18 @@ function AppShell() {
     };
   }, [notifOpen]);
 
-  /* eslint-disable react-hooks/set-state-in-effect -- debounced search sync */
   useEffect(() => {
     const q = headerSearch.trim();
     if (searchDebounceRef.current) window.clearTimeout(searchDebounceRef.current);
     if (q.length < 2) {
       setSearchHits([]);
       setSearchBusy(false);
+      setSearchFromCache(false);
       return undefined;
     }
     searchDebounceRef.current = window.setTimeout(async () => {
-      if (ws?.canMutate) {
+      if (ws?.apiOnline) {
+        setSearchFromCache(false);
         setSearchBusy(true);
         const { ok, data } = await apiFetch(
           `/api/workspace/search?q=${encodeURIComponent(q)}&limit=18`
@@ -281,6 +310,7 @@ function AppShell() {
           return;
         }
       }
+      setSearchFromCache(true);
       setSearchHits(
         searchWorkspaceSnapshot(ws?.snapshot, q, (p) => ws?.hasPermission?.(p), 18)
       );
@@ -289,7 +319,6 @@ function AppShell() {
       if (searchDebounceRef.current) window.clearTimeout(searchDebounceRef.current);
     };
   }, [headerSearch, ws]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   const goSearchHit = useCallback(
     (hit) => {
@@ -313,6 +342,8 @@ function AppShell() {
       navigate('/sales', { state: { globalSearchQuery: q, focusSalesTab: 'quotations' } });
     } else if (lower.startsWith('rcp-') || lower.startsWith('rcpt')) {
       navigate('/sales', { state: { globalSearchQuery: q, focusSalesTab: 'receipts' } });
+    } else if (lower.startsWith('rf-')) {
+      navigate('/sales', { state: { globalSearchQuery: q, focusSalesTab: 'refund' } });
     } else {
       navigate('/sales', { state: { globalSearchQuery: q, focusSalesTab: 'customers' } });
     }
@@ -368,68 +399,98 @@ function AppShell() {
           <Menu size={22} strokeWidth={2} />
         </button>
 
-        <div className="sticky top-0 z-30 -mx-4 sm:-mx-6 lg:mx-0 mb-6 sm:mb-8 py-3 pl-2 pr-2 max-sm:pl-14 sm:static sm:px-0 sm:py-0">
+        <div className="sticky top-0 z-30 -mx-4 sm:-mx-6 lg:mx-0 mb-6 sm:mb-8 py-3 pl-2 pr-2 max-sm:pl-14 sm:relative sm:px-0 sm:py-0">
           <div className="z-toolbar-shell flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-4 max-sm:pt-2">
-            <form
-              className="relative group flex-1 min-w-0 sm:max-w-[520px] pl-0 sm:pl-0 max-sm:order-2"
-              onSubmit={runGlobalSearch}
-            >
-              <Search
-                className="absolute left-4 sm:left-5 top-1/2 -translate-y-1/2 text-gray-300 group-focus-within:text-[#134e4a] transition-colors pointer-events-none z-[1]"
-                size={16}
-              />
-              <input
-                ref={searchRef}
-                type="search"
-                value={headerSearch}
-                onChange={(e) => setHeaderSearch(e.target.value)}
-                placeholder="Search… (2+ chars)"
-                autoComplete="off"
-                aria-label="Global search"
-                aria-autocomplete="list"
-                aria-expanded={searchHits.length > 0}
-                enterKeyHint="search"
-                className="z-toolbar-shell w-full min-h-12 py-3 pl-11 pr-4 sm:pl-12 sm:pr-14 text-base sm:text-[13px] font-medium outline-none transition focus:border-teal-300/50 focus:ring-4 focus:ring-teal-500/10"
-              />
-              <div className="pointer-events-none absolute right-3 top-1/2 hidden -translate-y-1/2 items-center gap-1 rounded-lg border border-gray-100 bg-gray-50/90 px-2 py-1 sm:flex">
-                <Command size={10} className="text-gray-400" />
-                <span className="text-[9px] font-black text-gray-400">K</span>
-              </div>
-              {headerSearch.trim().length >= 2 ? (
-                <div className="absolute left-0 right-0 top-full z-[60] mt-1 max-h-[min(18rem,50dvh)] sm:max-h-72 overflow-y-auto overscroll-contain rounded-xl border border-gray-200 bg-white py-1 text-left shadow-lg">
-                  {searchBusy ? (
-                    <p className="px-3 py-2 text-[11px] text-gray-500">Searching…</p>
-                  ) : searchHits.length === 0 ? (
-                    <p className="px-3 py-2 text-[11px] text-gray-500">No matches — Enter uses quick path (QT-/RCP-).</p>
-                  ) : (
-                    <ul className="divide-y divide-gray-100" role="listbox">
-                      {searchHits.map((hit) => (
-                        <li key={`${hit.kind}-${hit.id}`}>
-                          <button
-                            type="button"
-                            role="option"
-                            className="flex w-full flex-col items-start gap-0.5 px-3 py-3 text-left text-[12px] hover:bg-teal-50/80 sm:py-2"
-                            onMouseDown={(ev) => ev.preventDefault()}
-                            onClick={() => goSearchHit(hit)}
-                          >
-                            <span className="font-semibold text-[#134e4a]">{hit.label}</span>
-                            <span className="text-[10px] text-gray-500">
-                              {hit.kind.replace(/_/g, ' ')}
-                              {hit.sublabel ? ` · ${hit.sublabel}` : ''}
-                            </span>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              ) : null}
-            </form>
+            {ws?.session?.user?.roleKey === 'ceo' ? (
+              <p className="flex-1 min-w-0 text-[12px] text-gray-500 sm:max-w-[520px]">
+                Global search is hidden for the executive read-only role.
+              </p>
+            ) : (
+              <>
+                <form
+                  className="relative group flex-1 min-w-0 sm:max-w-[520px] pl-0 sm:pl-0 max-sm:order-2"
+                  onSubmit={runGlobalSearch}
+                >
+                  <Search
+                    className="absolute left-4 sm:left-5 top-1/2 -translate-y-1/2 text-gray-300 group-focus-within:text-[#134e4a] transition-colors pointer-events-none z-[1]"
+                    size={16}
+                  />
+                  <input
+                    ref={searchRef}
+                    type="search"
+                    value={headerSearch}
+                    onChange={(e) => setHeaderSearch(e.target.value)}
+                    placeholder="Search… (2+ chars)"
+                    autoComplete="off"
+                    aria-label="Global search"
+                    aria-autocomplete="list"
+                    aria-expanded={headerSearch.trim().length >= 2}
+                    enterKeyHint="search"
+                    className="z-toolbar-shell w-full min-h-12 py-3 pl-11 pr-4 sm:pl-12 sm:pr-14 text-base sm:text-[13px] font-medium outline-none transition focus:border-teal-300/50 focus:ring-4 focus:ring-teal-500/10"
+                  />
+                  <div className="pointer-events-none absolute right-3 top-1/2 hidden -translate-y-1/2 items-center gap-1 rounded-lg border border-gray-100 bg-gray-50/90 px-2 py-1 sm:flex">
+                    <Command size={10} className="text-gray-400" />
+                    <span className="text-[9px] font-black text-gray-400">K</span>
+                  </div>
+                  {headerSearch.trim().length >= 2 ? (
+                    <div className="absolute left-0 right-0 top-full z-[60] mt-1 max-h-[min(18rem,50dvh)] sm:max-h-72 overflow-y-auto overscroll-contain rounded-xl border border-gray-200 bg-white py-1 text-left shadow-lg">
+                      {searchBusy ? (
+                        <p className="px-3 py-2 text-[11px] text-gray-500">Searching…</p>
+                      ) : searchHits.length === 0 ? (
+                        <div className="divide-y divide-amber-50">
+                          <p className="px-3 py-2 text-[11px] text-gray-500">
+                            No matches — Enter uses quick path (QT-/RCP-/RF-).
+                          </p>
+                          {searchFromCache ? (
+                            <p
+                              className="px-3 py-2 text-[10px] font-medium text-amber-950 bg-amber-50/90"
+                              role="status"
+                            >
+                              Cached workspace — empty results may be false negatives. Reconnect for live search.
+                            </p>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <>
+                          <ul className="divide-y divide-gray-100" role="listbox">
+                            {searchHits.map((hit) => (
+                              <li key={`${hit.kind}-${hit.id}`}>
+                                <button
+                                  type="button"
+                                  role="option"
+                                  className="flex w-full flex-col items-start gap-0.5 px-3 py-3 text-left text-[12px] hover:bg-teal-50/80 sm:py-2"
+                                  onMouseDown={(ev) => ev.preventDefault()}
+                                  onClick={() => goSearchHit(hit)}
+                                >
+                                  <span className="font-semibold text-[#134e4a]">{hit.label}</span>
+                                  <span className="text-[10px] text-gray-500">
+                                    {hit.kind.replace(/_/g, ' ')}
+                                    {hit.sublabel ? ` · ${hit.sublabel}` : ''}
+                                  </span>
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                          {searchFromCache ? (
+                            <p
+                              className="border-t border-amber-100 bg-amber-50/90 px-3 py-2 text-[10px] font-medium text-amber-950"
+                              role="status"
+                            >
+                              Cached workspace — results may be incomplete or outdated. Reconnect for live search.
+                            </p>
+                          ) : null}
+                        </>
+                      )}
+                    </div>
+                  ) : null}
+                </form>
 
-            <p className="hidden text-[11px] text-gray-400 sm:block sm:max-w-[220px] sm:text-right lg:max-w-none">
-              <span className="font-semibold text-gray-500">Tip:</span> results respect your role; pick a row or press
-              Enter for the first match.
-            </p>
+                <p className="hidden text-[11px] text-gray-400 sm:block sm:max-w-[220px] sm:text-right lg:max-w-none">
+                  <span className="font-semibold text-gray-500">Tip:</span> results respect your role; pick a row or press
+                  Enter for the first match.
+                </p>
+              </>
+            )}
 
             <div className="flex w-full flex-wrap items-center justify-between gap-2 sm:w-auto sm:justify-end sm:gap-4 lg:gap-5 max-sm:order-1">
               <BranchWorkspaceBar />
@@ -533,10 +594,10 @@ function AppShell() {
                   ) : (
                     <button
                       type="button"
-                      onClick={() => navigate('/settings')}
+                      onClick={() => setProfileOpen(true)}
                       className="w-full min-w-0 text-left"
-                      title={`${userName} · ${userRole} — Open settings`}
-                      aria-label={`Signed in as ${userName}. Open settings.`}
+                      title={`${userName} · ${userRole} — Open profile`}
+                      aria-label={`Signed in as ${userName}. Open profile.`}
                     >
                       <p className="truncate text-[10px] font-black uppercase leading-none tracking-tighter text-[#134e4a]">
                         {userName}
@@ -552,9 +613,83 @@ function AppShell() {
           </div>
         </div>
 
+        <ModalFrame
+          isOpen={profileOpen}
+          onClose={() => setProfileOpen(false)}
+          title="My profile"
+          description="Your app login profile details"
+        >
+          <div className="z-modal-panel w-full max-w-lg max-h-none shrink-0 overflow-visible flex-none p-6 sm:p-7">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <h2 className="text-base font-black text-slate-900">My profile</h2>
+                <p className="mt-1 text-xs text-slate-600">App login details (not HR employment records).</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setProfileOpen(false)}
+                className="z-btn-secondary !px-3 !py-2 !text-[11px]"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+              <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Name</p>
+              <p className="mt-1 text-sm font-black text-[#134e4a] break-words">
+                {ws?.session?.user?.displayName || '—'}
+              </p>
+
+              <p className="mt-3 text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Username</p>
+              <p className="mt-1 text-[12px] font-mono font-semibold text-slate-800 break-all">
+                {ws?.session?.user?.username || '—'}
+              </p>
+
+              <p className="mt-3 text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Role</p>
+              <p className="mt-1 text-[12px] font-semibold text-slate-800">
+                {ws?.session?.user?.roleLabel || ws?.session?.user?.roleKey || '—'}
+              </p>
+
+              {ws?.session?.user?.email ? (
+                <>
+                  <p className="mt-3 text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Email</p>
+                  <p className="mt-1 text-[12px] font-semibold text-slate-800 break-all">
+                    {ws.session.user.email}
+                  </p>
+                </>
+              ) : null}
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-2 justify-end">
+              <button
+                type="button"
+                className="z-btn-secondary !text-[11px]"
+                onClick={() => {
+                  setProfileOpen(false);
+                  navigate('/settings');
+                }}
+              >
+                Open settings
+              </button>
+              <button
+                type="button"
+                className="z-btn-primary !text-[11px]"
+                onClick={() => {
+                  setProfileOpen(false);
+                  navigate('/settings/security');
+                }}
+              >
+                Security
+              </button>
+            </div>
+          </div>
+        </ModalFrame>
+
         <main id="main-content" className="outline-none" tabIndex={-1}>
           <Routes>
-            <Route path="/" element={<Dashboard />} />
+            <Route path="/" element={<HomeRoute />} />
+            <Route path="/exec" element={<ExecDashboard />} />
+            <Route path="/price-list" element={<PriceListAdmin />} />
             <Route
               path="/sales"
               element={
@@ -628,6 +763,14 @@ function AppShell() {
               }
             />
             <Route
+              path="/accounts/bank-reconciliation"
+              element={
+                <ModuleRouteGuard moduleKey="finance">
+                  <Navigate to="/accounts?tab=receipts" replace />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
               path="/accounting"
               element={
                 <ModuleRouteGuard moduleKey="finance">
@@ -650,6 +793,14 @@ function AppShell() {
               element={
                 <ModuleRouteGuard moduleKey="reports">
                   <Reports />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
+              path="/edit-approvals"
+              element={
+                <ModuleRouteGuard moduleKey="edit_approvals">
+                  <Navigate to="/" replace />
                 </ModuleRouteGuard>
               }
             />
@@ -678,6 +829,7 @@ function AppShell() {
               }
             >
               <Route index element={<HrEntryIndexRoute />} />
+              <Route path="home" element={<HrHome />} />
               <Route path="my-profile" element={<HrMyProfile />} />
               <Route path="salary-welfare" element={<HrSalaryWelfare />} />
               <Route path="staff" element={<HrStaffList />} />
@@ -694,6 +846,7 @@ function AppShell() {
             <Route path="*" element={<NotFound />} />
           </Routes>
         </main>
+        <AiAssistantDock />
       </div>
     </div>
   );

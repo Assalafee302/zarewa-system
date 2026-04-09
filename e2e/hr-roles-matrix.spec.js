@@ -59,6 +59,11 @@ test.describe('HR approval/payment role matrix', () => {
     if (register.status() !== 201) {
       throw new Error(`Staff register failed (${register.status()}): ${await register.text()}`);
     }
+    const regUid = (await register.json()).userId;
+    const tenurePatch = await page.request.patch(`/api/hr/staff/${encodeURIComponent(regUid)}`, {
+      data: { dateJoinedIso: '2018-01-15' },
+    });
+    expect(tenurePatch.status()).toBe(200);
     await apiSignOut(page);
 
     // Staff creates + submits a loan request.
@@ -98,6 +103,12 @@ test.describe('HR approval/payment role matrix', () => {
     });
     if (mgrApprove.status() !== 200) {
       throw new Error(`Manager approve failed (${mgrApprove.status()}): ${await mgrApprove.text()}`);
+    }
+    const gmApprove = await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/manager-review`, {
+      data: { approve: true, note: 'GM approve by HR manager', reasonCode: 'policy' },
+    });
+    if (gmApprove.status() !== 200) {
+      throw new Error(`GM approve failed (${gmApprove.status()}): ${await gmApprove.text()}`);
     }
 
     const listLoans = await page.request.get('/api/hr/requests?kind=loan');

@@ -1,26 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import * as XLSX from 'xlsx';
-import {
-  AlertTriangle,
-  Banknote,
-  BookOpen,
-  ChevronDown,
-  ClipboardList,
-  Factory,
-  FileSpreadsheet,
-  FileText,
-  Landmark,
-  Layers,
-  Link2,
-  List,
-  Package,
-  Printer,
-  Receipt,
-  RotateCcw,
-  Scale,
-  ScrollText,
-  ShoppingCart,
-} from 'lucide-react';
+import { ChevronDown, Factory, FileSpreadsheet, Landmark, Printer, Receipt, Scale, Table2 } from 'lucide-react';
 import { PageHeader, PageShell, MainPanel } from '../components/layout';
 import { ReportPrintModal } from '../components/reports/ReportPrintModal';
 import { formatNgn } from '../Data/mockData';
@@ -34,113 +15,264 @@ import {
   cogsMovementRows,
   customerLedgerActivityRows,
   deliveryPerformanceSummary,
+  filterAccessoryUsageInRange,
   filterBankReconciliationInRange,
   filterExpensesInRange,
+  filterPurchaseOrdersInRange,
   filterQuotationsInRange,
   filterRefundsInRange,
+  filterStockMovementsInRange,
+  filterTreasuryMovementsInRange,
   grnCoilRegisterRows,
   liveReceivablesNgn,
   productionAttributedRevenueNgn,
+  productionOutputDateISO,
   purchaseOrderAccrualBridgeRows,
-  quotationPaidNgnLedgerDiscrepancies,
+  quotationPaidNgnReceiptDiscrepancies,
   receiptAdvanceTreasuryReconciliationRows,
   receivablesAgingBuckets,
+  salesPeriodCashBridgeExportRows,
+  salesPeriodCashBridgeSummary,
   supplierPerformanceSummary,
-  topCustomersBySales,
+  topCustomersByProductionAttributedSales,
 } from '../lib/liveAnalytics';
+import { procurementKindFromPo } from '../lib/procurementPoKind';
 
-/** Primary exports: P&amp;L, reconciliation, and GL audit (operational reports are under “More”). */
+const PACK_PERIOD_COSTS_INVENTORY = 'Period costs & inventory (pack)';
+const PACK_CASH_BANK_AR = 'Cash, bank & AR reconciliation (pack)';
+const PACK_GL_AUDIT = 'General ledger audit (period)';
+const PACK_SALES_CUSTOMER = 'Sales & customer activity (period)';
+const PACK_OPS_PROCUREMENT = 'Operations & procurement (pack)';
+const PACK_PRODUCTION_TRANSACTION = 'Production transaction register';
+
+function rowsPeriodCostsInventoryPack(expenses, paymentRequests, coilLots, movements, startDate, endDate) {
+  const rows = [];
+  filterExpensesInRange(expenses, startDate, endDate).forEach((e) => {
+    rows.push({
+      packSection: 'Expenses',
+      expenseID: e.expenseID,
+      date: e.date,
+      category: e.category,
+      expenseType: e.expenseType,
+      amountNgn: e.amountNgn,
+      paymentMethod: e.paymentMethod,
+      reference: e.reference,
+      branchId: e.branchId,
+    });
+  });
+  accruedApprovedPayablesRows(paymentRequests, startDate, endDate).forEach((r) => {
+    rows.push({ packSection: 'Accruals', ...r });
+  });
+  coilInventoryValuationRows(coilLots).forEach((r) => {
+    rows.push({ packSection: 'Valuation', ...r });
+  });
+  cogsMovementRows(movements, startDate, endDate).forEach((r) => {
+    rows.push({ packSection: 'COGS_movement', ...r });
+  });
+  return rows;
+}
+
+function rowsCashBankArPack(
+  bankReconciliation,
+  ledgerEntries,
+  treasuryMovements,
+  quotations,
+  receipts,
+  startDate,
+  endDate
+) {
+  const rows = [];
+  filterBankReconciliationInRange(bankReconciliation, startDate, endDate).forEach((r) => {
+    rows.push({
+      packSection: 'Bank_recon',
+      bankDateISO: r.bankDateISO,
+      id: r.id,
+      description: r.description,
+      amountNgn: r.amountNgn,
+      systemMatch: r.systemMatch,
+      status: r.status,
+      branchId: r.branchId,
+    });
+  });
+  receiptAdvanceTreasuryReconciliationRows(ledgerEntries, treasuryMovements, startDate, endDate).forEach((r) => {
+    rows.push({
+      packSection: 'Receipt_treasury_exceptions',
+      section: r.section,
+      ledgerEntryId: r.ledgerEntryId || '',
+      atISO: r.atISO || r.postedAtISO || '',
+      customerName: r.customerName || '',
+      quotationRef: r.quotationRef || '',
+      ledgerAmountNgn: r.ledgerAmountNgn,
+      treasuryNetNgn: r.treasuryNetNgn,
+      deltaNgn: r.deltaNgn,
+      issue: r.issue || '',
+    });
+  });
+  quotationPaidNgnReceiptDiscrepancies(quotations, receipts, ledgerEntries).forEach((r) => {
+    rows.push({
+      packSection: 'AR_paid_vs_receipts',
+      quotationID: r.quotationID,
+      dateISO: r.dateISO,
+      customer: r.customer,
+      totalNgn: r.totalNgn,
+      paidNgnOnQuote: r.paidNgnOnQuote,
+      receiptPaidNgn: r.receiptPaidNgn,
+      advanceAppliedNgn: r.advanceAppliedNgn,
+      expectedPaidNgn: r.expectedPaidNgn,
+      deltaNgn: r.deltaNgn,
+    });
+  });
+  filterTreasuryMovementsInRange(treasuryMovements, startDate, endDate).forEach((m) => {
+    rows.push({
+      packSection: 'Treasury_movements',
+      postedAtISO: m.postedAtISO,
+      type: m.type,
+      accountType: m.accountType,
+      accountName: m.accountName,
+      amountNgn: m.amountNgn,
+      sourceKind: m.sourceKind,
+      sourceId: m.sourceId,
+      reference: m.reference,
+    });
+  });
+  return rows;
+}
+
+function rowsSalesCustomerPack(ledgerEntries, productionJobs, quotations, refunds, startDate, endDate) {
+  const rows = [];
+  filterQuotationsInRange(quotations, startDate, endDate).forEach((q) => {
+    rows.push({
+      packSection: 'Quotations',
+      quotationID: q.id,
+      dateISO: q.dateISO,
+      customer: q.customer,
+      totalNgn: q.totalNgn,
+      status: q.status,
+    });
+  });
+  customerLedgerActivityRows(ledgerEntries, quotations, startDate, endDate).forEach((r) => {
+    rows.push({
+      packSection: 'Customer_ledger',
+      atISO: r.atISO,
+      type: r.type,
+      customerID: r.customerID,
+      customerName: r.customerName,
+      quotationRef: r.quotationRef,
+      amountNgn: r.amountNgn,
+      paymentMethod: r.paymentMethod,
+      bankReference: r.bankReference,
+      purpose: r.purpose,
+      branchId: r.branchId,
+    });
+  });
+  salesPeriodCashBridgeExportRows(ledgerEntries, productionJobs, quotations, refunds, startDate, endDate).forEach(
+    (r) => {
+      rows.push({
+        packSection: `Cash_AR_bridge:${r.reportSection}`,
+        category: r.category,
+        ledgerType: r.ledgerType,
+        dateISO: r.dateISO,
+        recordId: r.recordId,
+        customer: r.customer,
+        quotationRef: r.quotationRef,
+        amountNgn: r.amountNgn,
+        metresProduced: r.metresProduced,
+        remarks: r.remarks,
+      });
+    }
+  );
+  return rows;
+}
+
+function rowsOpsProcurementPack(liveProducts, purchaseOrders, coilLots, accessoryUsage, startDate, endDate) {
+  const rows = [];
+  liveProducts.forEach((p) => {
+    rows.push({
+      packSection: 'Inventory_SKUs',
+      productID: p.productID,
+      name: p.name,
+      stockLevel: p.stockLevel,
+      unit: p.unit,
+      lowStockThreshold: p.lowStockThreshold,
+    });
+  });
+  purchaseOrders.forEach((p) => {
+    rows.push({
+      packSection: 'Purchase_orders',
+      poID: p.poID,
+      procurementKind: procurementKindFromPo(p),
+      supplierName: p.supplierName,
+      orderDateISO: p.orderDateISO,
+      status: p.status,
+      lineCount: p.lines?.length || 0,
+      supplierPaidNgn: p.supplierPaidNgn || 0,
+    });
+  });
+  grnCoilRegisterRows(coilLots, startDate, endDate).forEach((r) => {
+    rows.push({ packSection: 'GRN_register', ...r });
+  });
+  purchaseOrderAccrualBridgeRows(purchaseOrders).forEach((r) => {
+    rows.push({ packSection: 'PO_accrual_bridge', ...r });
+  });
+  filterAccessoryUsageInRange(accessoryUsage, startDate, endDate).forEach((u) => {
+    rows.push({
+      packSection: 'Production_accessory_usage',
+      jobID: u.jobID,
+      quotationRef: u.quotationRef,
+      quoteLineId: u.quoteLineId,
+      name: u.name,
+      orderedQty: u.orderedQty,
+      suppliedQty: u.suppliedQty,
+      inventoryProductId: u.inventoryProductId || '',
+      postedAtISO: u.postedAtISO,
+    });
+  });
+  return rows;
+}
+
+/** Three finance packs + GL; two operational packs under “More”. */
 const PRIMARY_REPORT_GROUPS = [
   {
     id: 'accounting-pl',
-    title: 'Accounting & profit and loss',
+    title: 'Costs, accruals & inventory',
     subtitle:
-      'Posted spend, unpaid accruals, and inventory / COGS — the usual inputs for management accounts and P&L review.',
+      'Single export: expenses in range, unpaid approved accruals, inventory-lot valuation (coil & stone GRNs), and COGS movements (Excel = one sheet per section).',
     reports: [
       {
-        id: 'expenses',
-        title: 'Expenses report',
-        desc: 'Posted expenses in the period by standard category, type, and reference.',
+        id: 'period-costs-inventory',
+        title: PACK_PERIOD_COSTS_INVENTORY,
+        desc: 'Management accounts inputs — was: expenses, accrued payables, valuation & COGS.',
         icon: Receipt,
-        formats: ['Excel', 'CSV'],
-      },
-      {
-        id: 'accruals',
-        title: 'Accrued expenses (approved unpaid)',
-        desc: 'Approved payment requests still unpaid (by approval date in range) — period cut-off and payables.',
-        icon: ClipboardList,
-        formats: ['Excel', 'CSV'],
-      },
-      {
-        id: 'inventory-costing',
-        title: 'Inventory valuation & COGS',
-        desc: 'Open coil valuation and COGS movements dated in the period (production consumption).',
-        icon: Package,
         formats: ['Excel', 'CSV'],
       },
     ],
   },
   {
     id: 'reconciliation',
-    title: 'Reconciliation',
-    subtitle: 'Match bank, treasury, and sub-ledgers to the books — exception-focused where noted.',
+    title: 'Bank, treasury & AR',
+    subtitle:
+      'Single export: bank statement lines, receipt/advance vs treasury exceptions, AR control list, and treasury movements in the period.',
     reports: [
       {
-        id: 'bank-recon',
-        title: 'Bank reconciliation (period)',
-        desc: 'Statement lines with bank date in range (all statuses); clear Review items in Finance.',
+        id: 'cash-bank-ar',
+        title: PACK_CASH_BANK_AR,
+        desc: 'Was: bank recon, receipt vs treasury, AR check, financial (treasury) listing.',
         icon: Landmark,
-        formats: ['Excel', 'CSV'],
-      },
-      {
-        id: 'receipt-treasury',
-        title: 'Receipt & advance vs treasury',
-        desc: 'Ledger receipt/advance amounts vs treasury by source; flags orphans and net mismatches (±₦1).',
-        icon: Link2,
-        formats: ['Excel', 'CSV'],
-      },
-      {
-        id: 'ar-reconcile',
-        title: 'AR: paid vs ledger check',
-        desc: 'Quotations where paid on the quote ≠ ledger-attributed payments — AR control.',
-        icon: AlertTriangle,
-        formats: ['Excel', 'CSV'],
-      },
-      {
-        id: 'financial',
-        title: 'Financial report',
-        desc: 'Treasury movement listing with accounts, amounts, and source references (cash trail).',
-        icon: Banknote,
         formats: ['Excel', 'CSV'],
       },
     ],
   },
   {
     id: 'audit-gl',
-    title: 'Audit trail — general ledger',
-    subtitle: 'Posted GL for the period. Export and print require finance.view.',
+    title: 'General ledger',
+    subtitle:
+      'Trial balance, journal register, and full line detail in one Excel file. Print preview is trial balance only.',
     reports: [
       {
-        id: 'gl-tb',
-        title: 'General ledger — trial balance',
-        desc: 'Debits and credits by account for journals in the date range.',
+        id: 'gl-audit-pack',
+        title: PACK_GL_AUDIT,
+        desc: 'Was: TB, journal register, and line-level GL activity.',
         icon: Scale,
-        formats: ['Excel', 'CSV'],
-        requiresFinanceView: true,
-      },
-      {
-        id: 'gl-journals',
-        title: 'GL — journal register',
-        desc: 'One row per journal with totals, memo, and system source link.',
-        icon: ScrollText,
-        formats: ['Excel', 'CSV'],
-        requiresFinanceView: true,
-      },
-      {
-        id: 'gl-activity',
-        title: 'GL — line detail (all accounts)',
-        desc: 'Every posted line by date and account — full audit trail.',
-        icon: List,
         formats: ['Excel', 'CSV'],
         requiresFinanceView: true,
       },
@@ -150,55 +282,115 @@ const PRIMARY_REPORT_GROUPS = [
 
 const MORE_OPERATIONAL_REPORTS = [
   {
-    id: 'sales',
-    title: 'Sales report',
-    desc: 'Quotations in the period by date; use dashboard KPIs above for revenue mix.',
-    icon: ShoppingCart,
+    id: 'sales-customer-pack',
+    title: PACK_SALES_CUSTOMER,
+    desc: 'Quotations in range, customer ledger lines, cash/AR/production bridge (includes refunds).',
+    icon: Table2,
     formats: ['Excel', 'CSV'],
   },
   {
-    id: 'customer-ledger',
-    title: 'Customer ledger activity',
-    desc: 'All customer ledger lines in the period: receipts, advances, applications.',
-    icon: BookOpen,
-    formats: ['Excel', 'CSV'],
-  },
-  {
-    id: 'refunds',
-    title: 'Refunds report',
-    desc: 'Refund requests in the period with status and payout amounts.',
-    icon: RotateCcw,
-    formats: ['Excel', 'CSV'],
-  },
-  {
-    id: 'inventory',
-    title: 'Inventory report',
-    desc: 'SKU on-hand, units, and reorder thresholds (stock listing).',
-    icon: Package,
-    formats: ['Excel', 'CSV'],
-  },
-  {
-    id: 'purchase',
-    title: 'Purchase report',
-    desc: 'Purchase orders, status, line counts, and supplier paid-to-date.',
-    icon: FileText,
-    formats: ['Excel', 'CSV'],
-  },
-  {
-    id: 'grn-register',
-    title: 'GRN / coil receipt register',
-    desc: 'Coils received in the period with PO, supplier, quantities, landed cost.',
+    id: 'ops-procurement-pack',
+    title: PACK_OPS_PROCUREMENT,
+    desc: 'SKU stock, purchase orders (with procurement kind), GRN/lot register, PO accrual bridge, production accessory postings in period.',
     icon: Factory,
     formats: ['Excel', 'CSV'],
   },
   {
-    id: 'po-accrual',
-    title: 'PO accrual bridge',
-    desc: 'Per PO: ordered vs received value vs supplier paid — procurement bridge.',
-    icon: Layers,
+    id: 'production-transaction-register',
+    title: PACK_PRODUCTION_TRANSACTION,
+    desc: 'Completed jobs in period: qt, production date, customer, coil colour/gauge, weights, metres, conversion, paid/refund (quote), material cost.',
+    icon: Table2,
     formats: ['Excel', 'CSV'],
   },
 ];
+
+function productionTransactionExportRows(raw) {
+  return (raw || []).map((r) => {
+    const { jobId, ...x } = r;
+    void jobId;
+    return {
+      qtNo: x.qtNo,
+      prodDate: x.prodDate,
+      customer: x.customer,
+      color: x.color,
+      gauge: x.gauge,
+      coilNo: x.coilNo,
+      beforeKg: x.beforeKg,
+      afterKg: x.afterKg,
+      kgUsed: x.kgUsed,
+      meters: x.meters,
+      conversionKgM: x.conversionKgM ?? '',
+      design: x.design,
+      offcutKg: x.offcutKg ?? '',
+      paidNgn: x.paidNgn ?? '',
+      refundPaidNgn: x.refundPaidNgn ?? '',
+      materialCostNgn: x.materialCostNgn,
+    };
+  });
+}
+
+function buildProductionTransactionPrintPayload(raw) {
+  const fmtK = (n) => {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return '—';
+    return v.toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+  const rows = (raw || []).map((r) => ({
+    qtNo: r.qtNo,
+    prodDate: r.prodDate,
+    customer: r.customer,
+    color: r.color,
+    gauge: r.gauge,
+    coilNo: r.coilNo,
+    beforeKg: fmtK(r.beforeKg),
+    afterKg: fmtK(r.afterKg),
+    kgUsed: fmtK(r.kgUsed),
+    meters: Number(r.meters).toLocaleString('en-NG', { maximumFractionDigits: 2 }),
+    conversionKgM: r.conversionKgM != null ? Number(r.conversionKgM).toFixed(3) : '—',
+    design: r.design,
+    offcutKg: r.offcutKg != null ? fmtK(r.offcutKg) : '—',
+    paid: r.paidNgn != null ? formatNgn(r.paidNgn) : '—',
+    refund: r.refundPaidNgn != null ? formatNgn(r.refundPaidNgn) : '—',
+    cost: formatNgn(r.materialCostNgn),
+  }));
+  return {
+    title: PACK_PRODUCTION_TRANSACTION,
+    columns: [
+      { key: 'qtNo', label: 'Qt no' },
+      { key: 'prodDate', label: 'Prod. date' },
+      { key: 'customer', label: 'Customer' },
+      { key: 'color', label: 'Color' },
+      { key: 'gauge', label: 'Gauge' },
+      { key: 'coilNo', label: 'Coil' },
+      { key: 'beforeKg', label: 'Before kg' },
+      { key: 'afterKg', label: 'After kg' },
+      { key: 'kgUsed', label: 'Kg used' },
+      { key: 'meters', label: 'Metres' },
+      { key: 'conversionKgM', label: 'kg/m' },
+      { key: 'design', label: 'Design' },
+      { key: 'offcutKg', label: 'Offcut kg' },
+      { key: 'paid', label: 'Paid' },
+      { key: 'refund', label: 'Refund' },
+      { key: 'cost', label: 'Cost' },
+    ],
+    rows,
+    summaryLines: [
+      { label: 'Rows (coil lines)', value: String(rows.length) },
+      {
+        label: 'Paid / refund',
+        value: 'Shown once per job (first coil row) to avoid double-count.',
+      },
+      {
+        label: 'Offcut kg',
+        value: 'Non-zero opening − used − closing only (trace check).',
+      },
+      {
+        label: 'Cost',
+        value: 'Consumed kg × coil unit ₦/kg when GRN cost exists.',
+      },
+    ],
+  };
+}
 
 const LIST_ROW =
   'z-list-row flex flex-wrap items-center justify-between gap-2 sm:gap-3 text-sm font-semibold text-slate-800';
@@ -305,9 +497,9 @@ const Reports = () => {
     () => (ws?.hasWorkspaceData && Array.isArray(snapshot.ledgerEntries) ? snapshot.ledgerEntries : []),
     [snapshot.ledgerEntries, ws.hasWorkspaceData]
   );
-  const cuttingLists = useMemo(
-    () => (ws?.hasWorkspaceData && Array.isArray(snapshot.cuttingLists) ? snapshot.cuttingLists : []),
-    [snapshot.cuttingLists, ws.hasWorkspaceData]
+  const productionJobs = useMemo(
+    () => (ws?.hasWorkspaceData && Array.isArray(snapshot.productionJobs) ? snapshot.productionJobs : []),
+    [snapshot.productionJobs, ws.hasWorkspaceData]
   );
   const refunds = useMemo(
     () => (ws?.hasWorkspaceData && Array.isArray(snapshot.refunds) ? snapshot.refunds : []),
@@ -327,28 +519,57 @@ const Reports = () => {
       ws?.hasWorkspaceData && Array.isArray(snapshot.paymentRequests) ? snapshot.paymentRequests : [],
     [snapshot.paymentRequests, ws.hasWorkspaceData]
   );
+  const accessoryUsage = useMemo(
+    () =>
+      ws?.hasWorkspaceData && Array.isArray(snapshot.productionJobAccessoryUsage)
+        ? snapshot.productionJobAccessoryUsage
+        : [],
+    [snapshot.productionJobAccessoryUsage, ws.hasWorkspaceData]
+  );
+
+  const procurementMixInPeriod = useMemo(() => {
+    const inRange = filterPurchaseOrdersInRange(purchaseOrders, startDate, endDate);
+    const mix = { coil: 0, stone: 0, accessory: 0 };
+    for (const po of inRange) {
+      const k = procurementKindFromPo(po);
+      if (k in mix) mix[k] += 1;
+    }
+    return { ...mix, total: inRange.length };
+  }, [endDate, purchaseOrders, startDate]);
+
+  const accessoryUsageInPeriod = useMemo(
+    () => filterAccessoryUsageInRange(accessoryUsage, startDate, endDate),
+    [accessoryUsage, endDate, startDate]
+  );
+
+  const treasuryMovementsInPeriod = useMemo(
+    () => filterTreasuryMovementsInRange(treasuryMovements, startDate, endDate),
+    [endDate, startDate, treasuryMovements]
+  );
 
   const salesKpis = useMemo(() => {
     const quotes = filterQuotationsInRange(quotations, startDate, endDate);
-    const totalSales = quotes.reduce((s, q) => s + (q.totalNgn ?? 0), 0);
-    const productionRevenueNgn = productionAttributedRevenueNgn(quotations, cuttingLists, startDate, endDate);
+    const quotationPipelineNgn = quotes.reduce((s, q) => s + (q.totalNgn ?? 0), 0);
+    const producedSalesNgn = productionAttributedRevenueNgn(quotations, productionJobs, startDate, endDate);
     const totalPaid = receipts
       .filter((r) => r.dateISO >= startDate && r.dateISO <= endDate)
       .reduce((s, q) => s + (q.amountNgn ?? 0), 0);
     const outstanding = liveReceivablesNgn(quotations, ledgerEntries);
-    const cuttingListsInRange = cuttingLists.filter((cl) => {
-      const iso = String(cl.dateISO || '').slice(0, 10);
+    const productionJobsCompletedInRange = productionJobs.filter((j) => {
+      if (String(j.status || '').trim() !== 'Completed') return false;
+      const iso = productionOutputDateISO(j);
+      if (!iso) return false;
       return (!startDate || iso >= startDate) && (!endDate || iso <= endDate);
     }).length;
     return {
-      totalSales,
-      productionRevenueNgn,
+      quotationPipelineNgn,
+      producedSalesNgn,
       totalPaid,
       outstanding,
       rowCount: quotes.length,
-      cuttingListsInRange,
+      productionJobsCompletedInRange,
     };
-  }, [cuttingLists, endDate, ledgerEntries, quotations, receipts, startDate]);
+  }, [endDate, ledgerEntries, productionJobs, quotations, receipts, startDate]);
 
   const expensesInPeriodNgn = useMemo(
     () =>
@@ -370,9 +591,12 @@ const Reports = () => {
     }));
   }, [liveProducts]);
 
-  const movementPreview = useMemo(() => movements.slice(0, 12), [movements]);
+  const movementPreview = useMemo(
+    () => filterStockMovementsInRange(movements, startDate, endDate).slice(0, 12),
+    [endDate, movements, startDate]
+  );
 
-  const topCustomers = topCustomersBySales(quotations, startDate, endDate, 5);
+  const topCustomers = topCustomersByProductionAttributedSales(quotations, productionJobs, startDate, endDate, 5);
   const arAging = useMemo(
     () => receivablesAgingBuckets(quotations, ledgerEntries, endDate),
     [endDate, ledgerEntries, quotations]
@@ -387,138 +611,27 @@ const Reports = () => {
 
   const getExportRows = useCallback(
     (name) => {
-      if (name === 'Sales report') {
-        return filterQuotationsInRange(quotations, startDate, endDate).map((q) => ({
-          quotationID: q.id,
-          dateISO: q.dateISO,
-          customer: q.customer,
-          totalNgn: q.totalNgn,
-          status: q.status,
-        }));
+      if (name === PACK_PERIOD_COSTS_INVENTORY) {
+        return rowsPeriodCostsInventoryPack(expenses, paymentRequests, coilLots, movements, startDate, endDate);
       }
-      if (name === 'Inventory report') {
-        return liveProducts.map((p) => ({
-          productID: p.productID,
-          name: p.name,
-          stockLevel: p.stockLevel,
-          unit: p.unit,
-          lowStockThreshold: p.lowStockThreshold,
-        }));
-      }
-      if (name === 'Purchase report') {
-        return purchaseOrders.map((p) => ({
-          poID: p.poID,
-          supplierName: p.supplierName,
-          orderDateISO: p.orderDateISO,
-          status: p.status,
-          lineCount: p.lines?.length || 0,
-          supplierPaidNgn: p.supplierPaidNgn || 0,
-        }));
-      }
-      if (name === 'Expenses report') {
-        return filterExpensesInRange(expenses, startDate, endDate).map((e) => ({
-          expenseID: e.expenseID,
-          date: e.date,
-          category: e.category,
-          expenseType: e.expenseType,
-          amountNgn: e.amountNgn,
-          paymentMethod: e.paymentMethod,
-          reference: e.reference,
-          branchId: e.branchId,
-        }));
-      }
-      if (name === 'Refunds report') {
-        return filterRefundsInRange(refunds, startDate, endDate).map((r) => ({
-          refundID: r.refundID,
-          requestedAtISO: r.requestedAtISO,
-          customer: r.customer,
-          quotationRef: r.quotationRef,
-          status: r.status,
-          amountNgn: r.amountNgn,
-          approvedAmountNgn: r.approvedAmountNgn,
-          paidAmountNgn: r.paidAmountNgn,
-          reasonCategory: r.reasonCategory,
-        }));
-      }
-      if (name === 'Customer ledger activity') {
-        return customerLedgerActivityRows(ledgerEntries, quotations, startDate, endDate).map((r) => ({
-          atISO: r.atISO,
-          type: r.type,
-          customerID: r.customerID,
-          customerName: r.customerName,
-          quotationRef: r.quotationRef,
-          amountNgn: r.amountNgn,
-          paymentMethod: r.paymentMethod,
-          bankReference: r.bankReference,
-          purpose: r.purpose,
-          branchId: r.branchId,
-        }));
-      }
-      if (name === 'Bank reconciliation (period)') {
-        return filterBankReconciliationInRange(bankReconciliation, startDate, endDate).map((r) => ({
-          bankDateISO: r.bankDateISO,
-          id: r.id,
-          description: r.description,
-          amountNgn: r.amountNgn,
-          systemMatch: r.systemMatch,
-          status: r.status,
-          branchId: r.branchId,
-        }));
-      }
-      if (name === 'Receipt & advance vs treasury') {
-        return receiptAdvanceTreasuryReconciliationRows(
+      if (name === PACK_CASH_BANK_AR) {
+        return rowsCashBankArPack(
+          bankReconciliation,
           ledgerEntries,
           treasuryMovements,
+          quotations,
+          receipts,
           startDate,
           endDate
         );
       }
-      if (name === 'AR: paid vs ledger check') {
-        return quotationPaidNgnLedgerDiscrepancies(quotations, ledgerEntries).map((r) => ({
-          quotationID: r.quotationID,
-          dateISO: r.dateISO,
-          customer: r.customer,
-          totalNgn: r.totalNgn,
-          paidNgnOnQuote: r.paidNgnOnQuote,
-          ledgerAttributedPaidNgn: r.ledgerAttributedPaidNgn,
-          deltaNgn: r.deltaNgn,
-        }));
+      if (name === PACK_SALES_CUSTOMER) {
+        return rowsSalesCustomerPack(ledgerEntries, productionJobs, quotations, refunds, startDate, endDate);
       }
-      if (name === 'GRN / coil receipt register') {
-        return grnCoilRegisterRows(coilLots, startDate, endDate);
+      if (name === PACK_OPS_PROCUREMENT) {
+        return rowsOpsProcurementPack(liveProducts, purchaseOrders, coilLots, accessoryUsage, startDate, endDate);
       }
-      if (name === 'PO accrual bridge') {
-        return purchaseOrderAccrualBridgeRows(purchaseOrders);
-      }
-      if (name === 'Inventory valuation & COGS') {
-        return [
-          ...coilInventoryValuationRows(coilLots).map((r) => ({ section: 'valuation', ...r })),
-          ...cogsMovementRows(movements, startDate, endDate).map((r) => ({ section: 'cogs_movement', ...r })),
-        ];
-      }
-      if (name === 'Accrued expenses (approved unpaid)') {
-        return accruedApprovedPayablesRows(paymentRequests, startDate, endDate);
-      }
-      if (name === 'Financial report') {
-        return treasuryMovements.map((m) => ({
-          postedAtISO: m.postedAtISO,
-          type: m.type,
-          account: `${m.accountType} — ${m.accountName}`,
-          amountNgn: m.amountNgn,
-          sourceKind: m.sourceKind,
-          sourceId: m.sourceId,
-          reference: m.reference,
-        }));
-      }
-      return treasuryMovements.map((m) => ({
-        postedAtISO: m.postedAtISO,
-        type: m.type,
-        account: `${m.accountType} — ${m.accountName}`,
-        amountNgn: m.amountNgn,
-        sourceKind: m.sourceKind,
-        sourceId: m.sourceId,
-        reference: m.reference,
-      }));
+      return [];
     },
     [
       bankReconciliation,
@@ -529,99 +642,24 @@ const Reports = () => {
       liveProducts,
       movements,
       paymentRequests,
+      productionJobs,
       purchaseOrders,
       quotations,
+      receipts,
       refunds,
       startDate,
       treasuryMovements,
+      accessoryUsage,
     ]
   );
 
   const getPrintConfig = useCallback(
     (name) => {
-      if (name === 'Sales report') {
-        const rows = filterQuotationsInRange(quotations, startDate, endDate).map((q) => ({
-          quotationID: q.id,
-          dateISO: q.dateISO,
-          customer: q.customer,
-          total: formatNgn(q.totalNgn),
-          status: q.status,
-        }));
-        return {
-          title: 'Sales report',
-          columns: [
-            { key: 'quotationID', label: 'Quotation' },
-            { key: 'dateISO', label: 'Date' },
-            { key: 'customer', label: 'Customer' },
-            { key: 'total', label: 'Total' },
-            { key: 'status', label: 'Status' },
-          ],
-          rows,
-          summaryLines: [
-            { label: 'Quotations in range (by quote date)', value: String(rows.length) },
-            { label: 'Order value in period (quotation date)', value: formatNgn(salesKpis.totalSales) },
-            {
-              label: 'Production-attributed revenue (cutting list date)',
-              value: formatNgn(salesKpis.productionRevenueNgn),
-            },
-            { label: 'Cutting lists dated in period', value: String(salesKpis.cuttingListsInRange) },
-            { label: 'Customer receipts in period (cash)', value: formatNgn(salesKpis.totalPaid) },
-            { label: 'Outstanding receivables (all open quotes)', value: formatNgn(salesKpis.outstanding) },
-          ],
-        };
-      }
-      if (name === 'Inventory report') {
-        const rows = liveProducts.map((p) => ({
-          productID: p.productID,
-          name: p.name,
-          onHand: `${p.stockLevel.toLocaleString()} ${p.unit}`,
-          reorderAt: `${Number(p.lowStockThreshold ?? 0).toLocaleString()} ${p.unit}`,
-          flag: p.stockLevel < p.lowStockThreshold ? 'Below minimum' : 'OK',
-        }));
-        return {
-          title: 'Inventory report',
-          columns: [
-            { key: 'productID', label: 'SKU' },
-            { key: 'name', label: 'Description' },
-            { key: 'onHand', label: 'On hand' },
-            { key: 'reorderAt', label: 'Reorder at' },
-            { key: 'flag', label: 'Stock flag' },
-          ],
-          rows,
-          summaryLines: [
-            { label: 'SKUs tracked', value: String(rows.length) },
-            {
-              label: 'Below reorder',
-              value: String(liveProducts.filter((p) => p.stockLevel < p.lowStockThreshold).length),
-            },
-          ],
-        };
-      }
-      if (name === 'Purchase report') {
-        const rows = purchaseOrders.map((p) => ({
-          poID: p.poID,
-          supplierName: p.supplierName,
-          orderDateISO: p.orderDateISO,
-          status: p.status,
-          lines: String(p.lines?.length || 0),
-          paid: formatNgn(p.supplierPaidNgn || 0),
-        }));
-        return {
-          title: 'Purchase report',
-          columns: [
-            { key: 'poID', label: 'PO' },
-            { key: 'supplierName', label: 'Supplier' },
-            { key: 'orderDateISO', label: 'Order date' },
-            { key: 'status', label: 'Status' },
-            { key: 'lines', label: 'Lines' },
-            { key: 'paid', label: 'Paid (supplier)' },
-          ],
-          rows,
-          summaryLines: [{ label: 'Purchase orders', value: String(rows.length) }],
-        };
-      }
-      if (name === 'Expenses report') {
+      if (name === PACK_PERIOD_COSTS_INVENTORY) {
         const exRows = filterExpensesInRange(expenses, startDate, endDate);
+        const acRows = accruedApprovedPayablesRows(paymentRequests, startDate, endDate);
+        const val = coilInventoryValuationRows(coilLots);
+        const cogs = cogsMovementRows(movements, startDate, endDate);
         const rows = exRows.map((e) => ({
           expenseID: e.expenseID,
           date: e.date,
@@ -631,7 +669,7 @@ const Reports = () => {
           reference: e.reference || '—',
         }));
         return {
-          title: 'Expenses report',
+          title: PACK_PERIOD_COSTS_INVENTORY,
           columns: [
             { key: 'expenseID', label: 'Expense' },
             { key: 'date', label: 'Date' },
@@ -642,45 +680,29 @@ const Reports = () => {
           ],
           rows,
           summaryLines: [
-            { label: 'Expenses in period', value: String(rows.length) },
-            { label: 'Total', value: formatNgn(exRows.reduce((s, e) => s + (Number(e.amountNgn) || 0), 0)) },
-          ],
-        };
-      }
-      if (name === 'Customer ledger activity') {
-        const raw = customerLedgerActivityRows(ledgerEntries, quotations, startDate, endDate);
-        const rows = raw.map((r) => ({
-          atISO: String(r.atISO || '').replace('T', ' '),
-          type: r.type,
-          customer: r.customerName || r.customerID,
-          quotation: r.quotationRef || '—',
-          amount: formatNgn(r.amountNgn),
-          method: r.paymentMethod || '—',
-          reference: r.bankReference || '—',
-        }));
-        return {
-          title: 'Customer ledger activity',
-          columns: [
-            { key: 'atISO', label: 'When' },
-            { key: 'type', label: 'Type' },
-            { key: 'customer', label: 'Customer' },
-            { key: 'quotation', label: 'Quotation' },
-            { key: 'amount', label: 'Amount' },
-            { key: 'method', label: 'Method' },
-            { key: 'reference', label: 'Bank ref.' },
-          ],
-          rows,
-          summaryLines: [
-            { label: 'Lines in period', value: String(rows.length) },
+            { label: 'Print shows expenses only', value: String(exRows.length) },
+            { label: 'Expenses total', value: formatNgn(exRows.reduce((s, e) => s + (Number(e.amountNgn) || 0), 0)) },
+            { label: 'Unpaid accrual rows', value: String(acRows.length) },
             {
-              label: 'Sum amounts (signed types)',
-              value: formatNgn(raw.reduce((s, r) => s + (Number(r.amountNgn) || 0), 0)),
+              label: 'Accrual unpaid ₦',
+              value: formatNgn(acRows.reduce((s, r) => s + (Number(r.accruedUnpaidNgn) || 0), 0)),
             },
+            { label: 'Coil valuation lines', value: String(val.length) },
+            { label: 'COGS movement lines', value: String(cogs.length) },
+            { label: 'Excel', value: 'Sheets: Expenses, Accruals, Valuation, COGS.' },
           ],
         };
       }
-      if (name === 'Bank reconciliation (period)') {
+      if (name === PACK_CASH_BANK_AR) {
         const br = filterBankReconciliationInRange(bankReconciliation, startDate, endDate);
+        const rtExc = receiptAdvanceTreasuryReconciliationRows(
+          ledgerEntries,
+          treasuryMovements,
+          startDate,
+          endDate
+        );
+        const arDisc = quotationPaidNgnReceiptDiscrepancies(quotations, receipts, ledgerEntries);
+        const tm = filterTreasuryMovementsInRange(treasuryMovements, startDate, endDate);
         const rows = br.map((r) => ({
           bankDate: r.bankDateISO,
           description: r.description || '—',
@@ -689,7 +711,7 @@ const Reports = () => {
           match: r.systemMatch || '—',
         }));
         return {
-          title: 'Bank reconciliation (period)',
+          title: PACK_CASH_BANK_AR,
           columns: [
             { key: 'bankDate', label: 'Bank date' },
             { key: 'description', label: 'Description' },
@@ -699,270 +721,126 @@ const Reports = () => {
           ],
           rows,
           summaryLines: [
-            { label: 'Lines in period', value: String(rows.length) },
+            { label: 'Print shows bank lines only', value: String(br.length) },
             {
-              label: 'In Review status',
+              label: 'In Review (bank)',
               value: String(br.filter((x) => x.status === 'Review').length),
             },
+            { label: 'Receipt/treasury exception rows', value: String(rtExc.length) },
+            { label: 'AR mismatch rows', value: String(arDisc.length) },
+            { label: 'Treasury movements in period', value: String(tm.length) },
+            { label: 'Note', value: '0 receipt exceptions = no ±₦1 mismatches in range.' },
           ],
         };
       }
-      if (name === 'Receipt & advance vs treasury') {
-        const raw = receiptAdvanceTreasuryReconciliationRows(
+      if (name === PACK_SALES_CUSTOMER) {
+        const raw = salesPeriodCashBridgeExportRows(
           ledgerEntries,
-          treasuryMovements,
+          productionJobs,
+          quotations,
+          refunds,
+          startDate,
+          endDate
+        );
+        const s = salesPeriodCashBridgeSummary(
+          ledgerEntries,
+          productionJobs,
+          quotations,
+          refunds,
           startDate,
           endDate
         );
         const rows = raw.map((r) => ({
-          section: r.section,
-          id: r.ledgerEntryId || r.treasuryMovementId || '—',
-          when: String(r.atISO || r.postedAtISO || '').replace('T', ' '),
-          customer: r.customerName || '—',
-          quote: r.quotationRef || '—',
-          ledgerAmt: r.ledgerAmountNgn != null ? formatNgn(r.ledgerAmountNgn) : '—',
-          treasuryNet: r.treasuryNetNgn != null ? formatNgn(r.treasuryNetNgn) : formatNgn(r.amountNgn),
-          delta: r.deltaNgn != null ? formatNgn(r.deltaNgn) : '—',
-          issue: r.issue,
+          section: r.reportSection,
+          category: r.category,
+          ledgerType: r.ledgerType,
+          dateISO: r.dateISO || '—',
+          recordId: r.recordId || '—',
+          customer: r.customer || '—',
+          quotation: r.quotationRef || '—',
+          amount:
+            r.reportSection === 'Production completed (period)' ? '—' : formatNgn(r.amountNgn),
+          metres: r.metresProduced === '' ? '—' : String(r.metresProduced),
+          remarks: r.remarks || '—',
         }));
+        const qInRange = filterQuotationsInRange(quotations, startDate, endDate).length;
+        const ledCount = customerLedgerActivityRows(ledgerEntries, quotations, startDate, endDate).length;
         return {
-          title: 'Receipt & advance vs treasury',
+          title: PACK_SALES_CUSTOMER,
           columns: [
             { key: 'section', label: 'Section' },
-            { key: 'id', label: 'Ledger / TM id' },
-            { key: 'when', label: 'When' },
+            { key: 'category', label: 'Category' },
+            { key: 'ledgerType', label: 'Type' },
+            { key: 'dateISO', label: 'Date' },
+            { key: 'recordId', label: 'Record' },
             { key: 'customer', label: 'Customer' },
-            { key: 'quote', label: 'Quote' },
-            { key: 'ledgerAmt', label: 'Ledger ₦' },
-            { key: 'treasuryNet', label: 'Treasury net ₦' },
-            { key: 'delta', label: 'Delta' },
-            { key: 'issue', label: 'Issue' },
-          ],
-          rows,
-          summaryLines: [
-            { label: 'Exception rows', value: String(rows.length) },
-            { label: 'Note', value: 'Empty list means no mismatches in range (±₦1).' },
-          ],
-        };
-      }
-      if (name === 'AR: paid vs ledger check') {
-        const disc = quotationPaidNgnLedgerDiscrepancies(quotations, ledgerEntries);
-        const rows = disc.map((r) => ({
-          quotation: r.quotationID,
-          dateISO: r.dateISO,
-          customer: r.customer,
-          onQuote: formatNgn(r.paidNgnOnQuote),
-          fromLedger: formatNgn(r.ledgerAttributedPaidNgn),
-          delta: formatNgn(r.deltaNgn),
-        }));
-        return {
-          title: 'AR: paid vs ledger check',
-          columns: [
             { key: 'quotation', label: 'Quotation' },
-            { key: 'dateISO', label: 'Quote date' },
-            { key: 'customer', label: 'Customer' },
-            { key: 'onQuote', label: 'Paid on quote' },
-            { key: 'fromLedger', label: 'Ledger attributed' },
-            { key: 'delta', label: 'Delta' },
-          ],
-          rows,
-          summaryLines: [
-            { label: 'Mismatched quotations', value: String(rows.length) },
-            { label: 'Note', value: 'Full quotation list; not limited to period.' },
-          ],
-        };
-      }
-      if (name === 'GRN / coil receipt register') {
-        const grn = grnCoilRegisterRows(coilLots, startDate, endDate);
-        const rows = grn.map((r) => ({
-          received: r.receivedAtISO,
-          coil: r.coilNo,
-          po: r.poID,
-          supplier: r.supplierName,
-          product: r.productID,
-          qty: r.qtyReceived,
-          landed: r.landedCostNgn !== '' ? formatNgn(r.landedCostNgn) : '—',
-        }));
-        return {
-          title: 'GRN / coil receipt register',
-          columns: [
-            { key: 'received', label: 'Received' },
-            { key: 'coil', label: 'Coil' },
-            { key: 'po', label: 'PO' },
-            { key: 'supplier', label: 'Supplier' },
-            { key: 'product', label: 'Product' },
-            { key: 'qty', label: 'Qty / kg' },
-            { key: 'landed', label: 'Landed cost' },
-          ],
-          rows,
-          summaryLines: [{ label: 'GRN lines in period', value: String(rows.length) }],
-        };
-      }
-      if (name === 'PO accrual bridge') {
-        const brRows = purchaseOrderAccrualBridgeRows(purchaseOrders);
-        const rows = brRows.map((r) => ({
-          po: r.poID,
-          supplier: r.supplierName,
-          ordered: formatNgn(r.orderedValueNgn),
-          received: formatNgn(r.receivedValueNgn),
-          paid: formatNgn(r.supplierPaidNgn),
-          recvMinusPaid: formatNgn(r.receivedMinusPaidNgn),
-        }));
-        return {
-          title: 'PO accrual bridge',
-          columns: [
-            { key: 'po', label: 'PO' },
-            { key: 'supplier', label: 'Supplier' },
-            { key: 'ordered', label: 'Ordered value' },
-            { key: 'received', label: 'Received value' },
-            { key: 'paid', label: 'Supplier paid' },
-            { key: 'recvMinusPaid', label: 'Received − paid' },
-          ],
-          rows,
-          summaryLines: [{ label: 'Purchase orders', value: String(rows.length) }],
-        };
-      }
-      if (name === 'Inventory valuation & COGS') {
-        const val = coilInventoryValuationRows(coilLots);
-        const cogs = cogsMovementRows(movements, startDate, endDate);
-        const valRows = val.map((r) => ({
-          section: 'Valuation',
-          colA: r.coilNo,
-          colB: String(r.kgOnHand),
-          colC: r.unitCostNgnPerKg !== '' ? formatNgn(r.unitCostNgnPerKg) : '—',
-          colD: r.extendedValueNgn !== '' ? formatNgn(r.extendedValueNgn) : '—',
-        }));
-        const cogsRows = cogs.map((r) => ({
-          section: 'COGS',
-          colA: r.dateISO,
-          colB: r.type,
-          colC: r.productID || r.ref || '—',
-          colD: r.valueNgn !== '' ? formatNgn(r.valueNgn) : '—',
-        }));
-        return {
-          title: 'Inventory valuation & COGS',
-          columns: [
-            { key: 'section', label: 'Section' },
-            { key: 'colA', label: 'Coil / Date' },
-            { key: 'colB', label: 'Kg / Type' },
-            { key: 'colC', label: 'Unit cost / Ref' },
-            { key: 'colD', label: 'Extended / Value' },
-          ],
-          rows: [...valRows, ...cogsRows],
-          summaryLines: [
-            { label: 'Open coils valued', value: String(val.length) },
-            { label: 'COGS movements in period', value: String(cogs.length) },
-          ],
-        };
-      }
-      if (name === 'Accrued expenses (approved unpaid)') {
-        const ac = accruedApprovedPayablesRows(paymentRequests, startDate, endDate);
-        const rows = ac.map((r) => ({
-          request: r.requestID,
-          approved: String(r.approvedAtISO || '').slice(0, 10),
-          description: r.description,
-          accrued: formatNgn(r.accruedUnpaidNgn),
-        }));
-        return {
-          title: 'Accrued expenses (approved unpaid)',
-          columns: [
-            { key: 'request', label: 'Request' },
-            { key: 'approved', label: 'Approved' },
-            { key: 'description', label: 'Description' },
-            { key: 'accrued', label: 'Unpaid balance' },
-          ],
-          rows,
-          summaryLines: [
-            { label: 'Rows', value: String(rows.length) },
-            {
-              label: 'Total accrued',
-              value: formatNgn(ac.reduce((s, r) => s + (Number(r.accruedUnpaidNgn) || 0), 0)),
-            },
-          ],
-        };
-      }
-      if (name === 'Refunds report') {
-        const rfRows = filterRefundsInRange(refunds, startDate, endDate);
-        const rows = rfRows.map((r) => ({
-          refundID: r.refundID,
-          requested: String(r.requestedAtISO || '').slice(0, 10),
-          customer: r.customer,
-          quote: r.quotationRef,
-          status: r.status,
-          requestedAmount: formatNgn(r.amountNgn),
-          approved: formatNgn(r.approvedAmountNgn),
-          paid: formatNgn(r.paidAmountNgn),
-        }));
-        return {
-          title: 'Refunds report',
-          columns: [
-            { key: 'refundID', label: 'Refund' },
-            { key: 'requested', label: 'Requested' },
-            { key: 'customer', label: 'Customer' },
-            { key: 'quote', label: 'Quotation' },
-            { key: 'status', label: 'Status' },
-            { key: 'requestedAmount', label: 'Req. amt' },
-            { key: 'approved', label: 'Approved' },
-            { key: 'paid', label: 'Paid' },
-          ],
-          rows,
-          summaryLines: [
-            { label: 'Refund rows (by request date)', value: String(rows.length) },
-            {
-              label: 'Sum requested',
-              value: formatNgn(rfRows.reduce((s, r) => s + (Number(r.amountNgn) || 0), 0)),
-            },
-          ],
-        };
-      }
-      if (name === 'Financial report') {
-        const rows = treasuryMovements.map((m) => ({
-          postedAtISO: m.postedAtISO,
-          type: m.type,
-          account: `${m.accountType} — ${m.accountName}`,
-          amount: formatNgn(m.amountNgn),
-          reference: m.reference || '—',
-        }));
-        return {
-          title: 'Financial report',
-          columns: [
-            { key: 'postedAtISO', label: 'Posted' },
-            { key: 'type', label: 'Type' },
-            { key: 'account', label: 'Account' },
             { key: 'amount', label: 'Amount' },
-            { key: 'reference', label: 'Reference' },
+            { key: 'metres', label: 'Metres' },
+            { key: 'remarks', label: 'Remarks' },
           ],
           rows,
           summaryLines: [
-            { label: 'Movement lines', value: String(rows.length) },
-            { label: 'Expenses (all periods)', value: formatNgn(expenses.reduce((s, e) => s + (e.amountNgn || 0), 0)) },
+            { label: 'Print: cash/AR/production bridge', value: `${s.rowCount} rows` },
+            { label: 'Quotations in range (Excel)', value: String(qInRange) },
+            { label: 'Customer ledger lines in period (Excel)', value: String(ledCount) },
+            {
+              label: 'Receipts on quote — produced by period end',
+              value: formatNgn(s.cashInReceiptProducedNgn),
+            },
+            {
+              label: 'Receipts on quote — not produced by period end',
+              value: formatNgn(s.cashInReceiptNotProducedNgn),
+            },
+            { label: 'Refund payouts in period', value: formatNgn(s.refundPayoutsNgn) },
+            { label: 'Open receivables (live)', value: formatNgn(s.receivablesOpenNgn) },
+            { label: 'Production jobs completed in period', value: String(s.productionJobsCompleted) },
           ],
         };
       }
-      const rows = treasuryMovements.map((m) => ({
-        postedAtISO: m.postedAtISO,
-        type: m.type,
-        account: `${m.accountType} — ${m.accountName}`,
-        amount: formatNgn(m.amountNgn),
-        reference: m.reference || '—',
-      }));
+      if (name === PACK_OPS_PROCUREMENT) {
+        const rows = liveProducts.map((p) => ({
+          productID: p.productID,
+          name: p.name,
+          onHand: `${p.stockLevel.toLocaleString()} ${p.unit}`,
+          reorderAt: `${Number(p.lowStockThreshold ?? 0).toLocaleString()} ${p.unit}`,
+          flag: p.stockLevel < p.lowStockThreshold ? 'Below minimum' : 'OK',
+        }));
+        const grn = grnCoilRegisterRows(coilLots, startDate, endDate);
+        const poBr = purchaseOrderAccrualBridgeRows(purchaseOrders);
+        const accN = filterAccessoryUsageInRange(accessoryUsage, startDate, endDate).length;
+        return {
+          title: PACK_OPS_PROCUREMENT,
+          columns: [
+            { key: 'productID', label: 'SKU' },
+            { key: 'name', label: 'Description' },
+            { key: 'onHand', label: 'On hand' },
+            { key: 'reorderAt', label: 'Reorder at' },
+            { key: 'flag', label: 'Stock flag' },
+          ],
+          rows,
+          summaryLines: [
+            { label: 'Print shows SKU listing only', value: String(rows.length) },
+            {
+              label: 'Below reorder',
+              value: String(liveProducts.filter((p) => p.stockLevel < p.lowStockThreshold).length),
+            },
+            { label: 'Purchase orders (Excel)', value: String(purchaseOrders.length) },
+            { label: 'GRN / inventory lots in period (Excel)', value: String(grn.length) },
+            { label: 'PO accrual rows (Excel)', value: String(poBr.length) },
+            { label: 'Accessory usage lines in period (Excel)', value: String(accN) },
+          ],
+        };
+      }
       return {
-        title: 'Financial / treasury movements',
-        columns: [
-          { key: 'postedAtISO', label: 'Posted' },
-          { key: 'type', label: 'Type' },
-          { key: 'account', label: 'Account' },
-          { key: 'amount', label: 'Amount' },
-          { key: 'reference', label: 'Reference' },
-        ],
-        rows,
-        summaryLines: [
-          { label: 'Movement lines', value: String(rows.length) },
-          { label: 'Expenses (all periods)', value: formatNgn(expenses.reduce((s, e) => s + (e.amountNgn || 0), 0)) },
-        ],
+        title: name,
+        columns: [{ key: 'info', label: 'Message' }],
+        rows: [{ info: 'No A4 layout for this selection.' }],
+        summaryLines: [],
       };
     },
     [
+      accessoryUsage,
       bankReconciliation,
       coilLots,
       endDate,
@@ -971,136 +849,258 @@ const Reports = () => {
       liveProducts,
       movements,
       paymentRequests,
+      productionJobs,
       purchaseOrders,
       quotations,
+      receipts,
       refunds,
-      salesKpis,
       startDate,
       treasuryMovements,
     ]
   );
 
   const downloadReport = async (name, fmt) => {
-    if (name === 'General ledger — trial balance') {
+    const packSlug = name.toLowerCase().replace(/\s+/g, '-').replace(/[()]/g, '');
+
+    if (name === PACK_GL_AUDIT) {
       if (!ws.hasPermission('finance.view')) {
-        showToast('Trial balance requires finance.view.', { variant: 'info' });
+        showToast('General ledger pack requires finance.view.', { variant: 'info' });
         return;
       }
-      const { ok, data } = await apiFetch(
-        `/api/gl/trial-balance?startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(endDate)}`
-      );
-      if (!ok || !data?.ok) {
-        showToast(data?.error || 'Could not load trial balance.', { variant: 'error' });
+      const q = `startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(endDate)}`;
+      const [tbRes, jRes, aRes] = await Promise.all([
+        apiFetch(`/api/gl/trial-balance?${q}`),
+        apiFetch(`/api/gl/journals?${q}`),
+        apiFetch(`/api/gl/activity?${q}`),
+      ]);
+      if (!tbRes.ok || !tbRes.data?.ok) {
+        showToast(tbRes.data?.error || 'Could not load trial balance.', { variant: 'error' });
         return;
       }
-      const rows = (data.rows || []).map((r) => ({
-        accountCode: r.accountCode,
-        accountName: r.accountName,
-        accountType: r.accountType,
-        debitNgn: r.debitNgn,
-        creditNgn: r.creditNgn,
-        netNgn: r.netNgn,
-      }));
-      if (!rows.length) {
-        showToast('No GL accounts returned.', { variant: 'info' });
+      if (!jRes.ok || !jRes.data?.ok) {
+        showToast(jRes.data?.error || 'Could not load GL journals.', { variant: 'error' });
         return;
       }
-      downloadRows(name, rows, fmt);
+      if (!aRes.ok || !aRes.data?.ok) {
+        showToast(aRes.data?.error || 'Could not load GL activity.', { variant: 'error' });
+        return;
+      }
+      const tb = tbRes.data;
+      const jn = jRes.data;
+      const act = aRes.data;
+      if (fmt === 'Excel') {
+        const wb = XLSX.utils.book_new();
+        const tbRows = (tb.rows || []).map((r) => ({
+          accountCode: r.accountCode,
+          accountName: r.accountName,
+          accountType: r.accountType,
+          debitNgn: r.debitNgn,
+          creditNgn: r.creditNgn,
+          netNgn: r.netNgn,
+        }));
+        const jRows = (jn.journals || []).map((j) => ({
+          journalId: j.journalId,
+          entryDateISO: j.entryDateISO,
+          periodKey: j.periodKey,
+          memo: j.memo,
+          sourceKind: j.sourceKind,
+          sourceId: j.sourceId,
+          totalDebitNgn: j.totalDebitNgn,
+          totalCreditNgn: j.totalCreditNgn,
+        }));
+        const aRows = (act.lines || []).map((l) => ({
+          entryDateISO: l.entryDateISO,
+          journalId: l.journalId,
+          accountCode: l.accountCode,
+          accountName: l.accountName,
+          debitNgn: l.debitNgn,
+          creditNgn: l.creditNgn,
+          lineMemo: l.lineMemo,
+          journalMemo: l.journalMemo,
+          sourceKind: l.sourceKind,
+          sourceId: l.sourceId,
+        }));
+        if (tbRows.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(tbRows), 'Trial_balance');
+        if (jRows.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(jRows), 'Journals');
+        if (aRows.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(aRows), 'Activity');
+        XLSX.writeFile(wb, `${packSlug}.xlsx`);
+        showToast(`${name} exported as Excel (3 sheets).`);
+        return;
+      }
+      const flat = [
+        ...(tb.rows || []).map((r) => ({
+          packSection: 'Trial_balance',
+          accountCode: r.accountCode,
+          accountName: r.accountName,
+          debitNgn: r.debitNgn,
+          creditNgn: r.creditNgn,
+          netNgn: r.netNgn,
+        })),
+        ...(jn.journals || []).map((j) => ({
+          packSection: 'Journals',
+          journalId: j.journalId,
+          entryDateISO: j.entryDateISO,
+          memo: j.memo,
+          totalDebitNgn: j.totalDebitNgn,
+          totalCreditNgn: j.totalCreditNgn,
+        })),
+        ...(act.lines || []).map((l) => ({
+          packSection: 'Activity',
+          entryDateISO: l.entryDateISO,
+          accountCode: l.accountCode,
+          debitNgn: l.debitNgn,
+          creditNgn: l.creditNgn,
+          lineMemo: l.lineMemo,
+        })),
+      ];
+      if (!flat.length) {
+        showToast('No GL data in the selected period.', { variant: 'info' });
+        return;
+      }
+      downloadRows(name, flat, fmt);
       showToast(`${name} exported as ${fmt}.`);
       return;
     }
 
-    if (name === 'GL — journal register') {
-      if (!ws.hasPermission('finance.view')) {
-        showToast('This export requires finance.view.', { variant: 'info' });
-        return;
-      }
-      const { ok, data } = await apiFetch(
-        `/api/gl/journals?startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(endDate)}`
-      );
-      if (!ok || !data?.ok) {
-        showToast(data?.error || 'Could not load GL journals.', { variant: 'error' });
-        return;
-      }
-      const rows = (data.journals || []).map((j) => ({
-        journalId: j.journalId,
-        entryDateISO: j.entryDateISO,
-        periodKey: j.periodKey,
-        memo: j.memo,
-        sourceKind: j.sourceKind,
-        sourceId: j.sourceId,
-        totalDebitNgn: j.totalDebitNgn,
-        totalCreditNgn: j.totalCreditNgn,
-      }));
-      if (!rows.length) {
-        showToast('No GL journals in the selected period.', { variant: 'info' });
-        return;
-      }
-      downloadRows(name, rows, fmt);
-      showToast(`${name} exported as ${fmt}.`);
-      return;
-    }
-
-    if (name === 'GL — line detail (all accounts)') {
-      if (!ws.hasPermission('finance.view')) {
-        showToast('This export requires finance.view.', { variant: 'info' });
-        return;
-      }
-      const { ok, data } = await apiFetch(
-        `/api/gl/activity?startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(endDate)}`
-      );
-      if (!ok || !data?.ok) {
-        showToast(data?.error || 'Could not load GL activity.', { variant: 'error' });
-        return;
-      }
-      const rows = (data.lines || []).map((l) => ({
-        entryDateISO: l.entryDateISO,
-        journalId: l.journalId,
-        accountCode: l.accountCode,
-        accountName: l.accountName,
-        debitNgn: l.debitNgn,
-        creditNgn: l.creditNgn,
-        lineMemo: l.lineMemo,
-        journalMemo: l.journalMemo,
-        sourceKind: l.sourceKind,
-        sourceId: l.sourceId,
-      }));
-      if (!rows.length) {
-        showToast('No GL lines in the selected period.', { variant: 'info' });
-        return;
-      }
-      downloadRows(name, rows, fmt);
-      showToast(`${name} exported as ${fmt}.`);
-      return;
-    }
-
-    if (name === 'Inventory valuation & COGS' && fmt === 'Excel') {
+    if (name === PACK_PERIOD_COSTS_INVENTORY && fmt === 'Excel') {
+      const ex = filterExpensesInRange(expenses, startDate, endDate);
+      const ac = accruedApprovedPayablesRows(paymentRequests, startDate, endDate);
       const val = coilInventoryValuationRows(coilLots);
       const cogs = cogsMovementRows(movements, startDate, endDate);
-      if (!val.length && !cogs.length) {
-        showToast('No valuation or COGS rows for export.', { variant: 'info' });
+      if (!ex.length && !ac.length && !val.length && !cogs.length) {
+        showToast('No rows for this pack in the selected range.', { variant: 'info' });
         return;
       }
       const wb = XLSX.utils.book_new();
-      if (val.length) {
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(val), 'Valuation');
-      }
-      if (cogs.length) {
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cogs), 'COGS');
-      }
-      XLSX.writeFile(wb, 'inventory-valuation-cogs.xlsx');
+      if (ex.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(ex), 'Expenses');
+      if (ac.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(ac), 'Accruals');
+      if (val.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(val), 'Valuation');
+      if (cogs.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cogs), 'COGS');
+      XLSX.writeFile(wb, `${packSlug}.xlsx`);
       showToast(`${name} exported as Excel (multi-sheet).`);
+      return;
+    }
+
+    if (name === PACK_CASH_BANK_AR && fmt === 'Excel') {
+      const bank = filterBankReconciliationInRange(bankReconciliation, startDate, endDate);
+      const rt = receiptAdvanceTreasuryReconciliationRows(ledgerEntries, treasuryMovements, startDate, endDate);
+      const ar = quotationPaidNgnReceiptDiscrepancies(quotations, receipts, ledgerEntries);
+      const tm = filterTreasuryMovementsInRange(treasuryMovements, startDate, endDate);
+      if (!bank.length && !rt.length && !ar.length && !tm.length) {
+        showToast('No rows for this pack in the selected range.', { variant: 'info' });
+        return;
+      }
+      const wb = XLSX.utils.book_new();
+      if (bank.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(bank), 'Bank_recon');
+      if (rt.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rt), 'Receipt_treasury');
+      if (ar.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(ar), 'AR_check');
+      if (tm.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(tm), 'Treasury');
+      XLSX.writeFile(wb, `${packSlug}.xlsx`);
+      showToast(`${name} exported as Excel (multi-sheet).`);
+      return;
+    }
+
+    if (name === PACK_SALES_CUSTOMER && fmt === 'Excel') {
+      const qFlat = filterQuotationsInRange(quotations, startDate, endDate).map((q) => ({
+        quotationID: q.id,
+        dateISO: q.dateISO,
+        customer: q.customer,
+        totalNgn: q.totalNgn,
+        status: q.status,
+      }));
+      const led = customerLedgerActivityRows(ledgerEntries, quotations, startDate, endDate);
+      const bridge = salesPeriodCashBridgeExportRows(
+        ledgerEntries,
+        productionJobs,
+        quotations,
+        refunds,
+        startDate,
+        endDate
+      );
+      if (!qFlat.length && !led.length && !bridge.length) {
+        showToast('No rows for this pack in the selected range.', { variant: 'info' });
+        return;
+      }
+      const wb = XLSX.utils.book_new();
+      if (qFlat.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(qFlat), 'Quotations');
+      if (led.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(led), 'Ledger');
+      if (bridge.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(bridge), 'Cash_AR_bridge');
+      XLSX.writeFile(wb, `${packSlug}.xlsx`);
+      showToast(`${name} exported as Excel (multi-sheet).`);
+      return;
+    }
+
+    if (name === PACK_OPS_PROCUREMENT && fmt === 'Excel') {
+      const grn = grnCoilRegisterRows(coilLots, startDate, endDate);
+      const poBr = purchaseOrderAccrualBridgeRows(purchaseOrders);
+      const invFlat = liveProducts.map((p) => ({
+        productID: p.productID,
+        name: p.name,
+        stockLevel: p.stockLevel,
+        unit: p.unit,
+        lowStockThreshold: p.lowStockThreshold,
+      }));
+      const poFlat = purchaseOrders.map((p) => ({
+        poID: p.poID,
+        procurementKind: procurementKindFromPo(p),
+        supplierName: p.supplierName,
+        orderDateISO: p.orderDateISO,
+        status: p.status,
+        lineCount: p.lines?.length || 0,
+        supplierPaidNgn: p.supplierPaidNgn || 0,
+      }));
+      const accUsage = filterAccessoryUsageInRange(accessoryUsage, startDate, endDate).map((u) => ({
+        jobID: u.jobID,
+        quotationRef: u.quotationRef,
+        quoteLineId: u.quoteLineId,
+        name: u.name,
+        orderedQty: u.orderedQty,
+        suppliedQty: u.suppliedQty,
+        inventoryProductId: u.inventoryProductId || '',
+        postedAtISO: u.postedAtISO,
+      }));
+      if (!invFlat.length && !poFlat.length && !grn.length && !poBr.length && !accUsage.length) {
+        showToast('No rows for this pack.', { variant: 'info' });
+        return;
+      }
+      const wb = XLSX.utils.book_new();
+      if (invFlat.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(invFlat), 'Inventory');
+      if (poFlat.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(poFlat), 'POs');
+      if (grn.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(grn), 'GRN_lots');
+      if (poBr.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(poBr), 'PO_accrual');
+      if (accUsage.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(accUsage), 'Acc_usage');
+      XLSX.writeFile(wb, `${packSlug}.xlsx`);
+      showToast(`${name} exported as Excel (multi-sheet).`);
+      return;
+    }
+
+    if (name === PACK_PRODUCTION_TRANSACTION) {
+      const q = `startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(endDate)}`;
+      const { ok, data } = await apiFetch(`/api/reports/production-transaction?${q}`);
+      if (!ok || !data?.ok) {
+        showToast(data?.error || 'Could not load production transaction report.', { variant: 'error' });
+        return;
+      }
+      const flat = productionTransactionExportRows(data.rows || []);
+      if (!flat.length) {
+        showToast('No completed production rows in the selected range.', { variant: 'info' });
+        return;
+      }
+      if (fmt === 'Excel') {
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(flat), 'Production_txn');
+        XLSX.writeFile(wb, `${packSlug}.xlsx`);
+        showToast(`${name} exported as Excel.`);
+        return;
+      }
+      downloadRows(name, flat, fmt);
+      showToast(`${name} exported as ${fmt}.`);
       return;
     }
 
     const rows = getExportRows(name);
     if (!rows.length) {
-      showToast(
-        name === 'Receipt & advance vs treasury'
-          ? 'No receipt/treasury exceptions in this period (±₦1).'
-          : `No live rows available for ${name.toLowerCase()} in the selected range.`,
-        { variant: 'info' }
-      );
+      showToast(`No rows for ${name.toLowerCase()} in the selected range.`, { variant: 'info' });
       return;
     }
     downloadRows(name, rows, fmt);
@@ -1108,9 +1108,9 @@ const Reports = () => {
   };
 
   const openPrintSheet = async (name) => {
-    if (name === 'General ledger — trial balance') {
+    if (name === PACK_GL_AUDIT) {
       if (!ws.hasPermission('finance.view')) {
-        showToast('Trial balance requires finance.view.', { variant: 'info' });
+        showToast('General ledger pack requires finance.view.', { variant: 'info' });
         return;
       }
       const { ok, data } = await apiFetch(
@@ -1127,7 +1127,7 @@ const Reports = () => {
         net: formatNgn(r.netNgn),
       }));
       setPrintPayload({
-        title: 'General ledger — trial balance',
+        title: PACK_GL_AUDIT,
         columns: [
           { key: 'account', label: 'Account' },
           { key: 'debit', label: 'Debit' },
@@ -1136,89 +1136,29 @@ const Reports = () => {
         ],
         rows,
         summaryLines: [
+          { label: 'Print', value: 'Trial balance only (compact)' },
           { label: 'Period', value: `${data.startDate} → ${data.endDate}` },
           { label: 'Total debit', value: formatNgn(data.totals?.debitNgn ?? 0) },
           { label: 'Total credit', value: formatNgn(data.totals?.creditNgn ?? 0) },
+          { label: 'Excel pack', value: 'Includes journal register + full line detail.' },
         ],
       });
       setPrintOpen(true);
       return;
     }
-    if (name === 'GL — journal register') {
-      if (!ws.hasPermission('finance.view')) {
-        showToast('This print sheet requires finance.view.', { variant: 'info' });
-        return;
-      }
-      const { ok, data } = await apiFetch(
-        `/api/gl/journals?startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(endDate)}`
-      );
+    if (name === PACK_PRODUCTION_TRANSACTION) {
+      const q = `startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(endDate)}`;
+      const { ok, data } = await apiFetch(`/api/reports/production-transaction?${q}`);
       if (!ok || !data?.ok) {
-        showToast(data?.error || 'Could not load GL journals.', { variant: 'error' });
+        showToast(data?.error || 'Could not load production transaction report.', { variant: 'error' });
         return;
       }
-      const rows = (data.journals || []).map((j) => ({
-        date: j.entryDateISO,
-        journal: j.journalId,
-        memo: j.memo || '—',
-        source: [j.sourceKind, j.sourceId].filter(Boolean).join(' ') || '—',
-        debit: formatNgn(j.totalDebitNgn),
-        credit: formatNgn(j.totalCreditNgn),
-      }));
-      setPrintPayload({
-        title: 'GL — journal register',
-        columns: [
-          { key: 'date', label: 'Date' },
-          { key: 'journal', label: 'Journal' },
-          { key: 'memo', label: 'Memo' },
-          { key: 'source', label: 'Source' },
-          { key: 'debit', label: 'Debit' },
-          { key: 'credit', label: 'Credit' },
-        ],
-        rows,
-        summaryLines: [
-          { label: 'Period', value: `${data.startDate} → ${data.endDate}` },
-          { label: 'Journals', value: String(rows.length) },
-        ],
-      });
-      setPrintOpen(true);
-      return;
-    }
-    if (name === 'GL — line detail (all accounts)') {
-      if (!ws.hasPermission('finance.view')) {
-        showToast('This print sheet requires finance.view.', { variant: 'info' });
+      const raw = data.rows || [];
+      if (!raw.length) {
+        showToast('No completed production rows in the selected range.', { variant: 'info' });
         return;
       }
-      const { ok, data } = await apiFetch(
-        `/api/gl/activity?startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(endDate)}`
-      );
-      if (!ok || !data?.ok) {
-        showToast(data?.error || 'Could not load GL activity.', { variant: 'error' });
-        return;
-      }
-      const rows = (data.lines || []).map((l) => ({
-        date: l.entryDateISO,
-        account: `${l.accountCode} — ${l.accountName}`,
-        debit: formatNgn(l.debitNgn),
-        credit: formatNgn(l.creditNgn),
-        lineMemo: l.lineMemo || '—',
-        journal: l.journalId,
-      }));
-      setPrintPayload({
-        title: 'GL — line detail',
-        columns: [
-          { key: 'date', label: 'Date' },
-          { key: 'account', label: 'Account' },
-          { key: 'debit', label: 'Debit' },
-          { key: 'credit', label: 'Credit' },
-          { key: 'lineMemo', label: 'Line memo' },
-          { key: 'journal', label: 'Journal' },
-        ],
-        rows,
-        summaryLines: [
-          { label: 'Period', value: `${data.startDate} → ${data.endDate}` },
-          { label: 'Lines', value: String(rows.length) },
-        ],
-      });
+      setPrintPayload(buildProductionTransactionPrintPayload(raw));
       setPrintOpen(true);
       return;
     }
@@ -1243,10 +1183,17 @@ const Reports = () => {
       />
 
       <PageHeader
-        eyebrow="Reporting"
         title="Reports"
-        subtitle="Period dashboards plus curated exports for P&L, reconciliation, and general-ledger audit. Operational spreadsheets are grouped under “More operational exports”."
+        subtitle="Period dashboards plus consolidated export packs (costs, cash/AR, GL, sales, operations with coil/stone/accessory context). Expand “More” for sales/ops packs and the production transaction register."
       />
+      {ws.hasPermission('exec.dashboard.view') ? (
+        <p className="text-sm font-medium text-slate-600 -mt-4 mb-6 sm:-mt-6 sm:mb-8 max-w-2xl leading-relaxed">
+          <Link to="/exec" className="font-bold text-teal-800 underline-offset-2 hover:underline">
+            Executive overview
+          </Link>{' '}
+          — org-wide counts and approval queues (refunds, payment requests, payroll sign-off, bank reconciliation).
+        </p>
+      ) : null}
 
       <MainPanel className="!p-0 overflow-hidden sm:!p-0">
         <div className="p-6 sm:p-8 space-y-10">
@@ -1328,28 +1275,31 @@ const Reports = () => {
                 </div>
               </div>
               <p className="text-xs text-slate-600 leading-relaxed -mt-2">
-                Most exports below filter by these dates (see each description). KPI tiles:{' '}
-                <span className="font-semibold text-slate-700">order value</span> uses quotation date;{' '}
-                <span className="font-semibold text-slate-700">production revenue</span> uses cutting-list dates; cash
-                receipts are period cash, not the same as P&amp;L revenue.
+                Most exports below filter by these dates (see each description).{' '}
+                <span className="font-semibold text-slate-700">Quotation totals</span> are pipeline only — not revenue or
+                sales. <span className="font-semibold text-slate-700">Sales</span> here means quotation value attributed
+                when cutting lists are dated in the period (metre share). Cash receipts are period cash, not the same as
+                sales.
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
                 <div className="rounded-2xl border border-slate-100 bg-slate-50/80 p-4">
                   <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-1">
-                    Order value (quote date)
+                    Quotation pipeline (quote date)
                   </p>
-                  <p className="text-xl font-black text-[#134e4a] tabular-nums">{formatNgn(salesKpis.totalSales)}</p>
-                  <p className="text-xs text-slate-500 mt-2 font-medium">{salesKpis.rowCount} quotations</p>
+                  <p className="text-xl font-black text-[#134e4a] tabular-nums">
+                    {formatNgn(salesKpis.quotationPipelineNgn)}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-2 font-medium">{salesKpis.rowCount} quotations · not sales</p>
                 </div>
                 <div className="rounded-2xl border border-slate-100 bg-slate-50/80 p-4">
                   <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-1">
-                    Production revenue (est.)
+                    Sales (produced)
                   </p>
                   <p className="text-xl font-black text-teal-800 tabular-nums">
-                    {formatNgn(salesKpis.productionRevenueNgn)}
+                    {formatNgn(salesKpis.producedSalesNgn)}
                   </p>
                   <p className="text-xs text-slate-500 mt-2 font-medium">
-                    {salesKpis.cuttingListsInRange} cutting list(s) in range
+                    {salesKpis.productionJobsCompletedInRange} job(s) completed in range
                   </p>
                 </div>
                 <div className="rounded-2xl border border-slate-100 bg-slate-50/80 p-4">
@@ -1398,17 +1348,20 @@ const Reports = () => {
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 lg:gap-8">
           <div className={PANEL}>
-            <h3 className={SUBHDR}>Top customers in range</h3>
+            <h3 className={SUBHDR}>Top customers (sales from production)</h3>
+            <p className="text-xs text-slate-500 mb-3 -mt-2">
+              Ranked by attributed quotation value on cutting lists dated in this period.
+            </p>
             <div className="space-y-2">
               {topCustomers.length === 0 ? (
-                <p className="text-sm font-semibold text-slate-400">No customer sales in range</p>
+                <p className="text-sm font-semibold text-slate-400">No produced sales in range</p>
               ) : (
                 topCustomers.map((row) => (
                   <div key={row.customer} className={LIST_ROW}>
                     <div className="min-w-0">
                       <p className="text-[#134e4a] truncate font-bold">{row.customer}</p>
                       <p className="text-xs font-medium text-slate-500 mt-0.5">
-                        {row.quotations} quotation(s)
+                        {row.completedJobs} production job(s) completed
                       </p>
                     </div>
                     <span className="font-bold text-[#134e4a] tabular-nums shrink-0">{formatNgn(row.amountNgn)}</span>
@@ -1440,7 +1393,8 @@ const Reports = () => {
               </div>
               <div className="rounded-2xl border border-slate-100 bg-slate-50/70 px-4 py-3">
                 <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Treasury movements</p>
-                <p className="text-sm font-black text-[#134e4a] mt-1">{treasuryMovements.length}</p>
+                <p className="text-sm font-black text-[#134e4a] mt-1">{treasuryMovementsInPeriod.length}</p>
+                <p className="text-[9px] text-slate-400 mt-1">By posted date in range</p>
               </div>
               <div className="rounded-2xl border border-slate-100 bg-slate-50/70 px-4 py-3">
                 <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Delivered shipments</p>
@@ -1448,6 +1402,70 @@ const Reports = () => {
                   {deliveryPerformance.delivered} / {deliveryPerformance.total}
                 </p>
               </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 lg:gap-8">
+          <div className={PANEL}>
+            <h3 className={SUBHDR}>Procurement mix (POs in period)</h3>
+            <p className="text-xs text-slate-500 mb-3 -mt-2">
+              Purchase orders with an order date in the selected range, grouped by procurement kind (coil kg, stone
+              metres, accessories).
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {[
+                ['Coil', procurementMixInPeriod.coil],
+                ['Stone', procurementMixInPeriod.stone],
+                ['Accessory', procurementMixInPeriod.accessory],
+                ['Total POs', procurementMixInPeriod.total],
+              ].map(([label, n]) => (
+                <div key={label} className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2.5">
+                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">{label}</p>
+                  <p className="text-lg font-black text-[#134e4a] tabular-nums mt-0.5">{Number(n) || 0}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className={PANEL}>
+            <h3 className={SUBHDR}>Production accessories (posted in period)</h3>
+            <p className="text-xs text-slate-500 mb-3 -mt-2">
+              Lines recorded when accessories were supplied to jobs (posting date in range).
+            </p>
+            <div className="flex flex-wrap gap-3 mb-3">
+              <div className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2.5">
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Lines</p>
+                <p className="text-lg font-black text-[#134e4a] tabular-nums mt-0.5">
+                  {accessoryUsageInPeriod.length}
+                </p>
+              </div>
+              <div className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2.5">
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Qty supplied (sum)</p>
+                <p className="text-lg font-black text-[#134e4a] tabular-nums mt-0.5">
+                  {accessoryUsageInPeriod
+                    .reduce((s, u) => s + (Number(u.suppliedQty) || 0), 0)
+                    .toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                </p>
+              </div>
+            </div>
+            <div className="space-y-2 max-h-40 overflow-y-auto pr-1 custom-scrollbar">
+              {accessoryUsageInPeriod.length === 0 ? (
+                <p className="text-sm font-semibold text-slate-400">No accessory postings in range</p>
+              ) : (
+                accessoryUsageInPeriod.slice(0, 8).map((u) => (
+                  <div key={u.id} className={LIST_ROW}>
+                    <div className="min-w-0">
+                      <p className="text-[#134e4a] font-bold truncate">{u.name}</p>
+                      <p className="text-xs font-medium text-slate-500 mt-0.5 truncate">
+                        {u.quotationRef || '—'} · job {u.jobID}
+                      </p>
+                    </div>
+                    <span className="tabular-nums font-bold text-slate-800 shrink-0">
+                      {Number(u.suppliedQty).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </div>
@@ -1518,11 +1536,12 @@ const Reports = () => {
         <div className={PANEL}>
           <h3 className={SUBHDR}>Stock movement log</h3>
           <p className="text-sm font-medium text-slate-600 mb-4 leading-relaxed">
-            Recent GRNs, transfers, adjustments, and finished-goods postings from Operations and Procurement.
+            Latest stock movements in the selected period (GRNs, transfers, adjustments, finished-goods postings —
+            coil, stone, and SKU lines).
           </p>
           <div className="space-y-2 max-h-56 overflow-y-auto pr-1 custom-scrollbar">
             {movementPreview.length === 0 ? (
-              <p className="text-sm font-semibold text-slate-400">No movements yet</p>
+              <p className="text-sm font-semibold text-slate-400">No movements in this period</p>
             ) : (
               movementPreview.map((m) => (
                 <div key={m.id} className={`${LIST_ROW} flex-col items-stretch`}>
@@ -1547,8 +1566,9 @@ const Reports = () => {
         <div className="space-y-0">
           <h3 className="z-section-title mb-2">Exports &amp; print</h3>
           <p className="text-sm font-medium text-slate-600 mb-8 max-w-2xl leading-relaxed">
-            Use CSV or Excel for working papers; print opens an A4 layout. The main list is limited to audit,
-            reconciliation, and P&amp;L-related packs — expand “More” for sales, stock, and procurement listings.
+            Consolidated packs: each Excel file uses multiple sheets where needed. The operations pack includes
+            procurement kind on POs, GRN/inventory lots (coil and stone), and accessory usage lines for the period.
+            Print shows a focused table plus counts for the rest (full detail stays in Excel/CSV).
           </p>
 
           {PRIMARY_REPORT_GROUPS.map((grp, gi) => (
@@ -1634,7 +1654,7 @@ const Reports = () => {
               <span className="flex items-center gap-2 min-w-0">
                 <span className="truncate">More operational exports</span>
                 <span className="text-xs font-semibold text-slate-500 shrink-0 hidden sm:inline">
-                  Sales · AR detail · refunds · stock · PO · GRN
+                  Sales &amp; customer · Operations &amp; procurement
                 </span>
               </span>
               <ChevronDown

@@ -22,7 +22,7 @@ beforeEach(() => {
 });
 
 describe('customerLedgerStore', () => {
-  it('amountDueOnQuotation uses mock paid + ledger', () => {
+  it('amountDueOnQuotation uses quotation paidNgn (ledger alone does not change due)', () => {
     expect(amountDueOnQuotation(SAMPLE_QT)).toBe(500_000);
     appendLedgerEntry({
       type: 'RECEIPT',
@@ -30,7 +30,8 @@ describe('customerLedgerStore', () => {
       amountNgn: 200_000,
       quotationRef: 'QT-TEST-1',
     });
-    expect(amountDueOnQuotation(SAMPLE_QT)).toBe(300_000);
+    expect(amountDueOnQuotation(SAMPLE_QT)).toBe(500_000);
+    expect(amountDueOnQuotation({ ...SAMPLE_QT, paidNgn: 200_000 })).toBe(300_000);
   });
 
   it('advance balance increases and decreases on apply', () => {
@@ -51,7 +52,8 @@ describe('customerLedgerStore', () => {
       amountNgn: 150_000,
     });
     expect(advanceBalanceNgn('CUS-1')).toBe(50_000);
-    expect(amountDueOnQuotation(SAMPLE_QT)).toBe(350_000);
+    expect(amountDueOnQuotation(SAMPLE_QT)).toBe(500_000);
+    expect(amountDueOnQuotation({ ...SAMPLE_QT, paidNgn: 150_000 })).toBe(350_000);
   });
 
   it('overpayment splits receipt and overpay advance', () => {
@@ -68,7 +70,7 @@ describe('customerLedgerStore', () => {
     expect(res.receipt.amountNgn).toBe(500_000);
     expect(res.overpay.amountNgn).toBe(50_000);
     expect(advanceBalanceNgn('CUS-2')).toBe(50_000);
-    expect(amountDueOnQuotation({ id: 'QT-TEST-1', totalNgn: 500_000, paidNgn: 0 })).toBe(0);
+    expect(amountDueOnQuotation({ id: 'QT-TEST-1', totalNgn: 500_000, paidNgn: 500_000 })).toBe(0);
   });
 
   it('loadLedgerEntries returns array', () => {

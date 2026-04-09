@@ -184,7 +184,7 @@ export const SALES_MOCK = {
       dueDateISO: '2026-04-26',
       total: '₦1,450,000',
       totalNgn: 1450000,
-      paidNgn: 800000,
+      paidNgn: 1020000,
       paymentStatus: 'Partial',
       status: 'Pending',
       approvalDate: '',
@@ -203,7 +203,7 @@ export const SALES_MOCK = {
       dueDateISO: '2026-04-09',
       total: '₦880,000',
       totalNgn: 880000,
-      paidNgn: 450000,
+      paidNgn: 620000,
       paymentStatus: 'Partial',
       status: 'Approved',
       approvalDate: '26 Mar 2026',
@@ -628,7 +628,7 @@ export const SUPPLIERS_MOCK = [
 
 /**
  * Coil purchase catalogue: supplier offers list style (colour, gauge, kg, m, conversion).
- * Reference rows; coil purchases use material (Aluminium → COIL-ALU, Aluzinc → PRD-102). conversionKgPerM = kg ÷ m.
+ * Reference rows; coil purchases use material (Aluminium → COIL-ALU, Aluzinc (PPGI) → PRD-102). Stone-coated uses metre SKUs (STONE-*). conversionKgPerM = kg ÷ m.
  */
 export const PROCUREMENT_COIL_CATALOG = [
   {
@@ -696,7 +696,7 @@ export const INVENTORY_PRODUCTS_MOCK = [
   },
   {
     productID: 'PRD-102',
-    name: 'Aluzinc coil (kg)',
+    name: 'Aluzinc (PPGI) coil (kg)',
     stockLevel: aluzinc028Kg,
     unit: 'kg',
     lowStockThreshold: 15000,
@@ -704,7 +704,22 @@ export const INVENTORY_PRODUCTS_MOCK = [
     dashboardAttrs: {
       gauge: 'Per PO / coil',
       colour: 'Per PO / coil',
-      materialType: 'Aluzinc',
+      materialType: 'Aluzinc (PPGI)',
+    },
+  },
+  {
+    productID: 'STONE-milano-black-0.40mm',
+    name: 'Stone coated Milano / Black / 0.40mm',
+    stockLevel: 0,
+    unit: 'm',
+    lowStockThreshold: 100,
+    reorderQty: 500,
+    dashboardAttrs: {
+      gauge: '0.40mm',
+      colour: 'Black',
+      materialType: 'Stone coated',
+      inventoryModel: 'stone_meter',
+      stoneDesign: 'Milano',
     },
   },
   {
@@ -791,7 +806,7 @@ export const PURCHASE_ORDERS_MOCK = [
       {
         lineKey: 'L0-PRD-102',
         productID: 'PRD-102',
-        productName: 'Aluzinc coil (kg)',
+        productName: 'Aluzinc (PPGI) coil (kg)',
         color: 'GB',
         gauge: '0.28',
         metersOffered: 1550,
@@ -937,7 +952,10 @@ export function totalAccountsReceivableNgn(quotations) {
   }, 0);
 }
 
-/** Single source for homepage KPIs & chart series (replace with API aggregation later). */
+/**
+ * Legacy demo constants only — the live Operations dashboard uses the workspace snapshot and
+ * `src/lib/liveAnalytics.js` instead. Kept for older fixtures or imports; do not wire new UI here.
+ */
 export const DASHBOARD_SNAPSHOT = {
   salesTodayNgn: 2_450_000,
   salesMonthNgn: 28_400_000,
@@ -976,7 +994,7 @@ export const DASHBOARD_SNAPSHOT = {
   ],
 };
 
-/** Meters sold (production / dispatch basis) — last months for MTD comparison on dashboard. */
+/** Metres produced (completed production basis) — demo monthly series for charts. */
 export const DASHBOARD_METERS_SOLD_MONTHLY = [
   { key: '2025-10', label: 'Oct 2025', meters: 58_200 },
   { key: '2025-11', label: 'Nov 2025', meters: 64_100 },
@@ -1017,15 +1035,15 @@ export function dashboardTotalLiquidityNgn() {
 
 /** Rolling production pulse (replace with MES / dispatch API). */
 export const DASHBOARD_PRODUCTION_PULSE = {
-  metersSold7d: 4250,
-  /** Meters corrugated at the mill (line output before full dispatch). */
+  metresProduced7d: 4250,
+  /** Metres corrugated at the mill (line output before full dispatch). */
   millOutput7d: 3980,
   activeJobs: 14,
 };
 
 /**
- * Top 5 coil / material performers by sales — per time window (demo — replace with API).
- * @typedef {{ rank: number, colour: string, gaugeMm: string, materialType: string, metersSold: number, weightKg: number, revenueNgn: number }} TopCoilSalesRow
+ * Top material performers by production (metres + attributed ₦) — demo per time window.
+ * @typedef {{ rank: number, colour: string, gaugeMm: string, materialType: string, metresProduced: number, weightKg: number, revenueNgn: number }} TopCoilSalesRow
  */
 
 export const DASHBOARD_TOP_COILS_PERIOD_ORDER = [
@@ -1042,7 +1060,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'HMB',
       gaugeMm: '0.24',
       materialType: 'Aluzinc longspan',
-      metersSold: 15_420,
+      metresProduced: 15_420,
       weightKg: 41_634,
       revenueNgn: 68_200_000,
     },
@@ -1051,7 +1069,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'GB',
       gaugeMm: '0.28',
       materialType: 'Aluzinc longspan',
-      metersSold: 13_280,
+      metresProduced: 13_280,
       weightKg: 41_168,
       revenueNgn: 71_520_000,
     },
@@ -1060,7 +1078,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'IV',
       gaugeMm: '0.20',
       materialType: 'Aluzinc longspan',
-      metersSold: 11_950,
+      metresProduced: 11_950,
       weightKg: 26_290,
       revenueNgn: 47_800_000,
     },
@@ -1069,7 +1087,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'TB',
       gaugeMm: '0.24',
       materialType: 'Aluzinc longspan',
-      metersSold: 10_100,
+      metresProduced: 10_100,
       weightKg: 27_270,
       revenueNgn: 49_490_000,
     },
@@ -1078,7 +1096,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'NB',
       gaugeMm: '0.24',
       materialType: 'Aluzinc longspan',
-      metersSold: 8_640,
+      metresProduced: 8_640,
       weightKg: 23_328,
       revenueNgn: 42_336_000,
     },
@@ -1089,7 +1107,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'GB',
       gaugeMm: '0.28',
       materialType: 'Aluzinc longspan',
-      metersSold: 42_800,
+      metresProduced: 42_800,
       weightKg: 132_680,
       revenueNgn: 256_800_000,
     },
@@ -1098,7 +1116,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'HMB',
       gaugeMm: '0.24',
       materialType: 'Aluzinc longspan',
-      metersSold: 39_600,
+      metresProduced: 39_600,
       weightKg: 106_920,
       revenueNgn: 194_040_000,
     },
@@ -1107,7 +1125,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'IV',
       gaugeMm: '0.20',
       materialType: 'Aluzinc longspan',
-      metersSold: 33_400,
+      metresProduced: 33_400,
       weightKg: 73_480,
       revenueNgn: 133_600_000,
     },
@@ -1116,7 +1134,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'TB',
       gaugeMm: '0.24',
       materialType: 'Aluzinc longspan',
-      metersSold: 30_200,
+      metresProduced: 30_200,
       weightKg: 81_540,
       revenueNgn: 147_980_000,
     },
@@ -1125,7 +1143,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'PR',
       gaugeMm: '0.24',
       materialType: 'Aluzinc longspan',
-      metersSold: 26_100,
+      metresProduced: 26_100,
       weightKg: 70_470,
       revenueNgn: 127_890_000,
     },
@@ -1136,7 +1154,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'GB',
       gaugeMm: '0.28',
       materialType: 'Aluzinc longspan',
-      metersSold: 88_200,
+      metresProduced: 88_200,
       weightKg: 273_420,
       revenueNgn: 529_200_000,
     },
@@ -1145,7 +1163,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'IV',
       gaugeMm: '0.20',
       materialType: 'Aluzinc longspan',
-      metersSold: 76_400,
+      metresProduced: 76_400,
       weightKg: 168_080,
       revenueNgn: 305_600_000,
     },
@@ -1154,7 +1172,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'HMB',
       gaugeMm: '0.24',
       materialType: 'Aluzinc longspan',
-      metersSold: 71_900,
+      metresProduced: 71_900,
       weightKg: 194_130,
       revenueNgn: 352_310_000,
     },
@@ -1163,7 +1181,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'TB',
       gaugeMm: '0.24',
       materialType: 'Aluzinc longspan',
-      metersSold: 64_500,
+      metresProduced: 64_500,
       weightKg: 174_150,
       revenueNgn: 316_050_000,
     },
@@ -1172,7 +1190,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'BG',
       gaugeMm: '0.22',
       materialType: 'Aluzinc longspan',
-      metersSold: 58_200,
+      metresProduced: 58_200,
       weightKg: 151_320,
       revenueNgn: 261_900_000,
     },
@@ -1183,7 +1201,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'IV',
       gaugeMm: '0.20',
       materialType: 'Aluzinc longspan',
-      metersSold: 168_000,
+      metresProduced: 168_000,
       weightKg: 369_600,
       revenueNgn: 672_000_000,
     },
@@ -1192,7 +1210,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'GB',
       gaugeMm: '0.28',
       materialType: 'Aluzinc longspan',
-      metersSold: 155_400,
+      metresProduced: 155_400,
       weightKg: 481_740,
       revenueNgn: 932_400_000,
     },
@@ -1201,7 +1219,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'HMB',
       gaugeMm: '0.24',
       materialType: 'Aluzinc longspan',
-      metersSold: 142_800,
+      metresProduced: 142_800,
       weightKg: 385_560,
       revenueNgn: 699_720_000,
     },
@@ -1210,7 +1228,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'TB',
       gaugeMm: '0.24',
       materialType: 'Aluzinc longspan',
-      metersSold: 128_600,
+      metresProduced: 128_600,
       weightKg: 347_220,
       revenueNgn: 630_140_000,
     },
@@ -1219,7 +1237,7 @@ export const DASHBOARD_TOP_COILS_SALES_BY_PERIOD = {
       colour: 'PR',
       gaugeMm: '0.20',
       materialType: 'Aluzinc longspan',
-      metersSold: 115_200,
+      metresProduced: 115_200,
       weightKg: 253_440,
       revenueNgn: 460_800_000,
     },

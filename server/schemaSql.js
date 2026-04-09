@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS quotations (
   manager_flagged_at_iso TEXT,
   manager_flag_reason TEXT,
   manager_production_approved_at_iso TEXT,
+  archived INTEGER NOT NULL DEFAULT 0,
+  quotation_lifecycle_note TEXT,
   FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
 );
 
@@ -193,8 +195,10 @@ CREATE TABLE IF NOT EXISTS stock_movements (
 );
 
 CREATE TABLE IF NOT EXISTS wip_balances (
-  product_id TEXT PRIMARY KEY,
-  qty REAL NOT NULL DEFAULT 0
+  branch_id TEXT NOT NULL DEFAULT '',
+  product_id TEXT NOT NULL,
+  qty REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (branch_id, product_id)
 );
 
 CREATE TABLE IF NOT EXISTS deliveries (
@@ -317,6 +321,7 @@ CREATE TABLE IF NOT EXISTS production_jobs (
   manager_review_signed_by_user_id TEXT,
   manager_review_signed_by_name TEXT,
   manager_review_remark TEXT,
+  coil_spec_mismatch_pending INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY (cutting_list_id) REFERENCES cutting_lists(id)
 );
 
@@ -334,6 +339,7 @@ CREATE TABLE IF NOT EXISTS production_job_coils (
   meters_produced REAL NOT NULL DEFAULT 0,
   actual_conversion_kg_per_m REAL,
   allocation_status TEXT NOT NULL DEFAULT 'Allocated',
+  spec_mismatch INTEGER NOT NULL DEFAULT 0,
   note TEXT,
   allocated_at_iso TEXT NOT NULL,
   FOREIGN KEY (job_id) REFERENCES production_jobs(job_id) ON DELETE CASCADE,
@@ -391,6 +397,22 @@ CREATE INDEX IF NOT EXISTS idx_prod_job_acc_usage_quotation
 CREATE INDEX IF NOT EXISTS idx_prod_job_acc_usage_job
   ON production_job_accessory_usage(job_id);
 
+/** Audited corrections to finished-goods metres after a job is completed (does not rewrite original completion). */
+CREATE TABLE IF NOT EXISTS production_completion_adjustments (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  branch_id TEXT,
+  delta_finished_goods_m REAL NOT NULL,
+  note TEXT NOT NULL,
+  at_iso TEXT NOT NULL,
+  created_by_user_id TEXT,
+  created_by_name TEXT,
+  FOREIGN KEY (job_id) REFERENCES production_jobs(job_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_production_completion_adj_job
+  ON production_completion_adjustments(job_id, at_iso DESC);
+
 CREATE TABLE IF NOT EXISTS customer_refunds (
   refund_id TEXT PRIMARY KEY,
   customer_id TEXT NOT NULL,
@@ -419,10 +441,6 @@ CREATE TABLE IF NOT EXISTS customer_refunds (
   branch_id TEXT,
   FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_refunds_single_pending
-  ON customer_refunds(quotation_ref, product)
-  WHERE status IN ('Pending', 'Approved');
 
 CREATE TABLE IF NOT EXISTS setup_quote_items (
   item_id TEXT PRIMARY KEY,
@@ -589,6 +607,50 @@ CREATE TABLE IF NOT EXISTS treasury_movements (
 CREATE INDEX IF NOT EXISTS idx_treasury_movements_account ON treasury_movements(treasury_account_id);
 CREATE INDEX IF NOT EXISTS idx_treasury_movements_source ON treasury_movements(source_kind, source_id);
 
+CREATE TABLE IF NOT EXISTS inter_branch_loans (
+  loan_id TEXT PRIMARY KEY,
+  created_at_iso TEXT NOT NULL,
+  created_by_user_id TEXT,
+  created_by_name TEXT,
+  lender_branch_id TEXT NOT NULL,
+  borrower_branch_id TEXT NOT NULL,
+  principal_ngn INTEGER NOT NULL,
+  repaid_ngn INTEGER NOT NULL DEFAULT 0,
+  from_treasury_account_id INTEGER NOT NULL,
+  to_treasury_account_id INTEGER NOT NULL,
+  date_iso TEXT NOT NULL,
+  reference TEXT,
+  repayment_plan_json TEXT,
+  status TEXT NOT NULL,
+  proposed_note TEXT,
+  md_approved_at_iso TEXT,
+  md_approved_by_user_id TEXT,
+  md_approved_by_name TEXT,
+  md_rejected_at_iso TEXT,
+  md_reject_note TEXT,
+  treasury_batch_id TEXT,
+  executed_at_iso TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_inter_branch_loans_branches
+  ON inter_branch_loans(lender_branch_id, borrower_branch_id, status);
+
+CREATE TABLE IF NOT EXISTS inter_branch_loan_repayments (
+  id TEXT PRIMARY KEY,
+  loan_id TEXT NOT NULL,
+  posted_at_iso TEXT NOT NULL,
+  amount_ngn INTEGER NOT NULL,
+  from_treasury_account_id INTEGER NOT NULL,
+  to_treasury_account_id INTEGER NOT NULL,
+  treasury_batch_id TEXT,
+  note TEXT,
+  created_by_user_id TEXT,
+  created_by_name TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_inter_branch_loan_repayments_loan
+  ON inter_branch_loan_repayments(loan_id, posted_at_iso);
+
 CREATE TABLE IF NOT EXISTS expenses (
   expense_id TEXT PRIMARY KEY,
   expense_type TEXT,
@@ -638,7 +700,16 @@ CREATE TABLE IF NOT EXISTS bank_reconciliation_lines (
   amount_ngn INTEGER,
   system_match TEXT,
   status TEXT,
-  branch_id TEXT
+  branch_id TEXT,
+  settled_amount_ngn INTEGER,
+  matched_system_amount_ngn INTEGER,
+  variance_ngn INTEGER,
+  variance_percent REAL,
+  treasury_account_id INTEGER,
+  treasury_adjustment_movement_id TEXT,
+  manager_cleared_at_iso TEXT,
+  manager_cleared_by_user_id TEXT,
+  manager_cleared_by_name TEXT
 );
 
 CREATE TABLE IF NOT EXISTS coil_requests (
@@ -759,6 +830,8 @@ CREATE TABLE IF NOT EXISTS hr_staff_profiles (
   profile_extra_json TEXT,
   paye_tax_percent REAL,
   pension_percent_override REAL,
+  line_manager_user_id TEXT,
+  leave_entitlement_band TEXT,
   updated_at_iso TEXT,
   updated_by_user_id TEXT,
   FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE
@@ -781,6 +854,9 @@ CREATE TABLE IF NOT EXISTS hr_requests (
   manager_reviewer_user_id TEXT,
   manager_note TEXT,
   manager_reviewed_at_iso TEXT,
+  gm_hr_reviewer_user_id TEXT,
+  gm_hr_reviewer_note TEXT,
+  gm_hr_reviewed_at_iso TEXT,
   FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE
 );
 
@@ -795,7 +871,16 @@ CREATE TABLE IF NOT EXISTS hr_payroll_runs (
   pension_percent REAL NOT NULL,
   notes TEXT,
   created_at_iso TEXT NOT NULL,
-  created_by_user_id TEXT
+  created_by_user_id TEXT,
+  md_approved_at_iso TEXT,
+  md_approved_by_user_id TEXT,
+  signed_at_iso TEXT,
+  signed_by_user_id TEXT,
+  signature_kind TEXT,
+  signed_pdf_sha256 TEXT,
+  filing_status TEXT,
+  filing_reference TEXT,
+  filing_at_iso TEXT
 );
 
 CREATE TABLE IF NOT EXISTS hr_payroll_lines (
@@ -965,5 +1050,36 @@ CREATE TABLE IF NOT EXISTS hr_request_discipline (
   incident_date_iso TEXT,
   summary TEXT,
   FOREIGN KEY (request_id) REFERENCES hr_requests(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS fixed_assets (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'other',
+  branch_id TEXT NOT NULL,
+  acquisition_date_iso TEXT NOT NULL,
+  cost_ngn INTEGER NOT NULL DEFAULT 0,
+  salvage_ngn INTEGER NOT NULL DEFAULT 0,
+  useful_life_months INTEGER NOT NULL DEFAULT 60,
+  depreciation_method TEXT NOT NULL DEFAULT 'straight_line',
+  status TEXT NOT NULL DEFAULT 'active',
+  disposal_date_iso TEXT,
+  treasury_reference TEXT,
+  notes TEXT,
+  created_at_iso TEXT NOT NULL,
+  updated_at_iso TEXT NOT NULL,
+  created_by_user_id TEXT,
+  updated_by_user_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_fixed_assets_branch ON fixed_assets(branch_id);
+
+CREATE TABLE IF NOT EXISTS product_standard_costs (
+  product_id TEXT PRIMARY KEY,
+  standard_material_cost_ngn_per_kg INTEGER,
+  standard_overhead_ngn_per_m INTEGER,
+  effective_from_iso TEXT NOT NULL,
+  notes TEXT,
+  updated_at_iso TEXT NOT NULL,
+  updated_by_user_id TEXT
 );
 `;

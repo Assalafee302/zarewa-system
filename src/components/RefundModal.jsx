@@ -10,10 +10,15 @@ import {
   Plus,
   Trash2,
   Link2,
+  Printer,
 } from 'lucide-react';
 import { ModalFrame } from './layout/ModalFrame';
+import { useToast } from '../context/ToastContext';
 import { apiFetch } from '../lib/apiBase';
+import { printRefundRecord } from '../lib/refundRecordPrint';
 import { refundApprovedAmount, refundOutstandingAmount } from '../lib/refundsStore';
+import { formatNgn } from '../Data/mockData';
+import { receiptCashReceivedNgn } from '../lib/salesReceiptsList';
 
 const REFUND_REASON_CATEGORIES = [
   'Order cancellation',
@@ -117,9 +122,13 @@ const RefundModal = ({
   onPersist,
   quotations = [],
 }) => {
+  const { show: showToast } = useToast();
   const [form, setForm] = useState(() => initFormFromRecord(record));
   const [eligibleQuotes, setEligibleQuotes] = useState([]);
   const [loadingQuotes, setLoadingQuotes] = useState(false);
+  const [syncPaidId, setSyncPaidId] = useState('');
+  const [syncPaidBusy, setSyncPaidBusy] = useState(false);
+  const [syncPaidError, setSyncPaidError] = useState('');
   const [approvalStatus, setApprovalStatus] = useState(() =>
     record?.status === 'Rejected' ? 'Rejected' : 'Approved'
   );
@@ -132,12 +141,16 @@ const RefundModal = ({
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState('');
   const [warnings, setWarnings] = useState([]);
+  const [substitutionPerMeterBreakdown, setSubstitutionPerMeterBreakdown] = useState([]);
+  const [blockedRefundCategories, setBlockedRefundCategories] = useState([]);
   const [intelligence, setIntelligence] = useState({
     receipts: [],
     cuttingLists: [],
     summary: { producedMeters: 0, accessoriesSummary: { lines: [] } },
   });
   const [loadingIntelligence, setLoadingIntelligence] = useState(false);
+  /** From refund preview: paid on quote vs overpay split (ledger RECEIPT + OVERPAY_ADVANCE). */
+  const [moneyContext, setMoneyContext] = useState(null);
 
   const fetchEligibleQuotes = useCallback(async () => {
     setLoadingQuotes(true);
@@ -150,8 +163,36 @@ const RefundModal = ({
     }
   }, []);
 
+  const syncPaidFromLedger = useCallback(async () => {
+    const id = String(syncPaidId || '').trim();
+    if (!id) {
+      setSyncPaidError('Enter the quotation id (e.g. QT-26-001).');
+      return;
+    }
+    setSyncPaidBusy(true);
+    setSyncPaidError('');
+    const { ok, data } = await apiFetch(`/api/quotations/${encodeURIComponent(id)}/sync-paid-from-ledger`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    setSyncPaidBusy(false);
+    if (!ok || !data?.ok) {
+      setSyncPaidError(data?.error || 'Could not sync payment total.');
+      return;
+    }
+    const n = Number(data.paidNgn) || 0;
+    showToast(
+      n > 0
+        ? `Updated ${id}: paid total is now ₦${n.toLocaleString()} — it should appear in the list.`
+        : `Updated ${id}: ledger shows ₦0 paid toward this quote (check receipt is linked to this id).`,
+      { variant: n > 0 ? 'success' : 'info' }
+    );
+    void fetchEligibleQuotes();
+  }, [syncPaidId, fetchEligibleQuotes, showToast]);
+
   /* Sync form state when the modal opens or the record/mode changes (intentional reset). */
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     if (!isOpen) return;
     setForm(initFormFromRecord(record));
@@ -163,12 +204,17 @@ const RefundModal = ({
     setPreviewLoading(false);
     setPreviewError('');
     setWarnings([]);
+    setSubstitutionPerMeterBreakdown([]);
+    setBlockedRefundCategories([]);
+    setSyncPaidId('');
+    setSyncPaidError('');
+    setMoneyContext(null);
 
     if (mode === 'create') {
       void fetchEligibleQuotes();
     }
   }, [isOpen, record, mode, fetchEligibleQuotes]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   /** Server-eligible quotes plus workspace quotations with payment (fallback if API is empty or offline). */
   const quotationPickList = useMemo(() => {
@@ -184,11 +230,24 @@ const RefundModal = ({
     return Array.from(byId.values()).sort((a, b) => b.paid_ngn - a.paid_ngn);
   }, [eligibleQuotes, quotations]);
 
+  const refundMoneyBreakdown = useMemo(() => {
+    const ref = form.quotationRef;
+    if (!ref) return { booked: 0, overpay: 0, cashIn: 0 };
+    const pick = quotationPickList.find((q) => q.id === ref);
+    const booked = moneyContext ? moneyContext.paidOnQuoteNgn : pick?.paid_ngn ?? 0;
+    const overpay = moneyContext
+      ? moneyContext.overpayAdvanceNgn
+      : Number(intelligence.summary?.overpayAdvanceNgn) || 0;
+    const cashIn = moneyContext ? moneyContext.quotationCashInNgn : booked + overpay;
+    return { booked, overpay, cashIn };
+  }, [form.quotationRef, quotationPickList, moneyContext, intelligence.summary]);
+
   const generatePreview = async (quoteRef, categories) => {
     if (!quoteRef) return;
     setPreviewLoading(true);
     setPreviewError('');
     setWarnings([]);
+    setSubstitutionPerMeterBreakdown([]);
     const { ok, data } = await apiFetch('/api/refunds/preview', {
       method: 'POST',
       body: JSON.stringify({
@@ -198,11 +257,18 @@ const RefundModal = ({
     });
     setPreviewLoading(false);
     if (!ok || !data?.ok || !data?.preview) {
+      setMoneyContext(null);
       setPreviewError(data?.error || 'Could not generate refund preview.');
       return;
     }
 
     const preview = data.preview;
+    setMoneyContext({
+      paidOnQuoteNgn: Number(preview.paidOnQuoteNgn) || 0,
+      overpayAdvanceNgn: Number(preview.overpayAdvanceNgn) || 0,
+      quotationCashInNgn: Number(preview.quotationCashInNgn) || 0,
+      quoteTotalNgn: Number(preview.quoteTotalNgn) || 0,
+    });
     setForm(f => ({
       ...f,
       customerID: preview.customerID,
@@ -211,14 +277,27 @@ const RefundModal = ({
     }));
 
     setWarnings(preview.warnings || []);
+    setSubstitutionPerMeterBreakdown(
+      Array.isArray(preview.substitutionPerMeterBreakdown) ? preview.substitutionPerMeterBreakdown : []
+    );
+    const blocked = Array.isArray(preview.blockedRefundCategories) ? preview.blockedRefundCategories : [];
+    setBlockedRefundCategories(blocked);
+    setForm((f) => ({
+      ...f,
+      reasonCategory: f.reasonCategory.filter((c) => !blocked.includes(c)),
+    }));
 
     // Also fetch detailed intelligence for the sidebar
     fetchIntelligence(quoteRef);
 
-    // Filter suggested lines based on selected categories
-    const relevantSuggestions = (preview.suggestedLines || []).filter(s => 
-      categories.includes(s.category)
-    );
+    // Filter suggested lines: match primary category or appliesToCategories (e.g. bundled transport + installation)
+    const relevantSuggestions = (preview.suggestedLines || []).filter((s) => {
+      const multi = s.appliesToCategories || s.matchCategories;
+      if (Array.isArray(multi) && multi.length) {
+        return multi.some((c) => categories.includes(c));
+      }
+      return s.category && categories.includes(s.category);
+    });
 
     setForm(f => ({
       ...f,
@@ -246,17 +325,19 @@ const RefundModal = ({
   };
 
   const toggleCategory = (cat) => {
+    if (blockedRefundCategories.includes(cat)) return;
     const next = form.reasonCategory.includes(cat)
-      ? form.reasonCategory.filter(c => c !== cat)
+      ? form.reasonCategory.filter((c) => c !== cat)
       : [...form.reasonCategory, cat];
-    
-    setForm(f => ({ ...f, reasonCategory: next }));
+
+    setForm((f) => ({ ...f, reasonCategory: next }));
     if (form.quotationRef) {
       generatePreview(form.quotationRef, next);
     }
   };
 
   const handleQuoteChange = (ref) => {
+    setMoneyContext(null);
     setForm(f => ({ ...f, quotationRef: ref, reasonCategory: [] }));
     if (ref) {
       generatePreview(ref, []);
@@ -297,6 +378,10 @@ const RefundModal = ({
     const amountNgn = Number(form.amountNgn);
     if (Number.isNaN(amountNgn) || amountNgn <= 0) return;
     if (form.reasonCategory.length === 0) return;
+    if (form.reasonCategory.some((c) => blockedRefundCategories.includes(c))) {
+      setPreviewError('Remove refund categories that are not allowed for this quotation.');
+      return;
+    }
     
     const calculationLines = form.calculationLines
       .map((l) => ({
@@ -368,6 +453,9 @@ const RefundModal = ({
   const modeLabel =
     mode === 'approve' ? 'Review' : mode === 'view' ? 'View' : 'New request';
 
+  const formatNgnPrint = (n) =>
+    `₦${Math.round(Number(n) || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 })}`;
+
   const lineSum = sumLines(form.calculationLines);
   const sumMismatch =
     mode === 'create' &&
@@ -398,13 +486,25 @@ const RefundModal = ({
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-2.5 bg-slate-100 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded-xl transition-all duration-200"
-          >
-            <X size={22} />
-          </button>
+          <div className="flex items-center gap-2">
+            {record?.refundID ? (
+              <button
+                type="button"
+                onClick={() => printRefundRecord(record, formatNgnPrint)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"
+              >
+                <Printer size={16} aria-hidden />
+                Print
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-2.5 bg-slate-100 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded-xl transition-all duration-200"
+            >
+              <X size={22} />
+            </button>
+          </div>
         </div>
 
         <form className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar" onSubmit={handleFormSubmit}>
@@ -416,11 +516,63 @@ const RefundModal = ({
             <div className="space-y-1">
               <p className="text-sm font-bold text-teal-900">Quotation-Linked Workflow</p>
               <p className="text-xs leading-relaxed text-teal-800/80 font-medium">
-                Quotation is the mother of all transactions. Selecting a quotation automatically resolves the customer, 
-                detects overpayments, and identifies unproduced meters or unclaimed services.
+                Quotation is the mother of all transactions. Selecting a quotation resolves the customer and loads preview
+                hints (overpayment, metres, services, accessories).{' '}
+                <span className="font-bold text-teal-900">Suggested amounts are not final</span>—always reconcile with
+                receipts, production, and delivery before submitting or approving.
               </p>
             </div>
           </div>
+
+          {record?.refundID ? (
+            <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-2 shadow-sm">
+              <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Activity timeline</p>
+              <ul className="text-xs text-slate-700 space-y-1.5 font-medium">
+                <li>
+                  <span className="text-slate-500">Requested</span>{' '}
+                  {record.requestedAtISO || record.requested_at_iso || '—'}
+                  {record.requestedBy ? ` · ${record.requestedBy}` : ''}
+                </li>
+                <li>
+                  <span className="text-slate-500">Status</span> {record.status || '—'}
+                  {record.approvalDate ? ` · Approved ${record.approvalDate}` : ''}
+                  {record.approvedBy ? ` · ${record.approvedBy}` : ''}
+                </li>
+                {(record.approvedAmountNgn != null || record.approved_amount_ngn != null) && (
+                  <li>
+                    <span className="text-slate-500">Approved amount</span> ₦
+                    {Number(record.approvedAmountNgn ?? record.approved_amount_ngn ?? 0).toLocaleString('en-NG')}
+                  </li>
+                )}
+                {record.managerComments ? (
+                  <li>
+                    <span className="text-slate-500">Manager note</span> {record.managerComments}
+                  </li>
+                ) : null}
+                <li>
+                  <span className="text-slate-500">Paid</span>{' '}
+                  {record.paidAtISO || record.paid_at_iso
+                    ? `${(record.paidAtISO || record.paid_at_iso).slice(0, 16)} · ₦${Number(record.paidAmountNgn || 0).toLocaleString('en-NG')}`
+                    : '—'}
+                  {record.paidBy ? ` · ${record.paidBy}` : ''}
+                </li>
+                {Array.isArray(record.payoutHistory) && record.payoutHistory.length > 0 ? (
+                  <li className="pt-1 border-t border-slate-100">
+                    <span className="text-slate-500 block mb-1">Treasury payouts</span>
+                    <ul className="space-y-1 pl-2 border-l-2 border-teal-200">
+                      {record.payoutHistory.map((p) => (
+                        <li key={p.id} className="text-[11px]">
+                          {(p.postedAtISO || '').slice(0, 16)} · ₦{Number(p.amountNgn || 0).toLocaleString('en-NG')}
+                          {p.reference ? ` · ${p.reference}` : ''}
+                          {p.accountName ? ` · ${p.accountName}` : ''}
+                        </li>
+                      ))}
+                    </ul>
+                  </li>
+                ) : null}
+              </ul>
+            </div>
+          ) : null}
 
           {previewLoading ? (
             <p className="text-xs font-semibold text-slate-500" role="status">
@@ -462,16 +614,43 @@ const RefundModal = ({
                         </option>
                         {quotationPickList.map((q) => (
                           <option key={q.id} value={q.id}>
-                            {q.id} · {q.customer_name} (₦{q.paid_ngn.toLocaleString()})
+                            {q.id} · {q.customer_name} (₦{q.paid_ngn.toLocaleString()} on quote)
                           </option>
                         ))}
                       </select>
                       <ChevronDown size={18} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                     </div>
                     {!loadingQuotes && quotationPickList.length === 0 && mode === 'create' ? (
-                      <p className="text-[10px] text-amber-700 font-medium mt-1">
-                        No quotations with payments found. Record a receipt against a quotation first.
-                      </p>
+                      <div className="mt-2 space-y-2 rounded-lg border border-amber-200/80 bg-amber-50/50 p-3">
+                        <p className="text-[10px] text-amber-900 font-medium leading-snug">
+                          Refunds only list quotations with <strong>paid total &gt; 0</strong> on file. If you already
+                          posted a receipt but the quote is missing here, the payment may have been recorded under a
+                          different branch than the quotation — use sync to recalculate from the ledger.
+                        </p>
+                        <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+                          <input
+                            type="text"
+                            value={syncPaidId}
+                            onChange={(e) => {
+                              setSyncPaidId(e.target.value);
+                              setSyncPaidError('');
+                            }}
+                            placeholder="Quotation id e.g. QT-26-001"
+                            className="flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] font-mono outline-none focus:ring-2 focus:ring-rose-200"
+                          />
+                          <button
+                            type="button"
+                            disabled={syncPaidBusy}
+                            onClick={() => void syncPaidFromLedger()}
+                            className="shrink-0 rounded-lg bg-[#134e4a] text-white px-3 py-2 text-[10px] font-bold uppercase tracking-wide disabled:opacity-50"
+                          >
+                            {syncPaidBusy ? 'Syncing…' : 'Sync paid from receipts'}
+                          </button>
+                        </div>
+                        {syncPaidError ? (
+                          <p className="text-[10px] text-rose-700 font-medium">{syncPaidError}</p>
+                        ) : null}
+                      </div>
                     ) : null}
                   </div>
 
@@ -482,11 +661,27 @@ const RefundModal = ({
                         <p className="text-xs font-bold text-slate-900 truncate">{form.customerName || 'Resolve...'}</p>
                         <p className="text-[10px] font-medium text-slate-500">{form.customerID}</p>
                       </div>
-                      <div className="text-right">
-                        <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Total Paid</p>
-                        <p className="text-sm font-black text-teal-600">
-                          ₦{(quotationPickList.find((q) => q.id === form.quotationRef)?.paid_ngn || 0).toLocaleString()}
-                        </p>
+                      <div className="text-right space-y-1">
+                        <div>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase mb-0.5">On quotation</p>
+                          <p className="text-sm font-black text-teal-600">
+                            ₦{refundMoneyBreakdown.booked.toLocaleString()}
+                          </p>
+                        </div>
+                        {refundMoneyBreakdown.overpay > 0 ? (
+                          <div>
+                            <p className="text-[10px] font-bold text-slate-400 uppercase mb-0.5">To customer advance</p>
+                            <p className="text-xs font-bold text-amber-700">
+                              ₦{refundMoneyBreakdown.overpay.toLocaleString()}
+                            </p>
+                          </div>
+                        ) : null}
+                        {refundMoneyBreakdown.overpay > 0 ? (
+                          <p className="text-[9px] font-medium text-slate-500 leading-snug">
+                            Cash recorded ₦{refundMoneyBreakdown.cashIn.toLocaleString()} — overage is not on the quote;
+                            refund it via customer advance if needed.
+                          </p>
+                        ) : null}
                       </div>
                     </div>
                   )}
@@ -504,19 +699,20 @@ const RefundModal = ({
                   {REFUND_REASON_CATEGORIES.map(cat => {
                     const isSelected = form.reasonCategory.includes(cat);
                     const isAlreadyRefunded = form.alreadyRefundedCategories.includes(cat);
-                    
+                    const isBlocked = blockedRefundCategories.includes(cat);
+
                     return (
                       <button
                         key={cat}
                         type="button"
-                        disabled={isAlreadyRefunded || readOnly}
+                        disabled={isAlreadyRefunded || readOnly || isBlocked}
                         onClick={() => toggleCategory(cat)}
                         className={`group relative flex items-start gap-3 p-3 rounded-xl border transition-all duration-200 text-left cursor-pointer
                           ${isSelected 
                             ? 'bg-rose-50 border-rose-200 shadow-sm shadow-rose-100' 
                             : 'bg-white border-slate-200 hover:border-rose-200 hover:bg-slate-50'
                           }
-                          ${isAlreadyRefunded ? 'opacity-50 grayscale cursor-not-allowed' : ''}
+                          ${isAlreadyRefunded || isBlocked ? 'opacity-50 grayscale cursor-not-allowed' : ''}
                         `}
                       >
                         <div className={`mt-0.5 w-4 h-4 rounded border flex items-center justify-center transition-colors
@@ -526,6 +722,11 @@ const RefundModal = ({
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className={`text-xs font-bold ${isSelected ? 'text-rose-900' : 'text-slate-700'}`}>{cat}</p>
+                          {isBlocked && (
+                            <p className="text-[9px] font-bold text-slate-500 uppercase flex items-center gap-1 mt-0.5">
+                              <AlertTriangle size={10} /> Not available (delivered)
+                            </p>
+                          )}
                           {isAlreadyRefunded && (
                             <p className="text-[9px] font-bold text-rose-500 uppercase flex items-center gap-1 mt-0.5">
                               <AlertTriangle size={10} /> Already Refunded
@@ -686,10 +887,17 @@ const RefundModal = ({
                          <p className="text-sm font-black text-white">₦{(quotationPickList.find(q => q.id === form.quotationRef)?.total_ngn || 0).toLocaleString()}</p>
                       </div>
                       <div className="bg-slate-900/50 p-3 border-l border-slate-800">
-                         <p className="text-[9px] font-bold text-slate-500 uppercase mb-1">Paid to Date</p>
-                         <p className="text-sm font-black text-emerald-400">₦{(quotationPickList.find(q => q.id === form.quotationRef)?.paid_ngn || 0).toLocaleString()}</p>
+                         <p className="text-[9px] font-bold text-slate-500 uppercase mb-1">On quotation</p>
+                         <p className="text-sm font-black text-emerald-400">₦{refundMoneyBreakdown.booked.toLocaleString()}</p>
                       </div>
                     </div>
+                    {refundMoneyBreakdown.overpay > 0 ? (
+                      <div className="rounded-xl border border-slate-700 bg-slate-800/40 p-3 space-y-1">
+                        <p className="text-[9px] font-bold text-slate-500 uppercase">Customer advance (overage)</p>
+                        <p className="text-sm font-black text-amber-300">₦{refundMoneyBreakdown.overpay.toLocaleString()}</p>
+                        <p className="text-[9px] text-slate-500">Total cash recorded ₦{refundMoneyBreakdown.cashIn.toLocaleString()}</p>
+                      </div>
+                    ) : null}
 
                     {/* Receipt History */}
                     <div className="space-y-2">
@@ -701,7 +909,7 @@ const RefundModal = ({
                           intelligence.receipts.map((r, idx) => (
                             <div key={idx} className="flex items-center justify-between p-2 rounded bg-slate-800/40 text-[10px]">
                               <span className="text-slate-400 font-mono">{r.id}</span>
-                              <span className="font-bold text-emerald-500">₦{Number(r.amountNgn).toLocaleString()}</span>
+                              <span className="font-bold text-emerald-500">{formatNgn(receiptCashReceivedNgn(r))}</span>
                             </div>
                           ))
                         )}
@@ -764,6 +972,32 @@ const RefundModal = ({
                         </ul>
                       </div>
                     )}
+
+                    {substitutionPerMeterBreakdown.length > 0 && (
+                      <div className="p-3 rounded-xl bg-sky-500/10 border border-sky-500/25 space-y-2">
+                        <p className="text-[9px] font-bold text-sky-300 uppercase tracking-wide">
+                          Substitution — per-metre delta
+                        </p>
+                        <ul className="space-y-2">
+                          {substitutionPerMeterBreakdown.map((row) => (
+                            <li key={row.jobId || row.productName} className="text-[10px] text-white/85 leading-snug">
+                              <span className="font-semibold text-white">{row.productName || row.jobId}</span>
+                              <span className="text-slate-400"> · </span>
+                              {Number(row.meters || 0).toFixed(2)}m × ₦
+                              {Number(row.deltaPerMeterNgn || 0).toLocaleString('en-NG')}/m
+                              <span className="text-slate-400"> → </span>
+                              <span className="font-mono text-sky-200">
+                                ₦{Number(row.creditNgn || 0).toLocaleString('en-NG')}
+                              </span>
+                              <div className="text-[9px] text-slate-500 mt-0.5 pl-0">
+                                Quoted ₦{Number(row.quotedPricePerMeterNgn || 0).toLocaleString('en-NG')}/m vs list ₦
+                                {Number(row.producedListPricePerMeterNgn || 0).toLocaleString('en-NG')}/m (FG product)
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -791,6 +1025,20 @@ const RefundModal = ({
 
                   {showApproval && (
                     <div className="pt-4 border-t border-slate-100 space-y-4">
+                      <div
+                        className="rounded-xl border border-amber-200/80 bg-amber-50/90 p-3 space-y-2"
+                        role="region"
+                        aria-label="Approver verification checklist"
+                      >
+                        <p className="text-[10px] font-bold text-amber-900 uppercase tracking-wide">Before you approve</p>
+                        <ul className="text-[10px] text-amber-950/90 font-medium space-y-1.5 list-disc list-inside leading-snug">
+                          <li>Quote total and paid amount (including customer advance) match the real money in.</li>
+                          <li>Production metres, cutting lists, and delivery status fit the refund story.</li>
+                          <li>You read system warnings; bundled transport/install may need a manual line split.</li>
+                          <li>Line-item total matches the approved amount you are about to enter.</li>
+                          <li>Required evidence (notes, photos, sign-off) is on file per branch policy.</li>
+                        </ul>
+                      </div>
                       <div>
                         <label className={label}>Decision</label>
                         <div className="grid grid-cols-2 gap-2">

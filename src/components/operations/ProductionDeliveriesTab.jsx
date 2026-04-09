@@ -13,6 +13,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { PageTabs, ModalFrame } from '../layout';
+import { EditSecondApprovalInline } from '../EditSecondApprovalInline';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import { apiFetch } from '../../lib/apiBase';
 import { WORKSPACE_TABLE_HEAD } from '../../lib/workspaceListStyle';
@@ -54,12 +55,13 @@ export default function ProductionDeliveriesTab({ onShellBlur }) {
     customerSigned: false,
     notes: '',
   });
+  const [deliveryConfirmEditApprovalId, setDeliveryConfirmEditApprovalId] = useState('');
 
   useEffect(() => {
     onShellBlur?.(confirmOpen || createOpen);
   }, [confirmOpen, createOpen, onShellBlur]);
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     const s = ws?.snapshot;
     if (!s) {
@@ -69,7 +71,7 @@ export default function ProductionDeliveriesTab({ onShellBlur }) {
     const list = s.deliveries;
     setShipments(Array.isArray(list) ? list.map((d) => ({ ...d })) : []);
   }, [ws?.snapshot, ws?.refreshEpoch]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   const handleStatusTab = (id) => {
     setStatusFilter(id);
@@ -116,6 +118,7 @@ export default function ProductionDeliveriesTab({ onShellBlur }) {
 
   const openConfirm = (row) => {
     setSelected(row);
+    setDeliveryConfirmEditApprovalId('');
     setConfirmForm({
       deliveryDate: '',
       courierName: row.method ?? '',
@@ -145,6 +148,7 @@ export default function ProductionDeliveriesTab({ onShellBlur }) {
       confirmForm.deliveryStatus === 'Confirmed' ? 'Delivered' : selected.status;
     const id = selected.id;
     const patch = {
+      ...(deliveryConfirmEditApprovalId.trim() ? { editApprovalId: deliveryConfirmEditApprovalId.trim() } : {}),
       status: nextStatus,
       deliveredDateISO: confirmForm.deliveryDate || new Date().toISOString().slice(0, 10),
       podNotes: [
@@ -169,6 +173,7 @@ export default function ProductionDeliveriesTab({ onShellBlur }) {
       return;
     }
     await ws.refresh();
+    setDeliveryConfirmEditApprovalId('');
     setConfirmOpen(false);
     setSelected(null);
     showToast(
@@ -219,43 +224,46 @@ export default function ProductionDeliveriesTab({ onShellBlur }) {
 
   return (
     <>
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between mb-6">
-        <div>
-          <h3 className="text-lg font-bold text-[#134e4a]">Deliveries</h3>
-          <p className="text-[11px] text-gray-500 mt-1">
-            Dispatch, tracking, and proof of delivery from the live deliveries register.
-          </p>
+      <div className="mb-6 space-y-3">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
+            <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-slate-400">Deliveries</p>
+            <p className="text-xs text-slate-500 mt-1 leading-relaxed max-w-xl">
+              Dispatch, tracking, and proof of delivery from the live deliveries register.
+            </p>
+          </div>
+          <div className="shrink-0 w-full lg:w-auto flex justify-start lg:justify-end">
+            <PageTabs tabs={tabs} value={statusFilter} onChange={handleStatusTab} />
+          </div>
         </div>
-        <PageTabs tabs={tabs} value={statusFilter} onChange={handleStatusTab} />
-      </div>
-
-      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between mb-8">
-        <div className="relative flex-1 md:max-w-md w-full">
-          <Search
-            className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none"
-            size={16}
-          />
-          <input
-            type="search"
-            placeholder="Search dispatch, quote, customer, tracking…"
-            className="z-input-search"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            autoComplete="off"
-          />
-        </div>
-        <div className="flex items-center gap-3 shrink-0">
-          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">
-            {filtered.length} shipment{filtered.length !== 1 ? 's' : ''}
-          </p>
-          <button
-            type="button"
-            onClick={openCreate}
-            disabled={ws?.hasWorkspaceData && availableCuttingLists.length === 0}
-            className="inline-flex items-center gap-2 rounded-lg bg-[#134e4a] px-4 py-2 text-[10px] font-semibold uppercase tracking-wide text-white shadow-sm disabled:opacity-40"
-          >
-            <Package size={14} /> New dispatch
-          </button>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between pt-3 border-t border-slate-100">
+          <div className="relative flex-1 sm:max-w-md w-full">
+            <Search
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none"
+              size={16}
+            />
+            <input
+              type="search"
+              placeholder="Search dispatch, quote, customer, tracking…"
+              className="z-input-search"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              autoComplete="off"
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-3 justify-end shrink-0">
+            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">
+              {filtered.length} shipment{filtered.length !== 1 ? 's' : ''}
+            </p>
+            <button
+              type="button"
+              onClick={openCreate}
+              disabled={ws?.hasWorkspaceData && availableCuttingLists.length === 0}
+              className="inline-flex items-center gap-2 rounded-lg bg-[#134e4a] px-4 py-2 text-[10px] font-semibold uppercase tracking-wide text-white shadow-sm disabled:opacity-40"
+            >
+              <Package size={14} /> New dispatch
+            </button>
+          </div>
         </div>
       </div>
 
@@ -446,6 +454,7 @@ export default function ProductionDeliveriesTab({ onShellBlur }) {
         onClose={() => {
           setConfirmOpen(false);
           setSelected(null);
+          setDeliveryConfirmEditApprovalId('');
         }}
       >
         <div className="z-modal-panel max-w-lg p-8 overflow-y-auto">
@@ -561,6 +570,14 @@ export default function ProductionDeliveriesTab({ onShellBlur }) {
                     className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-medium outline-none resize-none"
                   />
                 </div>
+                {selected?.id ? (
+                  <EditSecondApprovalInline
+                    entityKind="delivery"
+                    entityId={selected.id}
+                    value={deliveryConfirmEditApprovalId}
+                    onChange={setDeliveryConfirmEditApprovalId}
+                  />
+                ) : null}
                 <button type="submit" className="z-btn-primary w-full justify-center py-3">
                   Save confirmation
                 </button>

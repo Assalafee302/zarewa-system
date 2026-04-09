@@ -17,6 +17,7 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:sales-refund-finance": "playwright test e2e/sales-refund-finance-checklist.spec.js",
+    "test:e2e:refund-risk": "playwright test e2e/refund-risk-api.spec.js",
     "test:e2e:hr-stress": "playwright test e2e/hr-stress.spec.js",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:hr": "playwright test e2e/hr-end-to-end.spec.js e2e/hr-edge.spec.js",

@@ -20,6 +20,7 @@ import {
   ClipboardList,
   Printer,
   Paperclip,
+  HelpCircle,
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useNavigate, useSearchParams } from 'react-router-dom';
@@ -29,6 +30,10 @@ import { useWorkspace } from '../context/WorkspaceContext';
 import { useInventory } from '../context/InventoryContext';
 import { useToast } from '../context/ToastContext';
 import { formatNgn } from '../Data/mockData';
+import { receiptCashReceivedNgn } from '../lib/salesReceiptsList';
+import { effectiveManagerTargetsPerMonth, mergeDashboardPrefs } from '../lib/dashboardPrefs';
+import { userCanApproveEditMutationsClient } from '../lib/editApprovalUi';
+import { EditSecondApprovalInline } from '../components/EditSecondApprovalInline';
 import {
   buildManagementQueuesFromSnapshot,
   buildManagerSnapshotsFromWorkspace,
@@ -36,7 +41,7 @@ import {
   managementPeriodStartISO,
 } from '../lib/managementLiveFromWorkspace';
 import { Card, Button } from '../components/ui';
-import { ModalFrame, PageShell, PageHeader } from '../components/layout';
+import { ModalFrame, PageShell } from '../components/layout';
 import { DashboardKpiStrip } from '../components/dashboard/DashboardKpiStrip';
 
 const INBOX_TABS = [
@@ -254,7 +259,7 @@ function ManagementAuditSections({ auditData, loadingAudit, formatNgn }) {
       ) : null}
 
       <section>
-        <p className="text-[10px] font-black text-teal-300/90 uppercase tracking-widest mb-2">Meters &amp; production totals</p>
+        <p className="text-[10px] font-black text-teal-300/90 uppercase tracking-widest mb-2">Metres &amp; production totals</p>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
           <div className="rounded-xl bg-teal-500/10 border border-teal-500/20 p-3">
             <p className="text-[9px] font-bold uppercase text-teal-200/80">Cutting lists (planned)</p>
@@ -411,11 +416,11 @@ function matchesInboxSearch(query, row, tabKey) {
       row.product_name,
       row.conversion_alert_state
     );
+  } else if (tabKey === 'edit_approvals') {
+    parts.push(row.id, row.entityKind, row.entityId, row.requestedByDisplay, row.requestedByUserId, row.status);
   }
   return parts.some((p) => String(p ?? '').toLowerCase().includes(s));
 }
-
-const DEFAULT_MANAGER_TARGETS = { nairaTarget: 50000000, meterTarget: 250000 };
 
 function ymdLocal(d = new Date()) {
   const z = (n) => String(n).padStart(2, '0');
@@ -447,6 +452,9 @@ const ManagerDashboard = () => {
   const [decisionBusy, setDecisionBusy] = useState(false);
   const [inboxSearch, setInboxSearch] = useState('');
   const [activeTab, setActiveTab] = useState('clearance');
+  const [editApprovalPending, setEditApprovalPending] = useState([]);
+  const [conversionSignoffRemark, setConversionSignoffRemark] = useState('');
+  const [conversionSignoffEditApprovalId, setConversionSignoffEditApprovalId] = useState('');
   const [showStockRequest, setShowStockRequest] = useState(false);
   const [showAttendanceModal, setShowAttendanceModal] = useState(false);
   const [attDayIso, setAttDayIso] = useState(() => ymdLocal());
@@ -459,6 +467,29 @@ const ManagerDashboard = () => {
   const [attSaving, setAttSaving] = useState(false);
   /** @type {['month' | '4months' | 'half' | 'year', Function]} */
   const [metricPeriod, setMetricPeriod] = useState('month');
+  const [mdPayrollRuns, setMdPayrollRuns] = useState([]);
+  const [mdPayrollLoading, setMdPayrollLoading] = useState(false);
+  const [mdPayrollBusyId, setMdPayrollBusyId] = useState(null);
+
+  const showMdPayrollCard = Boolean(ws?.hasPermission?.('hr.payroll.md_approve'));
+
+  const inboxTabs = useMemo(() => {
+    const t = [...INBOX_TABS];
+    if (userCanApproveEditMutationsClient(ws?.session?.user?.roleKey, ws?.permissions)) {
+      t.push({
+        key: 'edit_approvals',
+        label: 'Edit OKs',
+        description: 'Second-party approvals before colleagues save sensitive edits.',
+      });
+    }
+    return t;
+  }, [ws?.session?.user?.roleKey, ws?.permissions]);
+
+  const paymentIntelLineItems = useMemo(() => {
+    const raw = selectedIntel?.row?.line_items;
+    if (!Array.isArray(raw)) return { lines: [], total: 0 };
+    return { lines: raw.slice(0, 20), total: raw.length };
+  }, [selectedIntel?.row?.line_items]);
 
   const { products: invProducts } = useInventory();
   const liveLowStockCount = useMemo(
@@ -476,6 +507,53 @@ const ManagerDashboard = () => {
       ws?.hasWorkspaceData && Array.isArray(ws.snapshot?.cuttingLists) ? ws.snapshot.cuttingLists : [],
     [ws?.hasWorkspaceData, ws?.snapshot?.cuttingLists]
   );
+  const workspaceProductionJobs = useMemo(
+    () =>
+      ws?.hasWorkspaceData && Array.isArray(ws.snapshot?.productionJobs) ? ws.snapshot.productionJobs : [],
+    [ws?.hasWorkspaceData, ws?.snapshot?.productionJobs]
+  );
+
+  const mergedPrefsForTargets = useMemo(
+    () => mergeDashboardPrefs(ws?.snapshot?.dashboardPrefs),
+    [ws?.snapshot?.dashboardPrefs]
+  );
+
+  const managerTargetsForBuild = useMemo(() => {
+    const eff = effectiveManagerTargetsPerMonth(ws?.snapshot?.orgManagerTargets, mergedPrefsForTargets);
+    return { nairaTarget: eff.nairaTargetPerMonth, meterTarget: eff.meterTargetPerMonth };
+  }, [ws?.snapshot?.orgManagerTargets, mergedPrefsForTargets]);
+
+  /** Which target tier drives progress bars (for hero chip). */
+  const managerTargetSourceMeta = useMemo(() => {
+    const org = ws?.snapshot?.orgManagerTargets;
+    const orgN = Number(org?.nairaTargetPerMonth);
+    const orgM = Number(org?.meterTargetPerMonth);
+    const hasOrg = (Number.isFinite(orgN) && orgN > 0) || (Number.isFinite(orgM) && orgM > 0);
+
+    if (mergedPrefsForTargets.managerTargetsPersonalOverride) {
+      return {
+        shortLabel: 'Personal',
+        title:
+          'Active targets: personal override. Progress bars use your own monthly baselines from Settings → Preferences. Company defaults are ignored.',
+        chipClass:
+          'bg-violet-500/20 border-violet-400/35 text-violet-100',
+      };
+    }
+    if (hasOrg) {
+      return {
+        shortLabel: 'Company',
+        title:
+          'Active targets: company. Progress bars prefer company monthly baselines set by an admin in Settings → Preferences. If only one leg is set at company level, the other uses your saved baseline or the app default.',
+        chipClass: 'bg-sky-500/20 border-sky-400/35 text-sky-100',
+      };
+    }
+    return {
+      shortLabel: 'Account',
+      title:
+        'Active targets: your account. No company targets are set; progress bars use the values saved on your account in Settings → Preferences, or built-in defaults.',
+      chipClass: 'bg-white/10 border-white/20 text-teal-100/95',
+    };
+  }, [mergedPrefsForTargets.managerTargetsPersonalOverride, ws?.snapshot?.orgManagerTargets]);
 
   const displayItems = useMemo(() => {
     if (ws?.hasWorkspaceData && ws.snapshot) {
@@ -488,15 +566,17 @@ const ManagerDashboard = () => {
     const periodMeta = MANAGER_METRIC_PERIODS.find((p) => p.key === metricPeriod);
     const monthsSpan = periodMeta?.monthsSpan ?? 1;
     const scaledTargets = {
-      nairaTarget: DEFAULT_MANAGER_TARGETS.nairaTarget * monthsSpan,
-      meterTarget: DEFAULT_MANAGER_TARGETS.meterTarget * monthsSpan,
+      nairaTarget: managerTargetsForBuild.nairaTarget * monthsSpan,
+      meterTarget: managerTargetsForBuild.meterTarget * monthsSpan,
     };
     if (!ws?.hasWorkspaceData || !ws.snapshot) {
       return {
-        revenue: 0,
+        paidOnQuotesNgn: 0,
+        producedSalesNgn: 0,
         quoteCount: 0,
         lowStockCount: liveLowStockCount,
-        metersProduced: 0,
+        metersCuttingLists: 0,
+        completedProductionMetres: 0,
         topByRevenue: [],
         periodKey: metricPeriod,
         periodLabel: periodMeta?.label ?? 'This month',
@@ -506,8 +586,9 @@ const ManagerDashboard = () => {
     return buildManagerSnapshotsFromWorkspace(
       workspaceQuotations,
       workspaceCuttingLists,
+      workspaceProductionJobs,
       liveLowStockCount,
-      DEFAULT_MANAGER_TARGETS,
+      managerTargetsForBuild,
       metricPeriod
     );
   }, [
@@ -515,7 +596,9 @@ const ManagerDashboard = () => {
     ws.snapshot,
     workspaceQuotations,
     workspaceCuttingLists,
+    workspaceProductionJobs,
     liveLowStockCount,
+    managerTargetsForBuild,
     metricPeriod,
   ]);
 
@@ -551,6 +634,12 @@ const ManagerDashboard = () => {
         setLoadError(msg);
       }
 
+      let editAppr = [];
+      if (userCanApproveEditMutationsClient(ws?.session?.user?.roleKey, ws?.permissions)) {
+        const ea = await apiFetch('/api/edit-approvals/pending');
+        if (ea.ok && ea.data?.ok && Array.isArray(ea.data.items)) editAppr = ea.data.items;
+      }
+      setEditApprovalPending(editAppr);
     } finally {
       setLoading(false);
     }
@@ -649,6 +738,35 @@ const ManagerDashboard = () => {
     fetchData();
   }, [ws?.refreshEpoch]);
 
+  const loadMdPayrollRuns = useCallback(async () => {
+    if (!showMdPayrollCard) return;
+    setMdPayrollLoading(true);
+    const { ok, data } = await apiFetch('/api/hr/payroll-runs');
+    setMdPayrollLoading(false);
+    if (ok && data?.ok) setMdPayrollRuns(Array.isArray(data.runs) ? data.runs : []);
+    else setMdPayrollRuns([]);
+  }, [showMdPayrollCard]);
+
+  useEffect(() => {
+    if (!showMdPayrollCard) return;
+    void loadMdPayrollRuns();
+  }, [showMdPayrollCard, loadMdPayrollRuns, ws?.refreshEpoch]);
+
+  const approveMdPayrollRun = async (runId) => {
+    setMdPayrollBusyId(runId);
+    const { ok, data } = await apiFetch(
+      `/api/hr/payroll-runs/${encodeURIComponent(runId)}/md-approve`,
+      { method: 'POST' }
+    );
+    setMdPayrollBusyId(null);
+    if (!ok || !data?.ok) {
+      showToast(data?.error || 'Could not approve payroll run.', { variant: 'error' });
+      return;
+    }
+    showToast('Payroll run signed off — HR can lock when ready.');
+    await loadMdPayrollRuns();
+  };
+
   const fetchAudit = useCallback(async (quoteId) => {
     if (!quoteId) return;
     setLoadingAudit(true);
@@ -695,6 +813,19 @@ const ManagerDashboard = () => {
     displayItems.productionOverrides,
     fetchAudit,
   ]);
+
+  /** Deep link: ?inbox=edit_approvals opens the second-party edit approval queue. */
+  useEffect(() => {
+    const inbox = (searchParams.get('inbox') || '').trim().toLowerCase();
+    if (inbox !== 'edit_approvals') return;
+    if (!userCanApproveEditMutationsClient(ws?.session?.user?.roleKey, ws?.permissions)) return;
+    setActiveTab('edit_approvals');
+  }, [searchParams, ws?.session?.user?.roleKey, ws?.permissions]);
+
+  useEffect(() => {
+    setConversionSignoffRemark('');
+    setConversionSignoffEditApprovalId('');
+  }, [selectedIntel?.kind, selectedIntel?.jobId]);
 
   /** If URL opened before queues loaded, merge customer row when data arrives. */
   useEffect(() => {
@@ -774,8 +905,9 @@ const ManagerDashboard = () => {
       flagged: displayItems.flagged.length,
       refunds: displayItems.pendingRefunds.length,
       payments: displayItems.pendingExpenses.length,
+      edit_approvals: editApprovalPending.length,
     }),
-    [displayItems]
+    [displayItems, editApprovalPending.length]
   );
 
   const totalOpenActions = useMemo(
@@ -785,7 +917,8 @@ const ManagerDashboard = () => {
       tabCounts.conversions +
       tabCounts.flagged +
       tabCounts.refunds +
-      tabCounts.payments,
+      tabCounts.payments +
+      tabCounts.edit_approvals,
     [tabCounts]
   );
 
@@ -797,16 +930,23 @@ const ManagerDashboard = () => {
     else if (activeTab === 'refunds') list = displayItems.pendingRefunds;
     else if (activeTab === 'payments') list = displayItems.pendingExpenses;
     else if (activeTab === 'conversions') list = displayItems.pendingConversionReviews ?? [];
+    else if (activeTab === 'edit_approvals') list = editApprovalPending;
     return list.filter((row) => matchesInboxSearch(inboxSearch, row, activeTab));
-  }, [activeTab, displayItems, inboxSearch]);
+  }, [activeTab, displayItems, inboxSearch, editApprovalPending]);
 
-  const revenueProgress =
+  const producedSalesProgress =
     displaySnapshots.targets?.nairaTarget > 0
-      ? Math.min(100, Math.round((displaySnapshots.revenue / displaySnapshots.targets.nairaTarget) * 100))
+      ? Math.min(
+          100,
+          Math.round((displaySnapshots.producedSalesNgn / displaySnapshots.targets.nairaTarget) * 100)
+        )
       : 0;
-  const metersProgress =
+  const productionMetresProgress =
     displaySnapshots.targets?.meterTarget > 0
-      ? Math.min(100, Math.round((displaySnapshots.metersProduced / displaySnapshots.targets.meterTarget) * 100))
+      ? Math.min(
+          100,
+          Math.round((displaySnapshots.completedProductionMetres / displaySnapshots.targets.meterTarget) * 100)
+        )
       : 0;
 
   const openQuotationIntel = useCallback(
@@ -907,14 +1047,22 @@ const ManagerDashboard = () => {
 
   const handleConversionSignoff = async () => {
     if (selectedIntel?.kind !== 'conversion') return;
-    const remark = window.prompt('Sign-off remark (at least 3 characters)');
-    if (!remark || remark.trim().length < 3) return;
+    const remark = conversionSignoffRemark.trim();
+    if (remark.length < 3) {
+      showToast('Enter a sign-off remark (at least 3 characters).', { variant: 'error' });
+      return;
+    }
     setDecisionBusy(true);
     const { ok, data } = await apiFetch(
       `/api/production-jobs/${encodeURIComponent(selectedIntel.jobId)}/manager-review-signoff`,
       {
         method: 'PATCH',
-        body: JSON.stringify({ remark: remark.trim() }),
+        body: JSON.stringify({
+          remark,
+          ...(conversionSignoffEditApprovalId.trim()
+            ? { editApprovalId: conversionSignoffEditApprovalId.trim() }
+            : {}),
+        }),
       }
     );
     setDecisionBusy(false);
@@ -923,12 +1071,52 @@ const ManagerDashboard = () => {
       return;
     }
     showToast('Conversion review signed off.', { variant: 'success' });
+    setConversionSignoffRemark('');
+    setConversionSignoffEditApprovalId('');
     await fetchData();
     await (ws.refresh?.() ?? Promise.resolve());
     setSelectedIntel(null);
   };
 
   const renderInboxRow = (row) => {
+    if (activeTab === 'edit_approvals') {
+      const e = row;
+      return (
+        <div
+          key={e.id}
+          className="flex flex-wrap items-start justify-between gap-2 p-4 border-b border-slate-100 last:border-0"
+        >
+          <div className="min-w-0">
+            <p className="text-[10px] font-mono font-bold text-slate-700">{e.id}</p>
+            <p className="text-[11px] font-semibold text-slate-800 mt-1">
+              {e.entityKind} · <span className="font-mono">{e.entityId}</span>
+            </p>
+            <p className="text-[9px] text-slate-500 mt-1">
+              Requested by {e.requestedByDisplay || e.requestedByUserId || '—'}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="shrink-0 rounded-lg bg-[#134e4a] px-3 py-1.5 text-[10px] font-black uppercase text-white hover:brightness-105"
+            onClick={async () => {
+              const { ok, data } = await apiFetch(`/api/edit-approvals/${encodeURIComponent(e.id)}/approve`, {
+                method: 'POST',
+                body: JSON.stringify({}),
+              });
+              if (!ok || !data?.ok) {
+                showToast(data?.error || 'Could not approve.', { variant: 'error' });
+                return;
+              }
+              showToast('Edit approval granted — token is valid for one save.');
+              await fetchData();
+              await (ws.refreshEditApprovalsPending?.() ?? Promise.resolve());
+            }}
+          >
+            Approve
+          </button>
+        </div>
+      );
+    }
     if (activeTab === 'clearance') {
       return (
         <button
@@ -1114,50 +1302,51 @@ const ManagerDashboard = () => {
     return null;
   };
 
-  const tabMeta = INBOX_TABS.find((t) => t.key === activeTab);
+  const mdPayrollPending = useMemo(
+    () =>
+      mdPayrollRuns.filter(
+        (r) => String(r.status || '').toLowerCase() === 'draft' && !r.mdApprovedAtIso
+      ),
+    [mdPayrollRuns]
+  );
+
+  const tabMeta = inboxTabs.find((t) => t.key === activeTab);
 
   return (
     <PageShell className="pb-14">
-      <PageHeader
-        eyebrow="Management"
-        title="Manager dashboard"
-        subtitle="Review paid quotations, approve production when payment is below threshold, handle flags, and jump to refunds. Select any quotation row to open transaction intel and record a verdict."
-        actions={
-          <>
-            <Button
-              type="button"
-              variant="outline"
-              className="rounded-xl text-[10px] font-bold uppercase tracking-wide h-10 border-slate-200"
-              onClick={() => navigate('/sales')}
-            >
-              Sales
-            </Button>
-            <button
-              type="button"
-              title="Reload management API and workspace snapshot"
-              onClick={() => void handleRefreshAll()}
-              className="p-2.5 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 transition-colors"
-            >
-              <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
-            </button>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => openAttendanceModal()}
-              className="rounded-xl gap-2 font-bold uppercase text-[10px] h-10 border-teal-200 text-[#134e4a] hover:bg-teal-50"
-            >
-              <ClipboardList size={16} /> Mark attendance
-            </Button>
-            <Button
-              type="button"
-              onClick={() => setShowStockRequest(true)}
-              className="rounded-xl gap-2 font-bold uppercase text-[10px] h-10"
-            >
-              <Plus size={16} /> Stock note
-            </Button>
-          </>
-        }
-      />
+      <div className="flex flex-wrap items-center justify-end gap-2 mb-6 sm:mb-8">
+        <Button
+          type="button"
+          variant="outline"
+          className="rounded-xl text-[10px] font-bold uppercase tracking-wide h-10 border-slate-200"
+          onClick={() => navigate('/sales')}
+        >
+          Sales
+        </Button>
+        <button
+          type="button"
+          title="Reload management API and workspace snapshot"
+          onClick={() => void handleRefreshAll()}
+          className="p-2.5 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 transition-colors"
+        >
+          <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
+        </button>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => openAttendanceModal()}
+          className="rounded-xl gap-2 font-bold uppercase text-[10px] h-10 border-teal-200 text-[#134e4a] hover:bg-teal-50"
+        >
+          <ClipboardList size={16} /> Mark attendance
+        </Button>
+        <Button
+          type="button"
+          onClick={() => setShowStockRequest(true)}
+          className="rounded-xl gap-2 font-bold uppercase text-[10px] h-10"
+        >
+          <Plus size={16} /> Stock note
+        </Button>
+      </div>
 
       {loadError ? (
         <div
@@ -1189,7 +1378,16 @@ const ManagerDashboard = () => {
                     No workspace
                   </span>
                 )}
+                <span
+                  className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] font-black uppercase tracking-wide ${managerTargetSourceMeta.chipClass}`}
+                  title={managerTargetSourceMeta.title}
+                >
+                  Targets: {managerTargetSourceMeta.shortLabel}
+                </span>
               </div>
+              <p className="text-[9px] font-semibold text-teal-200/75 mt-1.5 mb-0 tracking-wide">
+                {managerTargetSourceMeta.line}
+              </p>
               <div
                 className="flex flex-wrap gap-1 mt-3 mb-1"
                 role="group"
@@ -1213,8 +1411,25 @@ const ManagerDashboard = () => {
                   );
                 })}
               </div>
+              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-teal-200/90 mb-1 flex items-center gap-1.5 flex-wrap">
+                <span>Sales produced (same basis as KPI strip)</span>
+                <span
+                  className="inline-flex rounded-full p-0.5 text-teal-200/80 hover:text-white hover:bg-white/10 cursor-help"
+                  title="Quotation totals allocated to completed production jobs in this period, by job completion date — not cash date. Matches the Sales card in the KPI strip below."
+                >
+                  <HelpCircle size={14} aria-hidden />
+                  <span className="sr-only">Explain sales produced</span>
+                </span>
+              </p>
               <p className="text-2xl sm:text-3xl font-black tracking-tight tabular-nums">
-                {formatNgn(displaySnapshots.revenue)}
+                {formatNgn(displaySnapshots.producedSalesNgn)}
+              </p>
+              <p
+                className="text-[11px] text-teal-100/80 mt-1.5 tabular-nums flex items-center gap-1.5 flex-wrap"
+                title="Sum of paidNgn on quotations whose quote date falls in the selected period. This is cash recorded on quotes, not production-attributed revenue."
+              >
+                <span>Collected on quotations (quote date): {formatNgn(displaySnapshots.paidOnQuotesNgn)}</span>
+                <HelpCircle size={13} className="shrink-0 text-teal-200/70" aria-hidden />
               </p>
               <p className="text-xs text-white/70 mt-2 max-w-md">
                 {totalOpenActions} open management item{totalOpenActions === 1 ? '' : 's'} across queues
@@ -1235,9 +1450,14 @@ const ManagerDashboard = () => {
               <p className="text-lg font-black tabular-nums mt-1">{displaySnapshots.lowStockCount}</p>
             </div>
             <div className="rounded-xl bg-white/10 border border-white/10 px-3 py-3 sm:col-span-2">
-              <p className="text-[9px] font-bold uppercase tracking-wider text-teal-200/80">Meters (cutting lists)</p>
+              <p className="text-[9px] font-bold uppercase tracking-wider text-teal-200/80">
+                Metres produced (completed jobs)
+              </p>
               <p className="text-lg font-black tabular-nums mt-1">
-                {Number(displaySnapshots.metersProduced || 0).toLocaleString()} m
+                {Number(displaySnapshots.completedProductionMetres || 0).toLocaleString()} m
+              </p>
+              <p className="text-[8px] font-semibold text-teal-200/70 mt-1.5 leading-snug">
+                Cutting lists (dated in period): {Number(displaySnapshots.metersCuttingLists || 0).toLocaleString()} m
               </p>
             </div>
           </div>
@@ -1245,23 +1465,33 @@ const ManagerDashboard = () => {
         <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <div className="flex justify-between text-[10px] font-bold uppercase tracking-wide text-teal-100/90 mb-1.5">
-              <span>Revenue vs target</span>
-              <span className="tabular-nums">{revenueProgress}%</span>
+              <span>Produced sales vs target</span>
+              <span className="tabular-nums">{producedSalesProgress}%</span>
             </div>
             <div className="h-2 rounded-full bg-black/25 overflow-hidden">
-              <div className="h-full rounded-full bg-teal-400 transition-all" style={{ width: `${revenueProgress}%` }} />
+              <div
+                className="h-full rounded-full bg-teal-400 transition-all"
+                style={{ width: `${producedSalesProgress}%` }}
+              />
             </div>
           </div>
           <div>
             <div className="flex justify-between text-[10px] font-bold uppercase tracking-wide text-teal-100/90 mb-1.5">
-              <span>Meters vs target</span>
-              <span className="tabular-nums">{metersProgress}%</span>
+              <span>Production metres vs target</span>
+              <span className="tabular-nums">{productionMetresProgress}%</span>
             </div>
             <div className="h-2 rounded-full bg-black/25 overflow-hidden">
-              <div className="h-full rounded-full bg-emerald-400 transition-all" style={{ width: `${metersProgress}%` }} />
+              <div
+                className="h-full rounded-full bg-emerald-400 transition-all"
+                style={{ width: `${productionMetresProgress}%` }}
+              />
             </div>
           </div>
         </div>
+        <p className="text-[9px] text-teal-200/55 mt-3 max-w-xl leading-relaxed">
+          Progress bars use monthly targets × selected range. Company defaults (Settings → Preferences, admins) apply
+          to everyone unless you enable a personal override there.
+        </p>
       </div>
 
       <DashboardKpiStrip
@@ -1276,6 +1506,65 @@ const ManagerDashboard = () => {
         <p className="text-xs font-semibold text-slate-500 mb-6">
           KPI strip uses live workspace data — connect to the API if figures look empty.
         </p>
+      ) : null}
+
+      {showMdPayrollCard ? (
+        <Card className="mb-6 overflow-hidden border-violet-200/80 bg-gradient-to-br from-violet-50/90 to-white shadow-sm">
+          <div className="flex flex-col gap-3 border-b border-violet-100 bg-violet-50/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-2 min-w-0">
+              <DollarSign size={20} className="text-violet-700 shrink-0" aria-hidden />
+              <div className="min-w-0">
+                <h2 className="text-sm font-black text-[#134e4a] tracking-tight">Payroll — MD sign-off</h2>
+                <p className="text-[11px] text-slate-600 mt-0.5">
+                  Draft runs need your approval before HR can lock and export for payment.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => void loadMdPayrollRuns()}
+              className="shrink-0 self-start sm:self-center inline-flex items-center gap-1.5 rounded-xl border border-violet-200 bg-white px-3 py-2 text-[10px] font-black uppercase tracking-wide text-violet-900 hover:bg-violet-50"
+            >
+              <RefreshCw size={14} className={mdPayrollLoading ? 'animate-spin' : ''} />
+              Refresh
+            </button>
+          </div>
+          <div className="p-4">
+            {mdPayrollLoading && mdPayrollRuns.length === 0 ? (
+              <p className="text-xs text-slate-500">Loading payroll runs…</p>
+            ) : null}
+            {!mdPayrollLoading && mdPayrollPending.length === 0 ? (
+              <p className="text-xs text-slate-600">
+                No draft payroll runs are waiting for MD approval.
+              </p>
+            ) : null}
+            {mdPayrollPending.length > 0 ? (
+              <ul className="space-y-2">
+                {mdPayrollPending.map((r) => (
+                  <li
+                    key={r.id}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-xs font-black text-slate-900 tabular-nums">
+                        Period {r.periodYyyymm}
+                      </p>
+                      <p className="text-[10px] text-amber-800 font-semibold mt-0.5">Awaiting MD approval</p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={mdPayrollBusyId === r.id}
+                      onClick={() => void approveMdPayrollRun(r.id)}
+                      className="rounded-lg bg-[#134e4a] px-3 py-1.5 text-[10px] font-black uppercase text-white disabled:opacity-50"
+                    >
+                      {mdPayrollBusyId === r.id ? '…' : 'Approve'}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        </Card>
       ) : null}
 
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
@@ -1302,9 +1591,9 @@ const ManagerDashboard = () => {
                 </div>
               </div>
               <div className="flex gap-1 mt-4 overflow-x-auto pb-1 -mx-1 px-1 custom-scrollbar">
-                {INBOX_TABS.map((t) => {
+                {inboxTabs.map((t) => {
                   const active = activeTab === t.key;
-                  const count = tabCounts[t.key];
+                  const count = tabCounts[t.key] ?? 0;
                   return (
                     <button
                       key={t.key}
@@ -1347,6 +1636,8 @@ const ManagerDashboard = () => {
                     <BarChart3 size={36} className="opacity-25 mb-3 text-violet-600" />
                   ) : activeTab === 'refunds' ? (
                     <RotateCcw size={36} className="opacity-25 mb-3 text-amber-600" />
+                  ) : activeTab === 'edit_approvals' ? (
+                    <ShieldCheck size={36} className="opacity-25 mb-3 text-teal-600" />
                   ) : (
                     <FileText size={36} className="opacity-25 mb-3 text-rose-500" />
                   )}
@@ -1548,7 +1839,9 @@ const ManagerDashboard = () => {
                                   <DollarSign size={14} className="text-emerald-400" />
                                 </div>
                                 <div className="min-w-0 flex-1">
-                                  <p className="text-sm font-black text-white tabular-nums">{formatNgn(rcpt.amountNgn)}</p>
+                                  <p className="text-sm font-black text-white tabular-nums">
+                                    {formatNgn(receiptCashReceivedNgn(rcpt))}
+                                  </p>
                                   <p className="text-[9px] text-white/30 mt-1 font-mono">{rcpt.id}</p>
                                 </div>
                               </div>
@@ -1648,32 +1941,41 @@ const ManagerDashboard = () => {
                       {selectedIntel.row?.description}
                     </p>
                     <p className="text-[10px] text-white/35 mt-3 uppercase tracking-wide">{selectedIntel.row?.request_date}</p>
-                    {Array.isArray(selectedIntel.row?.line_items) && selectedIntel.row.line_items.length > 0 ? (
-                      <div className="mt-4 rounded-xl border border-white/10 overflow-hidden bg-black/20">
-                        <table className="w-full text-[10px] text-left">
+                    {paymentIntelLineItems.total > 0 ? (
+                      <div className="mt-4 rounded-xl border border-white/10 overflow-hidden bg-black/20 overflow-x-auto">
+                        <table className="w-full min-w-[320px] border-collapse text-left text-xs">
                           <thead>
-                            <tr className="text-white/40 uppercase tracking-wide border-b border-white/10">
-                              <th className="p-2 font-bold">Item</th>
-                              <th className="p-2 font-bold text-right">Unit</th>
-                              <th className="p-2 font-bold text-right">Price</th>
-                              <th className="p-2 font-bold text-right">Total</th>
+                            <tr className="text-white/50 uppercase tracking-wide border-b border-white/10 text-[11px] font-bold">
+                              <th className="p-2.5">Item</th>
+                              <th className="p-2.5 text-right">Unit</th>
+                              <th className="p-2.5 text-right">Price</th>
+                              <th className="p-2.5 text-right">Total</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {selectedIntel.row.line_items.map((ln, i) => (
-                              <tr key={i} className="border-b border-white/5 text-white/75">
-                                <td className="p-2">{ln.item || '—'}</td>
-                                <td className="p-2 text-right tabular-nums">{Number(ln.unit) || 0}</td>
-                                <td className="p-2 text-right tabular-nums">
+                            {paymentIntelLineItems.lines.map((ln, i) => (
+                              <tr key={i} className="border-b border-white/5 text-white/80">
+                                <td className="p-2.5 max-w-0 whitespace-nowrap truncate" title={ln.item || '—'}>
+                                  {ln.item || '—'}
+                                </td>
+                                <td className="p-2.5 text-right tabular-nums whitespace-nowrap">
+                                  {Number(ln.unit) || 0}
+                                </td>
+                                <td className="p-2.5 text-right tabular-nums whitespace-nowrap">
                                   {formatNgn(Number(ln.unitPriceNgn ?? ln.unit_price_ngn) || 0)}
                                 </td>
-                                <td className="p-2 text-right tabular-nums font-semibold text-white/90">
+                                <td className="p-2.5 text-right tabular-nums font-semibold text-white/90 whitespace-nowrap">
                                   {formatNgn(Number(ln.lineTotalNgn ?? ln.line_total_ngn) || 0)}
                                 </td>
                               </tr>
                             ))}
                           </tbody>
                         </table>
+                        {paymentIntelLineItems.total > 20 ? (
+                          <p className="px-2.5 py-2 text-[11px] font-semibold text-white/45">
+                            Showing 20 of {paymentIntelLineItems.total} lines.
+                          </p>
+                        ) : null}
                       </div>
                     ) : null}
                     <div className="flex flex-wrap gap-2 mt-4">
@@ -1788,6 +2090,27 @@ const ManagerDashboard = () => {
                     <p className="text-[10px] text-white/45 leading-relaxed">
                       Confirms you have reviewed High/Low conversion or the open manager review for this completed job.
                     </p>
+                    <label className="block text-[9px] font-black uppercase tracking-widest text-white/50">
+                      Remark
+                      <textarea
+                        value={conversionSignoffRemark}
+                        onChange={(e) => setConversionSignoffRemark(e.target.value)}
+                        rows={2}
+                        placeholder="e.g. Variance reviewed — approved to close."
+                        className="mt-1 w-full rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-[11px] text-white placeholder:text-white/35 outline-none focus:ring-2 focus:ring-violet-400/40"
+                      />
+                    </label>
+                    {selectedIntel.jobId ? (
+                      <div className="rounded-xl border border-amber-400/40 bg-amber-950/40 p-2">
+                        <EditSecondApprovalInline
+                          entityKind="production_job"
+                          entityId={selectedIntel.jobId}
+                          value={conversionSignoffEditApprovalId}
+                          onChange={setConversionSignoffEditApprovalId}
+                          className="!border-amber-300/50 !bg-amber-950/60 !text-amber-50"
+                        />
+                      </div>
+                    ) : null}
                     <button
                       type="button"
                       disabled={decisionBusy}

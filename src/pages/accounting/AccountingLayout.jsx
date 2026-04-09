@@ -1,7 +1,7 @@
-import React from 'react';
-import { Link, Outlet, useLocation } from 'react-router-dom';
+import React, { useMemo } from 'react';
+import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Building2 } from 'lucide-react';
-import { PageShell, PageHeader } from '../../components/layout';
+import { PageShell, PageHeader, PageTabs } from '../../components/layout';
 import { useWorkspace } from '../../context/WorkspaceContext';
 
 const links = [
@@ -15,6 +15,7 @@ const links = [
 
 export default function AccountingLayout() {
   const loc = useLocation();
+  const navigate = useNavigate();
   const ws = useWorkspace();
   const path = (loc.pathname || '/').replace(/\/$/, '') || '/';
   const viewAll = Boolean(ws?.session?.viewAllBranches);
@@ -22,12 +23,26 @@ export default function AccountingLayout() {
   const isHqRole = roleKey === 'admin' || roleKey === 'md' || roleKey === 'ceo';
   const canRollup = isHqRole && ws?.hasPermission?.('hq.view_all_branches');
 
+  const tabValue =
+    path === '/accounting' || path === '' ? '/accounting/overview' : path;
+
+  const accountingTabs = useMemo(
+    () => links.map((l) => ({ id: l.to, label: l.label })),
+    []
+  );
+
   return (
     <PageShell>
       <PageHeader
-        eyebrow="Headquarters"
         title="Accounting"
-        subtitle="Headquarters module for group charting, asset registers, product costing, ledger structure, and management statements. Operational cash and AP stay under Finance."
+        subtitle="Group charting, asset registers, product costing, ledger structure, and management statements. Operational cash and AP stay under Finance."
+        tabs={
+          <PageTabs
+            tabs={accountingTabs}
+            value={tabValue}
+            onChange={(id) => navigate(id)}
+          />
+        }
       />
 
       {canRollup && !viewAll ? (
@@ -45,26 +60,6 @@ export default function AccountingLayout() {
           </div>
         </div>
       ) : null}
-
-      <nav
-        className="mb-6 flex flex-wrap gap-1 border-b border-slate-200 pb-3 -mx-1 px-1 overflow-x-auto"
-        aria-label="Accounting sections"
-      >
-        {links.map((l) => {
-          const active = path === l.to || (l.to === '/accounting/overview' && path === '/accounting');
-          return (
-            <Link
-              key={l.to}
-              to={l.to}
-              className={`inline-flex min-h-11 shrink-0 items-center rounded-lg px-3 py-2 text-xs font-bold transition-colors whitespace-nowrap ${
-                active ? 'bg-[#134e4a] text-white' : 'text-slate-700 hover:bg-slate-100'
-              }`}
-            >
-              {l.label}
-            </Link>
-          );
-        })}
-      </nav>
 
       <Outlet />
     </PageShell>

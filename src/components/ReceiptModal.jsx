@@ -82,7 +82,7 @@ const ReceiptModal = ({
   const [qSearch, setQSearch] = useState('');
   const [showQSearch, setShowQSearch] = useState(false);
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     if (!isOpen) return;
     const le = editData?._ledgerEntry;
@@ -107,13 +107,15 @@ const ReceiptModal = ({
     setShowQSearch(false);
 
     if (isRc) {
+      const showAmt =
+        editData.cashReceivedNgn != null ? editData.cashReceivedNgn : editData.amountNgn;
       setPaymentLines([
         {
           id: newLineId(),
           payeeName: editData.handledBy ?? '',
           treasuryAccountId: defaultAccountId,
           lineDate: vd,
-          amount: editData.amountNgn != null ? String(editData.amountNgn) : '',
+          amount: showAmt != null ? String(showAmt) : '',
         },
       ]);
     } else if (isLedgerRow) {
@@ -136,13 +138,14 @@ const ReceiptModal = ({
     editData?.quotationRef,
     editData?.dateISO,
     editData?.amountNgn,
+    editData?.cashReceivedNgn,
     editData?.handledBy,
     editData?.customer,
     editData?._ledgerEntry,
     defaultAccountId,
     ledgerNonce,
   ]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   const selectedQuotation = useMemo(
     () => quotations.find((q) => q.id === quotationRef) ?? null,

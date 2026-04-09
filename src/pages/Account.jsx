@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Landmark,
   Plus,
@@ -19,9 +19,11 @@ import {
   RotateCcw,
   Printer,
   Paperclip,
+  Banknote,
 } from 'lucide-react';
 
 import { MainPanel, PageHeader, PageShell, PageTabs, ModalFrame } from '../components/layout';
+import { EditSecondApprovalInline } from '../components/EditSecondApprovalInline';
 import { formatNgn } from '../Data/mockData';
 import { useToast } from '../context/ToastContext';
 import { useInventory } from '../context/InventoryContext';
@@ -34,11 +36,13 @@ import {
   refundOutstandingAmount,
 } from '../lib/refundsStore';
 import { liveReceivablesNgn, openAuditQueue } from '../lib/liveAnalytics';
+import { receiptCashReceivedNgn } from '../lib/salesReceiptsList';
 import { printExpenseRequestRecord } from '../lib/expenseRequestPrint';
 import { EXPENSE_CATEGORY_OPTIONS } from '../../shared/expenseCategories.js';
 
 const TAB_LABELS = {
   treasury: 'Treasury',
+  receipts: 'Receipts & bank recon',
   payables: 'Payables',
   movements: 'Fund movements',
   disbursements: 'Expenses & requests',
@@ -96,6 +100,7 @@ function expenseRequestLineTotal(row) {
 const TREASURY_STATEMENT_TYPE_LABEL = {
   RECEIPT_IN: 'Customer receipt',
   ADVANCE_IN: 'Advance deposit',
+  BANK_RECON_ADJUSTMENT: 'Bank reconciliation settlement',
   INTERNAL_TRANSFER_IN: 'Transfer in',
   INTERNAL_TRANSFER_OUT: 'Transfer out',
   EXPENSE: 'Expense',
@@ -108,8 +113,18 @@ const TREASURY_STATEMENT_TYPE_LABEL = {
   TRANSPORT_PAYMENT: 'Transport / haulage',
 };
 
+const TREASURY_SOURCE_KIND_LABEL = {
+  INTER_BRANCH_LOAN: 'Inter-branch lending (disbursement)',
+  INTER_BRANCH_LOAN_REPAY: 'Inter-branch lending (repayment)',
+};
+
 function treasuryMovementStatementLabel(m) {
-  const kind = TREASURY_STATEMENT_TYPE_LABEL[m.type] || m.type || 'Treasury movement';
+  const sourceLabel = TREASURY_SOURCE_KIND_LABEL[m.sourceKind];
+  const kind =
+    sourceLabel ||
+    TREASURY_STATEMENT_TYPE_LABEL[m.type] ||
+    m.type ||
+    'Treasury movement';
   const bits = [kind];
   if (m.counterpartyName) bits.push(m.counterpartyName);
   if (m.reference) bits.push(`Ref ${m.reference}`);
@@ -120,6 +135,7 @@ function treasuryMovementStatementLabel(m) {
 const Account = () => {
   const location = useLocation();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { show: showToast } = useToast();
   const { purchaseOrders, setPurchaseOrderStatus } = useInventory();
   const ws = useWorkspace();
@@ -134,6 +150,14 @@ const Account = () => {
   const [showApPaymentModal, setShowApPaymentModal] = useState(false);
   const [showRefundPayModal, setShowRefundPayModal] = useState(false);
   const [showBankReconModal, setShowBankReconModal] = useState(false);
+  const [showBankImportModal, setShowBankImportModal] = useState(false);
+  const [bankImportJson, setBankImportJson] = useState('[\n  { "bankDateISO": "2026-04-01", "description": "Example credit", "amountNgn": 50000 }\n]');
+  const [bankImportBusy, setBankImportBusy] = useState(false);
+  const [showBankCsvModal, setShowBankCsvModal] = useState(false);
+  const [bankCsvText, setBankCsvText] = useState(
+    'bankDateISO,description,amountNgn\n2026-04-01,"Example inflow",100000\n2026-04-02,Bank charge,-2500'
+  );
+  const [bankCsvBusy, setBankCsvBusy] = useState(false);
   const [statementAccount, setStatementAccount] = useState(null);
   const [selectedPayment, setSelectedPayment] = useState(null);
   const [selectedAp, setSelectedAp] = useState(null);
@@ -163,6 +187,28 @@ const Account = () => {
     amountNgn: '',
     reference: '',
   });
+  const [interBranchLoans, setInterBranchLoans] = useState([]);
+  const [interBranchBalances, setInterBranchBalances] = useState([]);
+  const [interBranchBusy, setInterBranchBusy] = useState(false);
+  const [interBranchForm, setInterBranchForm] = useState({
+    lenderBranchId: '',
+    borrowerBranchId: '',
+    fromTreasuryAccountId: '',
+    toTreasuryAccountId: '',
+    principalNgn: '',
+    dateISO: new Date().toISOString().slice(0, 10),
+    reference: '',
+    proposedNote: '',
+    repaymentPlanJson: '[\n  { "dueDateISO": "2026-06-30", "amountNgn": 500000, "note": "First instalment" }\n]',
+  });
+  const [interBranchRepayForm, setInterBranchRepayForm] = useState({
+    loanId: '',
+    amountNgn: '',
+    dateISO: new Date().toISOString().slice(0, 10),
+    fromTreasuryAccountId: '',
+    toTreasuryAccountId: '',
+    note: '',
+  });
   const [apPayForm, setApPayForm] = useState({
     amountNgn: '',
     paymentMethod: 'Bank Transfer',
@@ -180,7 +226,14 @@ const Account = () => {
     branchId: '',
   });
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+  const [receiptFinanceRow, setReceiptFinanceRow] = useState(null);
+  const [receiptBankAmtInput, setReceiptBankAmtInput] = useState('');
+  const [receiptClearDelivery, setReceiptClearDelivery] = useState(false);
+  const [receiptFinanceBusy, setReceiptFinanceBusy] = useState(false);
+  const [receiptFinanceEditApprovalId, setReceiptFinanceEditApprovalId] = useState('');
+  const [bankReconEditAidByLine, setBankReconEditAidByLine] = useState({});
+
+   
   useEffect(() => {
     if (!ws?.hasWorkspaceData || !ws?.snapshot) {
       setBankAccounts([]);
@@ -248,7 +301,7 @@ const Account = () => {
       setBankReconciliation([]);
     }
   }, [ws?.snapshot, ws?.hasWorkspaceData]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   const [expenseForm, setExpenseForm] = useState({
     expenseType: 'COGS — materials & stock',
@@ -269,12 +322,15 @@ const Account = () => {
     attachment: null,
   });
   const payRequestFileRef = useRef(null);
+  const bankCsvFileRef = useRef(null);
   const activeActorLabel = ws?.session?.user?.displayName ?? 'Finance';
   const canApproveRequests = ws?.hasPermission?.('finance.approve');
   const canPayRequests = ws?.hasPermission?.('finance.pay');
   const canReconcileBank = ws?.hasPermission?.('finance.post');
 
   const [reconDrafts, setReconDrafts] = useState({});
+  const [settledDrafts, setSettledDrafts] = useState({});
+  const [treasuryDrafts, setTreasuryDrafts] = useState({});
   const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
   const branchOptions = useMemo(
     () => ws?.snapshot?.workspaceBranches ?? ws?.session?.branches ?? [],
@@ -287,13 +343,6 @@ const Account = () => {
       ),
     [branchOptions]
   );
-  const branchScopeLabel = useMemo(() => {
-    if (ws?.viewAllBranches) return 'All branches (HQ roll-up)';
-    const id = String(ws?.branchScope || ws?.session?.currentBranchId || '').trim();
-    if (!id) return 'Current branch';
-    return branchNameById[id] ? `Branch: ${branchNameById[id]}` : `Branch: ${id}`;
-  }, [branchNameById, ws?.branchScope, ws?.session?.currentBranchId, ws?.viewAllBranches]);
-
   const totals = useMemo(() => {
     const cash = bankAccounts.reduce((acc, curr) => acc + curr.balance, 0);
     return { cash };
@@ -318,19 +367,29 @@ const Account = () => {
   );
 
   const treasuryTransferRows = useMemo(() => {
+    const transferKinds = new Set(['TREASURY_TRANSFER', 'INTER_BRANCH_LOAN', 'INTER_BRANCH_LOAN_REPAY']);
     return liveTreasuryMovements
-      .filter((m) => m.sourceKind === 'TREASURY_TRANSFER' && m.type === 'INTERNAL_TRANSFER_OUT')
+      .filter((m) => transferKinds.has(m.sourceKind) && m.type === 'INTERNAL_TRANSFER_OUT')
       .map((m) => {
         const twin = liveTreasuryMovements.find(
-          (row) => row.sourceKind === 'TREASURY_TRANSFER' && row.sourceId === m.sourceId && row.type === 'INTERNAL_TRANSFER_IN'
+          (row) =>
+            row.sourceKind === m.sourceKind &&
+            row.sourceId === m.sourceId &&
+            row.type === 'INTERNAL_TRANSFER_IN'
         );
+        const tag =
+          m.sourceKind === 'INTER_BRANCH_LOAN'
+            ? 'Inter-branch lend'
+            : m.sourceKind === 'INTER_BRANCH_LOAN_REPAY'
+              ? 'Inter-branch repay'
+              : 'Transfer';
         return {
           id: m.sourceId || m.id,
           at: String(m.postedAtISO || '').slice(0, 10),
           fromName: m.accountName,
           toName: twin?.accountName || '—',
           amountNgn: Math.abs(m.amountNgn || 0),
-          reference: m.reference || twin?.reference || '—',
+          reference: [tag, m.reference || twin?.reference || '—'].filter(Boolean).join(' · '),
         };
       });
   }, [liveTreasuryMovements]);
@@ -382,7 +441,8 @@ const Account = () => {
   );
 
   const reconciliationFlags = useMemo(
-    () => bankReconciliation.filter((l) => l.status === 'Review').length,
+    () =>
+      bankReconciliation.filter((l) => l.status === 'Review' || l.status === 'PendingManager').length,
     [bankReconciliation]
   );
 
@@ -395,7 +455,10 @@ const Account = () => {
     showApPaymentModal ||
     showRefundPayModal ||
     showBankReconModal ||
-    statementAccount != null;
+    showBankImportModal ||
+    showBankCsvModal ||
+    statementAccount != null ||
+    receiptFinanceRow != null;
 
   const accountStatementLines = useMemo(() => {
     if (!statementAccount) return [];
@@ -410,6 +473,34 @@ const Account = () => {
         return String(b.id || '').localeCompare(String(a.id || ''));
       });
   }, [statementAccount, liveTreasuryMovements]);
+
+   
+  useEffect(() => {
+    const ref = new URLSearchParams(location.search).get('treasuryRef')?.trim();
+    if (!ref) return;
+    setActiveTab('treasury');
+    setSearchQuery(ref);
+  }, [location.search]);
+
+  useEffect(() => {
+    const ref = new URLSearchParams(location.search).get('treasuryRef')?.trim();
+    if (!ref || !ws?.hasWorkspaceData) return;
+    const m = liveTreasuryMovements.find(
+      (x) =>
+        String(x.id) === ref ||
+        String(x.reference || '')
+          .trim()
+          .toLowerCase() === ref.toLowerCase() ||
+        String(x.sourceId || '')
+          .trim()
+          .toLowerCase() === ref.toLowerCase()
+    );
+    if (m) {
+      const acc = bankAccounts.find((a) => Number(a.id) === Number(m.treasuryAccountId));
+      if (acc) setStatementAccount(acc);
+    }
+  }, [location.search, liveTreasuryMovements, bankAccounts, ws?.hasWorkspaceData]);
+   
 
   const refundsAwaitingPay = useMemo(
     () => approvedRefundsAwaitingPayment(customerRefunds),
@@ -638,6 +729,7 @@ const Account = () => {
   const accountTabs = useMemo(
     () => [
       { id: 'treasury', icon: <Landmark size={16} />, label: 'Treasury' },
+      { id: 'receipts', icon: <Banknote size={16} />, label: 'Receipts & recon' },
       { id: 'payables', icon: <Truck size={16} />, label: 'Payables' },
       { id: 'movements', icon: <ArrowRightLeft size={16} />, label: 'Movements' },
       { id: 'disbursements', icon: <ClipboardList size={16} />, label: 'Expenses & requests' },
@@ -645,6 +737,23 @@ const Account = () => {
     ],
     []
   );
+
+  const handleAccountTabChange = useCallback(
+    (tabId) => {
+      setActiveTab(tabId);
+      if (tabId === 'treasury') {
+        setSearchParams({}, { replace: true });
+      } else {
+        setSearchParams({ tab: tabId }, { replace: true });
+      }
+    },
+    [setSearchParams]
+  );
+
+  useEffect(() => {
+    const t = searchParams.get('tab');
+    if (t && TAB_LABELS[t]) setActiveTab(t);
+  }, [searchParams]);
 
   const headerAction = () => {
     if (activeTab === 'treasury') setShowAddBank(true);
@@ -683,14 +792,14 @@ const Account = () => {
           ? 'New transfer'
           : null;
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     const tab = location.state?.accountsTab;
     if (tab !== 'requests' && tab !== 'payments') return;
-    setActiveTab('disbursements');
+    handleAccountTabChange('disbursements');
     navigate(location.pathname, { replace: true, state: {} });
-  }, [location.state, location.pathname, navigate]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+  }, [location.state, location.pathname, navigate, handleAccountTabChange]);
+   
 
   const reconSuggestionsById = useMemo(() => {
     const rows = ws?.hasWorkspaceData ? liveTreasuryMovements : [];
@@ -718,9 +827,13 @@ const Account = () => {
         if (dayDiff > 3) continue;
         const score = dayDiff;
         if (!best || score < best.score) {
+          const parts =
+            m.sourceKind === 'LEDGER_RECEIPT' && m.sourceId
+              ? [m.sourceId, m.reference, m.counterpartyName, m.note]
+              : [m.reference, m.counterpartyName, m.note, m.sourceId];
           best = {
             score,
-            text: [m.reference, m.counterpartyName, m.note, m.sourceId].filter(Boolean).join(' · ') || m.type || '',
+            text: parts.filter(Boolean).join(' · ') || m.type || '',
           };
         }
       }
@@ -733,6 +846,85 @@ const Account = () => {
     }
     return out;
   }, [bankReconciliation, liveTreasuryMovements, ws?.hasWorkspaceData]);
+
+  const salesReceipts = useMemo(
+    () =>
+      ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.receipts) ? [...ws.snapshot.receipts] : [],
+    [ws?.hasWorkspaceData, ws?.snapshot?.receipts]
+  );
+
+  const filteredSalesReceipts = useMemo(() => {
+    const qq = searchQuery.trim().toLowerCase();
+    if (!qq) return salesReceipts;
+    return salesReceipts.filter((r) => {
+      const id = String(r.id || '').toLowerCase();
+      const cust = String(r.customer || '').toLowerCase();
+      const qref = String(r.quotationRef || '').toLowerCase();
+      return id.includes(qq) || cust.includes(qq) || qref.includes(qq);
+    });
+  }, [salesReceipts, searchQuery]);
+
+  const canFinanceReceiptSettlement = Boolean(
+    ws?.hasPermission?.('finance.pay') || ws?.hasPermission?.('finance.post')
+  );
+
+  const openReceiptFinance = useCallback((r) => {
+    setReceiptFinanceEditApprovalId('');
+    setReceiptFinanceRow(r);
+    const allocated = Number(r.amountNgn) || 0;
+    const cash = r.cashReceivedNgn != null ? Number(r.cashReceivedNgn) || allocated : allocated;
+    const br =
+      r.bankReceivedAmountNgn != null ? Number(r.bankReceivedAmountNgn) : cash;
+    setReceiptBankAmtInput(String(br));
+    setReceiptClearDelivery(Boolean(r.financeDeliveryClearedAtISO));
+  }, []);
+
+  const saveReceiptFinance = useCallback(
+    async (e) => {
+      e?.preventDefault?.();
+      if (!receiptFinanceRow?.id) return;
+      if (!ws?.canMutate) {
+        showToast(
+          ws?.usingCachedData
+            ? 'Server is offline or session expired — refresh the page, then sign in and try again.'
+            : 'Connect to the API server to save settlement.',
+          { variant: 'error' }
+        );
+        return;
+      }
+      setReceiptFinanceBusy(true);
+      try {
+        const { ok, status, data } = await apiFetch(
+          `/api/sales-receipts/${encodeURIComponent(receiptFinanceRow.id)}/finance-settlement`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              bankReceivedAmountNgn: Math.round(
+                Number(String(receiptBankAmtInput).replace(/,/g, '')) || 0
+              ),
+              clearForDelivery: receiptClearDelivery,
+              ...(receiptFinanceEditApprovalId.trim()
+                ? { editApprovalId: receiptFinanceEditApprovalId.trim() }
+                : {}),
+            }),
+          }
+        );
+        if (!ok || !data?.ok) {
+          const hint = data?.code === 'CSRF_INVALID' ? ' Refresh the page and try again.' : '';
+          showToast((data?.error || `Could not save settlement (${status}).`) + hint, { variant: 'error' });
+          return;
+        }
+        showToast('Receipt settlement saved.');
+        setReceiptFinanceEditApprovalId('');
+        setReceiptFinanceRow(null);
+        await ws.refresh();
+      } finally {
+        setReceiptFinanceBusy(false);
+      }
+    },
+    [receiptFinanceRow, receiptBankAmtInput, receiptClearDelivery, receiptFinanceEditApprovalId, ws, showToast]
+  );
 
   const saveExpense = async (e) => {
     e.preventDefault();
@@ -945,6 +1137,175 @@ const Account = () => {
     showToast('Fund movement posted — both accounts updated.');
   };
 
+  useEffect(() => {
+    if (activeTab !== 'movements' || !ws?.hasWorkspaceData || !ws.hasPermission('finance.view')) return;
+    let cancelled = false;
+    (async () => {
+      const { ok, data } = await apiFetch('/api/inter-branch-loans');
+      if (cancelled || !ok || !data?.ok) return;
+      setInterBranchLoans(data.loans || []);
+      setInterBranchBalances(data.balances || []);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, ws?.hasWorkspaceData, ws?.refreshEpoch]);
+
+  const canProposeInterBranch =
+    ws?.hasPermission?.('treasury.manage') && ws?.hasPermission?.('finance.post');
+  const canMdInterBranchLoan = ws?.hasPermission?.('inter_branch_loan.md_approve');
+  const canRepayInterBranch =
+    ws?.hasPermission?.('treasury.manage') || ws?.hasPermission?.('finance.pay');
+
+  const submitInterBranchLoan = async (e) => {
+    e.preventDefault();
+    let repaymentPlan;
+    try {
+      repaymentPlan = JSON.parse(interBranchForm.repaymentPlanJson || '[]');
+      if (!Array.isArray(repaymentPlan)) throw new Error('Repayment plan must be a JSON array.');
+    } catch (err) {
+      showToast(String(err.message || err) || 'Invalid repayment plan JSON.', { variant: 'error' });
+      return;
+    }
+    const principalNgn = Number(interBranchForm.principalNgn);
+    if (
+      !interBranchForm.lenderBranchId ||
+      !interBranchForm.borrowerBranchId ||
+      interBranchForm.lenderBranchId === interBranchForm.borrowerBranchId
+    ) {
+      showToast('Choose two different branches.', { variant: 'error' });
+      return;
+    }
+    const fromTa = Number(interBranchForm.fromTreasuryAccountId);
+    const toTa = Number(interBranchForm.toTreasuryAccountId);
+    if (!fromTa || !toTa || fromTa === toTa) {
+      showToast('Choose two different treasury accounts.', { variant: 'error' });
+      return;
+    }
+    if (Number.isNaN(principalNgn) || principalNgn <= 0) {
+      showToast('Enter a valid principal amount.', { variant: 'error' });
+      return;
+    }
+    if (!ws?.canMutate) {
+      showToast(
+        ws?.usingCachedData
+          ? 'Reconnect to propose inter-branch loans — workspace is read-only.'
+          : 'Connect to the API to propose inter-branch loans.',
+        { variant: 'info' }
+      );
+      return;
+    }
+    setInterBranchBusy(true);
+    const { ok, data } = await apiFetch('/api/inter-branch-loans', {
+      method: 'POST',
+      body: JSON.stringify({
+        lenderBranchId: interBranchForm.lenderBranchId,
+        borrowerBranchId: interBranchForm.borrowerBranchId,
+        fromTreasuryAccountId: fromTa,
+        toTreasuryAccountId: toTa,
+        principalNgn,
+        dateISO: interBranchForm.dateISO,
+        reference: interBranchForm.reference.trim(),
+        proposedNote: interBranchForm.proposedNote.trim(),
+        repaymentPlan,
+      }),
+    });
+    setInterBranchBusy(false);
+    if (!ok || !data?.ok) {
+      showToast(data?.error || 'Could not save inter-branch loan.', { variant: 'error' });
+      return;
+    }
+    await ws.refresh();
+    showToast('Inter-branch loan proposed — awaiting MD approval.');
+    setInterBranchForm((f) => ({
+      ...f,
+      principalNgn: '',
+      reference: '',
+      proposedNote: '',
+    }));
+  };
+
+  const mdApproveInterBranch = async (loanId) => {
+    if (!loanId || !ws?.canMutate) return;
+    setInterBranchBusy(true);
+    const { ok, data } = await apiFetch(`/api/inter-branch-loans/${encodeURIComponent(loanId)}/md-approve`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    setInterBranchBusy(false);
+    if (!ok || !data?.ok) {
+      showToast(data?.error || 'MD approval failed.', { variant: 'error' });
+      return;
+    }
+    await ws.refresh();
+    showToast('MD approved — funds moved per proposal.');
+  };
+
+  const mdRejectInterBranch = async (loanId) => {
+    if (!loanId || !ws?.canMutate) return;
+    const note = window.prompt('Optional rejection note') || '';
+    setInterBranchBusy(true);
+    const { ok, data } = await apiFetch(`/api/inter-branch-loans/${encodeURIComponent(loanId)}/md-reject`, {
+      method: 'POST',
+      body: JSON.stringify({ note }),
+    });
+    setInterBranchBusy(false);
+    if (!ok || !data?.ok) {
+      showToast(data?.error || 'Could not reject loan.', { variant: 'error' });
+      return;
+    }
+    await ws.refresh();
+    showToast('Loan proposal rejected.');
+  };
+
+  const submitInterBranchRepay = async (e) => {
+    e.preventDefault();
+    const loanId = String(interBranchRepayForm.loanId || '').trim();
+    const amount = Number(interBranchRepayForm.amountNgn);
+    const fromTa = Number(interBranchRepayForm.fromTreasuryAccountId);
+    const toTa = Number(interBranchRepayForm.toTreasuryAccountId);
+    if (!loanId) {
+      showToast('Select a loan.', { variant: 'error' });
+      return;
+    }
+    if (Number.isNaN(amount) || amount <= 0) {
+      showToast('Enter a valid repayment amount.', { variant: 'error' });
+      return;
+    }
+    if (!fromTa || !toTa || fromTa === toTa) {
+      showToast('Choose two different treasury accounts for repayment.', { variant: 'error' });
+      return;
+    }
+    if (!ws?.canMutate) {
+      showToast('Connect to the API to post repayments.', { variant: 'info' });
+      return;
+    }
+    setInterBranchBusy(true);
+    const { ok, data } = await apiFetch(`/api/inter-branch-loans/${encodeURIComponent(loanId)}/repay`, {
+      method: 'POST',
+      body: JSON.stringify({
+        amountNgn: amount,
+        dateISO: interBranchRepayForm.dateISO,
+        fromTreasuryAccountId: fromTa,
+        toTreasuryAccountId: toTa,
+        note: interBranchRepayForm.note.trim(),
+      }),
+    });
+    setInterBranchBusy(false);
+    if (!ok || !data?.ok) {
+      showToast(data?.error || 'Repayment failed.', { variant: 'error' });
+      return;
+    }
+    await ws.refresh();
+    showToast('Repayment posted.');
+    setInterBranchRepayForm((f) => ({
+      ...f,
+      loanId: '',
+      amountNgn: '',
+      note: '',
+    }));
+  };
+
   const saveApPayment = async (e) => {
     e.preventDefault();
     if (!selectedAp) return;
@@ -1112,17 +1473,87 @@ const Account = () => {
     const systemMatch =
       systemMatchOverride !== undefined
         ? String(systemMatchOverride).trim()
-        : (reconDrafts[line.id] ?? line.systemMatch ?? '').trim();
-    const { ok, data } = await apiFetch(`/api/bank-reconciliation/${encodeURIComponent(line.id)}`, {
+        : (
+            reconDrafts[line.id] ??
+            line.systemMatch ??
+            reconSuggestionsById[line.id]?.text ??
+            ''
+          ).trim();
+    const aid = String(bankReconEditAidByLine[line.id] || '').trim();
+    const body = {
+      status,
+      systemMatch,
+      ...(aid ? { editApprovalId: aid } : {}),
+    };
+    if (status === 'Matched') {
+      const sd = settledDrafts[line.id];
+      if (sd != null && String(sd).trim() !== '') {
+        const n = Math.round(Number(String(sd).replace(/,/g, '')));
+        if (Number.isFinite(n)) body.settledAmountNgn = n;
+      }
+      const td = treasuryDrafts[line.id];
+      if (td != null && String(td).trim() !== '') {
+        body.treasuryAccountId = Number(td);
+      }
+    }
+    const { ok, status: httpStatus, data } = await apiFetch(`/api/bank-reconciliation/${encodeURIComponent(line.id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status, systemMatch }),
+      body: JSON.stringify(body),
     });
     if (!ok || !data?.ok) {
-      showToast(data?.error || 'Could not update bank line.', { variant: 'error' });
+      const hint = data?.code === 'CSRF_INVALID' ? ' Refresh the page and sign in again if needed.' : '';
+      showToast(
+        data?.error ||
+          (httpStatus === 403 ? 'Permission denied or invalid session.' : `Could not update bank line (${httpStatus}).`) +
+            hint,
+        { variant: 'error' }
+      );
       return;
     }
-    showToast(status === 'Matched' ? 'Statement line marked matched.' : 'Bank line updated.');
+    if (data.status === 'PendingManager') {
+      showToast(
+        data.needsManagerClearance
+          ? 'Variance above 0.1% — queued for manager clearance before treasury adjusts.'
+          : 'Bank line updated.',
+        { variant: 'info' }
+      );
+    } else {
+      showToast(status === 'Matched' ? 'Statement line marked matched.' : 'Bank line updated.');
+    }
+    setBankReconEditAidByLine((d) => {
+      const next = { ...d };
+      delete next[line.id];
+      return next;
+    });
+    setSettledDrafts((d) => {
+      const next = { ...d };
+      delete next[line.id];
+      return next;
+    });
+    setTreasuryDrafts((d) => {
+      const next = { ...d };
+      delete next[line.id];
+      return next;
+    });
+    await ws.refresh();
+  };
+
+  const approveBankReconVariance = async (line) => {
+    if (!ws?.canMutate) {
+      showToast('Connect to the API server to approve.', { variant: 'info' });
+      return;
+    }
+    const { ok, status, data } = await apiFetch(
+      `/api/bank-reconciliation/${encodeURIComponent(line.id)}/approve-variance`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }
+    );
+    if (!ok || !data?.ok) {
+      const hint = data?.code === 'CSRF_INVALID' ? ' Refresh the page and try again.' : '';
+      showToast((data?.error || `Could not approve variance (${status}).`) + hint, { variant: 'error' });
+      return;
+    }
+    showToast('Manager clearance recorded — treasury adjusted and line matched.');
     await ws.refresh();
   };
 
@@ -1185,21 +1616,300 @@ const Account = () => {
     await ws.refresh();
   };
 
+  const runBankImport = async (e) => {
+    e?.preventDefault?.();
+    if (!ws?.canMutate) {
+      showToast('Connect to the API server to import lines.', { variant: 'info' });
+      return;
+    }
+    let lines;
+    try {
+      lines = JSON.parse(bankImportJson);
+    } catch {
+      showToast('Paste valid JSON: an array of { bankDateISO, description, amountNgn }.', { variant: 'error' });
+      return;
+    }
+    if (!Array.isArray(lines) || lines.length === 0) {
+      showToast('JSON must be a non-empty array of lines.', { variant: 'error' });
+      return;
+    }
+    setBankImportBusy(true);
+    const { ok, data } = await apiFetch('/api/bank-reconciliation/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lines }),
+    });
+    setBankImportBusy(false);
+    if (!ok || !data) {
+      showToast('Import failed.', { variant: 'error' });
+      return;
+    }
+    if (data.errorCount > 0) {
+      showToast(
+        `Imported ${data.createdCount} line(s); ${data.errorCount} row(s) failed. Check amounts and dates.`,
+        { variant: 'error' }
+      );
+    } else {
+      showToast(`Imported ${data.createdCount} statement line(s) — in review.`);
+      setShowBankImportModal(false);
+    }
+    await ws.refresh();
+  };
+
+  const runBankCsvImport = async (e) => {
+    e?.preventDefault?.();
+    if (!ws?.canMutate) {
+      showToast('Connect to the API server to import CSV.', { variant: 'info' });
+      return;
+    }
+    const csvText = String(bankCsvText ?? '').trim();
+    if (!csvText) {
+      showToast('Paste CSV text first.', { variant: 'error' });
+      return;
+    }
+    setBankCsvBusy(true);
+    const { ok, data } = await apiFetch('/api/bank-reconciliation/import-csv', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ csvText }),
+    });
+    setBankCsvBusy(false);
+    if (!ok || !data) {
+      showToast('CSV import failed.', { variant: 'error' });
+      return;
+    }
+    if (data.errorCount > 0) {
+      showToast(
+        `Imported ${data.createdCount} line(s); ${data.errorCount} row(s) failed. Check dates and amounts.`,
+        { variant: 'error' }
+      );
+    } else {
+      showToast(`Imported ${data.createdCount} line(s) from CSV.`);
+      setShowBankCsvModal(false);
+    }
+    await ws.refresh();
+  };
+
+  const bankReconSection = (
+    <div id="bank-reconciliation-panel" className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <h3 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest flex items-center gap-2">
+          <Landmark size={14} />
+          Bank reconciliation
+        </h3>
+        {canReconcileBank && ws?.canMutate ? (
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={openBankReconModal} className="z-btn-secondary !text-[10px] gap-1.5">
+              <Plus size={14} /> Add statement line
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowBankImportModal(true)}
+              className="z-btn-secondary !text-[10px] gap-1.5"
+            >
+              Import JSON
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowBankCsvModal(true)}
+              className="z-btn-secondary !text-[10px] gap-1.5"
+            >
+              Import CSV
+            </button>
+          </div>
+        ) : null}
+      </div>
+      <ul className="space-y-1.5">
+        {filteredReconciliation.map((line) => {
+          const amtLabel = `${formatNgn(Math.abs(line.amountNgn))}${line.amountNgn < 0 ? ' DR' : ' CR'}`;
+          const matchText = line.systemMatch ?? reconSuggestionsById[line.id]?.text ?? '—';
+          const meta2 = [matchText, line.branchId ? branchNameById[line.branchId] || line.branchId : null]
+            .filter(Boolean)
+            .join(' · ');
+          const statusChip =
+            line.status === 'Matched'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+              : line.status === 'Excluded'
+                ? 'border-slate-200 bg-slate-100 text-slate-600'
+                : line.status === 'PendingManager'
+                  ? 'border-violet-300 bg-violet-50 text-violet-900'
+                  : 'border-amber-200 bg-amber-50 text-amber-900';
+          const isCredit = line.amountNgn > 0;
+          const showSettleFields =
+            line.status === 'Review' && isCredit && canReconcileBank && ws?.canMutate;
+          return (
+            <li
+              key={line.id}
+              className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md py-1.5 px-2.5 shadow-sm"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
+                <div className="min-w-0 leading-tight flex-1">
+                  <div className="flex items-center justify-between gap-2 min-w-0">
+                    <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
+                      <span className="tabular-nums text-slate-600 font-semibold">{line.bankDateISO}</span>
+                      <span className="font-medium text-slate-600"> · {line.description}</span>
+                    </p>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span
+                        className={`text-[11px] font-black tabular-nums ${line.amountNgn < 0 ? 'text-red-700' : 'text-emerald-700'}`}
+                      >
+                        {amtLabel}
+                      </span>
+                      <span
+                        className={`text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border ${statusChip}`}
+                      >
+                        {line.status}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2" title={meta2}>
+                    {meta2}
+                  </p>
+                  {line.matchedSystemAmountNgn != null &&
+                  (line.status === 'Matched' ||
+                    line.status === 'PendingManager' ||
+                    Number(line.varianceNgn || 0) !== 0) ? (
+                    <p className="text-[9px] text-slate-600 mt-1">
+                      Book {formatNgn(line.matchedSystemAmountNgn)}
+                      {line.settledAmountNgn != null ? ` · Settled ${formatNgn(line.settledAmountNgn)}` : ''}
+                      {line.varianceNgn != null && line.varianceNgn !== 0
+                        ? ` · Variance ${formatNgn(line.varianceNgn)} (${(Number(line.variancePercent) || 0).toFixed(4)}%)`
+                        : ''}
+                    </p>
+                  ) : null}
+                  {line.status === 'PendingManager' ? (
+                    <p className="text-[9px] text-violet-800 font-semibold mt-1">
+                      Awaiting manager clearance — variance above 0.1% of book amount.
+                      {line.managerClearedAtISO ? ` Cleared ${line.managerClearedAtISO.slice(0, 10)}.` : ''}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+              {showSettleFields ? (
+                <div className="pt-1.5 mt-1 border-t border-dashed border-slate-200 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[8px] font-bold text-slate-500 uppercase block mb-0.5">
+                      Settled amount (₦) — if not same as statement
+                    </label>
+                    <input
+                      type="number"
+                      step="1"
+                      value={
+                        settledDrafts[line.id] ??
+                        (line.amountNgn != null ? String(line.amountNgn) : '')
+                      }
+                      onChange={(e) =>
+                        setSettledDrafts((d) => ({ ...d, [line.id]: e.target.value }))
+                      }
+                      placeholder={String(line.amountNgn)}
+                      className="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-[11px] outline-none focus:ring-2 focus:ring-[#134e4a]/15 tabular-nums"
+                    />
+                    <button
+                      type="button"
+                      className="text-[8px] font-bold text-teal-700 mt-0.5 uppercase hover:underline"
+                      onClick={() =>
+                        setSettledDrafts((d) => ({ ...d, [line.id]: String(line.amountNgn) }))
+                      }
+                    >
+                      Reset to statement amount
+                    </button>
+                  </div>
+                  <div>
+                    <label className="text-[8px] font-bold text-slate-500 uppercase block mb-0.5">
+                      Treasury account (for adjustment)
+                    </label>
+                    <select
+                      value={treasuryDrafts[line.id] ?? ''}
+                      onChange={(e) =>
+                        setTreasuryDrafts((d) => ({ ...d, [line.id]: e.target.value }))
+                      }
+                      className="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-[11px] outline-none focus:ring-2 focus:ring-[#134e4a]/15"
+                    >
+                      <option value="">Auto (from receipt)</option>
+                      {bankAccounts.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              ) : null}
+              {line.status === 'Review' && canReconcileBank && ws?.canMutate ? (
+                <div className="pt-1.5 mt-1 border-t border-dashed border-slate-200 flex flex-col sm:flex-row sm:items-center gap-2">
+                  <input
+                    type="text"
+                    value={reconDrafts[line.id] ?? line.systemMatch ?? ''}
+                    onChange={(e) => setReconDrafts((d) => ({ ...d, [line.id]: e.target.value }))}
+                    placeholder="Receipt id e.g. LE-… or RC-… (first token is used)"
+                    className="flex-1 min-w-0 rounded-lg border border-gray-200 bg-white px-3 py-2 text-[11px] outline-none focus:ring-2 focus:ring-[#134e4a]/15"
+                  />
+                  {reconSuggestionsById[line.id] ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setReconDrafts((d) => ({
+                          ...d,
+                          [line.id]: reconSuggestionsById[line.id].text,
+                        }))
+                      }
+                      className="rounded-lg border border-teal-200 bg-teal-50 text-teal-800 px-3 py-2 text-[10px] font-bold uppercase tracking-wide"
+                    >
+                      Use suggestion ({reconSuggestionsById[line.id].confidence})
+                    </button>
+                  ) : null}
+                  <EditSecondApprovalInline
+                    entityKind="bank_reconciliation_line"
+                    entityId={line.id}
+                    value={bankReconEditAidByLine[line.id] || ''}
+                    onChange={(v) => setBankReconEditAidByLine((d) => ({ ...d, [line.id]: v }))}
+                    className="mt-2"
+                  />
+                  <div className="flex flex-wrap gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => saveBankReconLine(line, 'Matched')}
+                      className="rounded-lg bg-[#134e4a] text-white px-3 py-2 text-[10px] font-bold uppercase tracking-wide"
+                    >
+                      Mark matched
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => saveBankReconLine(line, 'Excluded', 'Excluded — not applicable')}
+                      className="rounded-lg border border-gray-200 bg-white text-gray-600 px-3 py-2 text-[10px] font-bold uppercase tracking-wide"
+                    >
+                      Exclude
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {line.status === 'PendingManager' && canApproveRequests && ws?.canMutate ? (
+                <div className="pt-1.5 mt-1 border-t border-dashed border-violet-200">
+                  <button
+                    type="button"
+                    onClick={() => approveBankReconVariance(line)}
+                    className="rounded-lg bg-violet-700 text-white px-3 py-2 text-[10px] font-bold uppercase tracking-wide"
+                  >
+                    Approve variance (manager)
+                  </button>
+                </div>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+
   return (
     <PageShell blurred={isAnyModalOpen}>
       <PageHeader
-        eyebrow="Finance"
         title="Finance & accounts"
-        subtitle="Receivables, payables, treasury, approvals, and reconciliation from live records"
-        actions={
-          <PageTabs tabs={accountTabs} value={activeTab} onChange={setActiveTab} />
-        }
+        subtitle="Treasury, customer receipt settlement, bank reconciliation, payables, and approvals"
+        tabs={<PageTabs tabs={accountTabs} value={activeTab} onChange={handleAccountTabChange} />}
       />
-      <div className="mb-4 inline-flex items-center rounded-full border border-teal-100 bg-teal-50 px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-teal-800">
-        {branchScopeLabel}
-      </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
+      <div className="grid grid-cols-1 gap-8 lg:grid-cols-4">
         <div className="lg:col-span-1 space-y-6">
           <div className="z-card-dark">
             <h3 className="z-section-title-dark">Total liquidity</h3>
@@ -1213,7 +1923,7 @@ const Account = () => {
 
           <button
             type="button"
-            onClick={() => navigate('/sales', { state: { focusSalesTab: 'receipts' } })}
+            onClick={() => handleAccountTabChange('receipts')}
             className="w-full text-left z-card-muted hover:border-teal-100 transition-all cursor-pointer p-5"
           >
             <h3 className="z-section-title flex items-center gap-2">
@@ -1222,13 +1932,13 @@ const Account = () => {
             </h3>
             <p className="text-xl font-black text-[#134e4a]">{formatNgn(receivablesNgn)}</p>
             <p className="text-[10px] font-bold text-gray-400 mt-2 uppercase tracking-wide">
-              Open quotation balances · Receipts in Sales
+              Open balances · Settle receipts on Receipts &amp; recon tab
             </p>
           </button>
 
           <button
             type="button"
-            onClick={() => setActiveTab('payables')}
+            onClick={() => handleAccountTabChange('payables')}
             className="w-full text-left z-card-muted hover:border-teal-100 transition-all cursor-pointer p-5"
           >
             <h3 className="z-section-title flex items-center gap-2">
@@ -1314,6 +2024,7 @@ const Account = () => {
 
         <div className="lg:col-span-3">
           <MainPanel>
+            <>
             <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between mb-8">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-center min-w-0 w-full md:w-auto">
                 <h2 className="text-xl font-bold text-[#134e4a] shrink-0">
@@ -1348,13 +2059,121 @@ const Account = () => {
               ) : null}
             </div>
 
+            {activeTab === 'receipts' && (
+              <div className="space-y-10 animate-in fade-in duration-300">
+                <section className="space-y-3">
+                  <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+                    <div>
+                      <h3 className="text-xs font-bold uppercase tracking-widest text-[#134e4a]">
+                        Customer receipts
+                      </h3>
+                      <p className="text-[11px] text-slate-600 mt-1 max-w-3xl">
+                        Enter the amount that actually landed in the bank, then mark{' '}
+                        <span className="font-semibold">Cleared for delivery</span> when finance is satisfied.
+                        Sales no longer confirms receipts here — this desk owns settlement.
+                      </p>
+                    </div>
+                  </div>
+                  {filteredSalesReceipts.length === 0 ? (
+                    <p className="text-[10px] text-slate-500 py-8 text-center border border-dashed border-slate-200 rounded-lg">
+                      No receipts in this branch scope.
+                    </p>
+                  ) : (
+                    <ul className="space-y-1.5">
+                      {filteredSalesReceipts.map((r) => {
+                        const allocated = Number(r.amountNgn) || 0;
+                        const cash =
+                          r.cashReceivedNgn != null ? Number(r.cashReceivedNgn) || allocated : allocated;
+                        const bank =
+                          r.bankReceivedAmountNgn != null ? Number(r.bankReceivedAmountNgn) : null;
+                        const cleared = Boolean(r.financeDeliveryClearedAtISO);
+                        return (
+                          <li
+                            key={r.id}
+                            className="rounded-lg border border-slate-200/60 bg-white/70 py-2 px-3 flex flex-wrap items-center justify-between gap-2"
+                          >
+                            <div className="min-w-0">
+                              <p className="text-[11px] font-bold text-[#134e4a] font-mono">{r.id}</p>
+                              <p className="text-[9px] text-slate-500 truncate">
+                                {r.customer || '—'} · {r.quotationRef || '—'} · {r.dateISO || r.date || '—'}
+                              </p>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 shrink-0">
+                              <span className="text-[10px] font-bold text-slate-600 tabular-nums">
+                                Paid {formatNgn(cash)}
+                                {Math.round(allocated) !== Math.round(cash) ? (
+                                  <span className="text-slate-500 font-semibold">
+                                    {' '}
+                                    (quote {formatNgn(allocated)})
+                                  </span>
+                                ) : null}
+                                {bank != null && Math.round(bank) !== Math.round(cash) ? (
+                                  <span className="text-amber-800"> · Bank {formatNgn(bank)}</span>
+                                ) : null}
+                              </span>
+                              {cleared ? (
+                                <span className="text-[9px] font-bold uppercase px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900">
+                                  Cleared delivery
+                                </span>
+                              ) : (
+                                <span className="text-[9px] font-bold uppercase px-2 py-0.5 rounded-full bg-amber-100 text-amber-900">
+                                  Pending
+                                </span>
+                              )}
+                              {canFinanceReceiptSettlement && ws?.canMutate ? (
+                                <button
+                                  type="button"
+                                  onClick={() => openReceiptFinance(r)}
+                                  className="text-[9px] font-bold uppercase px-3 py-1.5 rounded-lg bg-[#134e4a] text-white hover:bg-[#0f3d3a]"
+                                >
+                                  Review
+                                </button>
+                              ) : null}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </section>
+
+                <section className="space-y-3 border-t border-slate-100 pt-8">
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-[#134e4a]">
+                    Bank statement lines
+                  </h3>
+                  <p className="text-[11px] text-slate-600 mb-4 leading-relaxed max-w-3xl">
+                    Match statement lines to a <span className="font-semibold">sales receipt id</span> (posted
+                    receipts are usually <span className="font-semibold">LE-…</span>; legacy rows may show{' '}
+                    <span className="font-semibold">RC-…</span>). Put the id first if you add notes. Variance rules
+                    and manager approval behave as before.
+                  </p>
+                  {reconciliationFlags > 0 ? (
+                    <div className="flex items-start gap-3 rounded-lg border border-red-200/80 bg-red-50/80 px-3 py-2.5 text-sm text-red-900 mb-4">
+                      <AlertCircle className="shrink-0 mt-0.5" size={18} />
+                      <div>
+                        <p className="font-bold">Bank reconciliation queue</p>
+                        <p className="text-xs text-red-800/90 mt-0.5">
+                          {reconciliationFlags} line(s) need review or manager clearance.
+                        </p>
+                      </div>
+                    </div>
+                  ) : null}
+                  {bankReconSection}
+                </section>
+              </div>
+            )}
+
             {activeTab === 'treasury' && (
               <div className="space-y-6 animate-in fade-in duration-300">
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md shadow-sm px-3 py-2.5">
                     <p className="text-[9px] font-bold text-slate-500 uppercase tracking-wide">Cash inflows</p>
                     <p className="text-sm font-black text-emerald-700 tabular-nums">
-                      {formatNgn(ws?.hasWorkspaceData ? treasuryInflowsNgn : liveReceipts.reduce((s, r) => s + (r.amountNgn || 0), 0))}
+                      {formatNgn(
+                        ws?.hasWorkspaceData
+                          ? treasuryInflowsNgn
+                          : liveReceipts.reduce((s, r) => s + receiptCashReceivedNgn(r), 0)
+                      )}
                     </p>
                     <p className="text-[8px] text-slate-500 mt-0.5 leading-snug">Receipts and advance deposits</p>
                   </div>
@@ -1372,10 +2191,10 @@ const Account = () => {
                     </p>
                     <button
                       type="button"
-                      onClick={() => setActiveTab('audit')}
+                      onClick={() => handleAccountTabChange('receipts')}
                       className="text-[9px] font-black uppercase text-amber-900 mt-1 underline-offset-2 hover:underline"
                     >
-                      Open audit tab
+                      Receipts &amp; recon tab
                     </button>
                   </div>
                 </div>
@@ -1493,14 +2312,18 @@ const Account = () => {
                 ) : (
                   <ul className="space-y-1.5">
                     {filteredPayables.map((p) => {
-                      const due = p.dueDateISO < todayIso;
-                      const open = p.paidNgn < p.amountNgn;
+                      const paid = Number(p.paidNgn) || 0;
+                      const outstanding = Math.max(0, p.amountNgn - paid);
+                      const due =
+                        p.dueDateISO &&
+                        String(p.dueDateISO).trim() &&
+                        p.dueDateISO < todayIso;
+                      const open = paid < p.amountNgn;
                       const meta2 = [
                         `PO ${p.poRef}`,
-                        `Inv ${p.invoiceRef}`,
-                        `Due ${p.dueDateISO}`,
+                        p.invoiceRef ? `Inv ${p.invoiceRef}` : null,
+                        p.dueDateISO ? `Due ${p.dueDateISO}` : null,
                         p.branchId ? branchNameById[p.branchId] || p.branchId : null,
-                        open ? `Out ${formatNgn(p.amountNgn - p.paidNgn)}` : 'Paid',
                         due && open ? 'Past due' : null,
                       ]
                         .filter(Boolean)
@@ -1522,10 +2345,29 @@ const Account = () => {
                               >
                                 {meta2}
                               </p>
+                              {open ? (
+                                <p className="text-[9px] text-slate-600 mt-1 tabular-nums">
+                                  Invoice {formatNgn(p.amountNgn)} · Paid {formatNgn(paid)} ·{' '}
+                                  <span className="font-bold text-amber-900">Due {formatNgn(outstanding)}</span>
+                                </p>
+                              ) : (
+                                <p className="text-[9px] text-emerald-800 mt-1 tabular-nums font-semibold">
+                                  Settled · {formatNgn(p.amountNgn)} paid in full
+                                </p>
+                              )}
                             </div>
                             <div className="flex items-center gap-2 shrink-0">
-                              <span className="text-[11px] font-black text-[#134e4a] tabular-nums">
-                                {formatNgn(p.amountNgn)}
+                              <span className="text-[11px] font-black text-[#134e4a] tabular-nums text-right">
+                                {open ? (
+                                  <>
+                                    <span className="block text-[8px] font-semibold text-slate-500 uppercase tracking-wide">
+                                      Outstanding
+                                    </span>
+                                    {formatNgn(outstanding)}
+                                  </>
+                                ) : (
+                                  formatNgn(p.amountNgn)
+                                )}
                               </span>
                               {open ? (
                                 <button
@@ -1564,6 +2406,381 @@ const Account = () => {
                   Move cash to bank, sweep POS settlements, or transfer between bank accounts. Each
                   movement updates both source and destination balances.
                 </p>
+
+                {ws?.hasPermission?.('finance.view') ? (
+                  <section className="rounded-2xl border border-teal-100/80 bg-teal-50/40 p-4 space-y-4 shadow-sm">
+                    <div>
+                      <h3 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest">
+                        Inter-branch lending
+                      </h3>
+                      <p className="text-[11px] text-gray-600 mt-1 max-w-2xl">
+                        Propose a treasury movement from one branch to another. Disbursement posts only
+                        after MD approval. Repayments reduce the outstanding balance; planned instalments
+                        are stored for reference.
+                      </p>
+                    </div>
+                    {interBranchBalances.length > 0 ? (
+                      <div className="rounded-xl border border-teal-200/60 bg-white/70 p-3 space-y-1.5">
+                        <p className="text-[10px] font-bold uppercase tracking-wide text-teal-900">
+                          Outstanding between branches
+                        </p>
+                        <ul className="space-y-1 text-[11px] text-gray-700">
+                          {interBranchBalances.map((b) => (
+                            <li key={`${b.lenderBranchId}-${b.borrowerBranchId}`} className="tabular-nums">
+                              <span className="font-semibold">
+                                {branchNameById[b.borrowerBranchId] || b.borrowerBranchId}
+                              </span>{' '}
+                              owes{' '}
+                              <span className="font-semibold">
+                                {branchNameById[b.lenderBranchId] || b.lenderBranchId}
+                              </span>
+                              : {formatNgn(b.outstandingNgn)}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {canProposeInterBranch ? (
+                      <form className="space-y-3 rounded-xl border border-white/80 bg-white/60 p-3" onSubmit={submitInterBranchLoan}>
+                        <p className="text-[10px] font-bold uppercase tracking-wide text-gray-500">
+                          Propose loan (pending MD)
+                        </p>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                            Lender branch
+                            <select
+                              required
+                              value={interBranchForm.lenderBranchId}
+                              onChange={(e) =>
+                                setInterBranchForm((f) => ({ ...f, lenderBranchId: e.target.value }))
+                              }
+                              className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs font-semibold"
+                            >
+                              <option value="">Select…</option>
+                              {branchOptions.map((b) => (
+                                <option key={b.id} value={b.id}>
+                                  {b.name || b.code || b.id}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                            Borrower branch
+                            <select
+                              required
+                              value={interBranchForm.borrowerBranchId}
+                              onChange={(e) =>
+                                setInterBranchForm((f) => ({ ...f, borrowerBranchId: e.target.value }))
+                              }
+                              className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs font-semibold"
+                            >
+                              <option value="">Select…</option>
+                              {branchOptions.map((b) => (
+                                <option key={b.id} value={b.id}>
+                                  {b.name || b.code || b.id}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                            From treasury account
+                            <select
+                              required
+                              value={interBranchForm.fromTreasuryAccountId}
+                              onChange={(e) =>
+                                setInterBranchForm((f) => ({ ...f, fromTreasuryAccountId: e.target.value }))
+                              }
+                              className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs font-semibold"
+                            >
+                              <option value="">Select…</option>
+                              {bankAccounts.map((a) => (
+                                <option key={a.id} value={String(a.id)}>
+                                  {a.name} ({formatNgn(a.balance)})
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                            To treasury account
+                            <select
+                              required
+                              value={interBranchForm.toTreasuryAccountId}
+                              onChange={(e) =>
+                                setInterBranchForm((f) => ({ ...f, toTreasuryAccountId: e.target.value }))
+                              }
+                              className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs font-semibold"
+                            >
+                              <option value="">Select…</option>
+                              {bankAccounts.map((a) => (
+                                <option key={a.id} value={String(a.id)}>
+                                  {a.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                            Principal (₦)
+                            <input
+                              required
+                              type="number"
+                              min="1"
+                              value={interBranchForm.principalNgn}
+                              onChange={(e) =>
+                                setInterBranchForm((f) => ({ ...f, principalNgn: e.target.value }))
+                              }
+                              className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs font-bold"
+                            />
+                          </label>
+                          <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                            Disbursement date
+                            <input
+                              required
+                              type="date"
+                              value={interBranchForm.dateISO}
+                              onChange={(e) =>
+                                setInterBranchForm((f) => ({ ...f, dateISO: e.target.value }))
+                              }
+                              className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs font-bold"
+                            />
+                          </label>
+                        </div>
+                        <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                          Reference
+                          <input
+                            value={interBranchForm.reference}
+                            onChange={(e) =>
+                              setInterBranchForm((f) => ({ ...f, reference: e.target.value }))
+                            }
+                            className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs font-semibold"
+                          />
+                        </label>
+                        <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                          Context / rationale
+                          <textarea
+                            value={interBranchForm.proposedNote}
+                            onChange={(e) =>
+                              setInterBranchForm((f) => ({ ...f, proposedNote: e.target.value }))
+                            }
+                            rows={2}
+                            className="mt-1 w-full bg-gray-50 border border-gray-100 rounded-lg py-2 px-2 text-xs"
+                          />
+                        </label>
+                        <label className="text-[10px] font-bold text-gray-400 uppercase block">
+                          Repayment plan (JSON array)
+                          <textarea
+                            value={interBranchForm.repaymentPlanJson}
+                            onChange={(e) =>
+                              setInterBranchForm((f) => ({ ...f, repaymentPlanJson: e.target.value }))
+                            }
+                            rows={4}
+                            className="mt-1 w-full font-mono text-[11px] bg-gray-50 border border-gray-100 rounded-lg py-2 px-2"
+                          />
+                        </label>
+                        <button
+                          type="submit"
+                          disabled={interBranchBusy}
+                          className="z-btn-secondary text-xs py-2 disabled:opacity-50"
+                        >
+                          Submit for MD approval
+                        </button>
+                      </form>
+                    ) : null}
+                    {interBranchLoans.length > 0 ? (
+                      <ul className="space-y-2">
+                        {interBranchLoans.map((loan) => (
+                          <li
+                            key={loan.loanId}
+                            className="rounded-xl border border-gray-200/80 bg-white/80 p-3 text-[11px] space-y-2"
+                          >
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <p className="font-mono font-bold text-[#134e4a]">{loan.loanId}</p>
+                                <p className="text-gray-600 mt-0.5">
+                                  {branchNameById[loan.lenderBranchId] || loan.lenderBranchId} →{' '}
+                                  {branchNameById[loan.borrowerBranchId] || loan.borrowerBranchId} ·{' '}
+                                  {formatNgn(loan.principalNgn)}
+                                  {loan.status === 'active' || loan.status === 'closed' ? (
+                                    <span className="text-gray-500">
+                                      {' '}
+                                      (repaid {formatNgn(loan.repaidNgn)}, outstanding{' '}
+                                      {formatNgn(loan.outstandingNgn)})
+                                    </span>
+                                  ) : null}
+                                </p>
+                                <p className="text-[10px] text-gray-500 mt-1">
+                                  Status: <span className="font-bold uppercase">{loan.status}</span>
+                                  {loan.reference ? ` · ${loan.reference}` : ''}
+                                </p>
+                                {loan.proposedNote ? (
+                                  <p className="text-[10px] text-gray-600 mt-1">{loan.proposedNote}</p>
+                                ) : null}
+                                {Array.isArray(loan.repaymentPlan) && loan.repaymentPlan.length > 0 ? (
+                                  <div className="mt-2 rounded-lg bg-slate-50 border border-slate-100 p-2">
+                                    <p className="text-[9px] font-bold uppercase text-slate-500 mb-1">
+                                      Repayment plan
+                                    </p>
+                                    <ul className="text-[10px] space-y-0.5">
+                                      {loan.repaymentPlan.map((line, idx) => (
+                                        <li key={idx} className="tabular-nums">
+                                          {line.dueDateISO || '—'} · {formatNgn(line.amountNgn)}
+                                          {line.note ? ` · ${line.note}` : ''}
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                ) : null}
+                              </div>
+                              <div className="flex flex-wrap gap-1 shrink-0">
+                                {loan.status === 'pending_md' && canMdInterBranchLoan ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={interBranchBusy}
+                                      onClick={() => void mdApproveInterBranch(loan.loanId)}
+                                      className="text-[9px] font-bold uppercase px-2 py-1 rounded-md bg-emerald-600 text-white disabled:opacity-50"
+                                    >
+                                      MD approve
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={interBranchBusy}
+                                      onClick={() => void mdRejectInterBranch(loan.loanId)}
+                                      className="text-[9px] font-bold uppercase px-2 py-1 rounded-md border border-rose-200 text-rose-800 disabled:opacity-50"
+                                    >
+                                      Reject
+                                    </button>
+                                  </>
+                                ) : null}
+                              </div>
+                            </div>
+                            {loan.status === 'active' && canRepayInterBranch ? (
+                              <form
+                                className="grid gap-2 sm:grid-cols-2 border-t border-gray-100 pt-2 mt-2"
+                                onSubmit={submitInterBranchRepay}
+                              >
+                                <input type="hidden" name="loanId" value={loan.loanId} readOnly />
+                                <p className="text-[10px] font-bold uppercase text-gray-500 sm:col-span-2">
+                                  Record repayment (treasury transfer)
+                                </p>
+                                <select
+                                  required
+                                  value={
+                                    interBranchRepayForm.loanId === loan.loanId
+                                      ? interBranchRepayForm.fromTreasuryAccountId
+                                      : ''
+                                  }
+                                  onChange={(e) =>
+                                    setInterBranchRepayForm((f) => ({
+                                      ...f,
+                                      loanId: loan.loanId,
+                                      fromTreasuryAccountId: e.target.value,
+                                    }))
+                                  }
+                                  className="bg-gray-50 border border-gray-100 rounded-lg py-1.5 px-2 text-xs"
+                                >
+                                  <option value="">From account…</option>
+                                  {bankAccounts.map((a) => (
+                                    <option key={a.id} value={String(a.id)}>
+                                      {a.name}
+                                    </option>
+                                  ))}
+                                </select>
+                                <select
+                                  required
+                                  value={
+                                    interBranchRepayForm.loanId === loan.loanId
+                                      ? interBranchRepayForm.toTreasuryAccountId
+                                      : ''
+                                  }
+                                  onChange={(e) =>
+                                    setInterBranchRepayForm((f) => ({
+                                      ...f,
+                                      loanId: loan.loanId,
+                                      toTreasuryAccountId: e.target.value,
+                                    }))
+                                  }
+                                  className="bg-gray-50 border border-gray-100 rounded-lg py-1.5 px-2 text-xs"
+                                >
+                                  <option value="">To account…</option>
+                                  {bankAccounts.map((a) => (
+                                    <option key={a.id} value={String(a.id)}>
+                                      {a.name}
+                                    </option>
+                                  ))}
+                                </select>
+                                <input
+                                  required
+                                  type="number"
+                                  min="1"
+                                  placeholder="Amount ₦"
+                                  value={
+                                    interBranchRepayForm.loanId === loan.loanId
+                                      ? interBranchRepayForm.amountNgn
+                                      : ''
+                                  }
+                                  onChange={(e) =>
+                                    setInterBranchRepayForm((f) => ({
+                                      ...f,
+                                      loanId: loan.loanId,
+                                      amountNgn: e.target.value,
+                                    }))
+                                  }
+                                  className="bg-gray-50 border border-gray-100 rounded-lg py-1.5 px-2 text-xs font-bold"
+                                />
+                                <input
+                                  type="date"
+                                  value={
+                                    interBranchRepayForm.loanId === loan.loanId
+                                      ? interBranchRepayForm.dateISO
+                                      : interBranchRepayForm.dateISO
+                                  }
+                                  onChange={(e) =>
+                                    setInterBranchRepayForm((f) => ({
+                                      ...f,
+                                      loanId: loan.loanId,
+                                      dateISO: e.target.value,
+                                    }))
+                                  }
+                                  className="bg-gray-50 border border-gray-100 rounded-lg py-1.5 px-2 text-xs"
+                                />
+                                <input
+                                  placeholder="Note"
+                                  value={
+                                    interBranchRepayForm.loanId === loan.loanId
+                                      ? interBranchRepayForm.note
+                                      : ''
+                                  }
+                                  onChange={(e) =>
+                                    setInterBranchRepayForm((f) => ({
+                                      ...f,
+                                      loanId: loan.loanId,
+                                      note: e.target.value,
+                                    }))
+                                  }
+                                  className="sm:col-span-2 bg-gray-50 border border-gray-100 rounded-lg py-1.5 px-2 text-xs"
+                                />
+                                <button
+                                  type="submit"
+                                  disabled={interBranchBusy || interBranchRepayForm.loanId !== loan.loanId}
+                                  className="sm:col-span-2 z-btn-secondary text-xs py-2 disabled:opacity-40"
+                                >
+                                  Post repayment
+                                </button>
+                              </form>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-[10px] text-gray-500">No inter-branch loan records in this scope.</p>
+                    )}
+                  </section>
+                ) : null}
+
                 <button
                   type="button"
                   onClick={() => {
@@ -1854,110 +3071,17 @@ const Account = () => {
                   </div>
                 </div>
 
-                <div>
-                  <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-                    <h3 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest flex items-center gap-2">
-                      <Landmark size={14} />
-                      Bank reconciliation
-                    </h3>
-                    {canReconcileBank && ws?.canMutate ? (
-                      <button type="button" onClick={openBankReconModal} className="z-btn-secondary !text-[10px] gap-1.5">
-                        <Plus size={14} /> Add statement line
-                      </button>
-                    ) : null}
-                  </div>
-                  <ul className="space-y-1.5">
-                    {filteredReconciliation.map((line) => {
-                      const amtLabel = `${formatNgn(Math.abs(line.amountNgn))}${line.amountNgn < 0 ? ' DR' : ' CR'}`;
-                      const matchText =
-                        line.systemMatch ?? reconSuggestionsById[line.id]?.text ?? '—';
-                      const meta2 = [
-                        matchText,
-                        line.branchId ? branchNameById[line.branchId] || line.branchId : null,
-                      ]
-                        .filter(Boolean)
-                        .join(' · ');
-                      const statusChip =
-                        line.status === 'Matched'
-                          ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                          : line.status === 'Excluded'
-                            ? 'border-slate-200 bg-slate-100 text-slate-600'
-                            : 'border-amber-200 bg-amber-50 text-amber-900';
-                      return (
-                      <li key={line.id} className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md py-1.5 px-2.5 shadow-sm">
-                        <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
-                          <div className="min-w-0 leading-tight flex-1">
-                            <div className="flex items-center justify-between gap-2 min-w-0">
-                              <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
-                                <span className="tabular-nums text-slate-600 font-semibold">{line.bankDateISO}</span>
-                                <span className="font-medium text-slate-600"> · {line.description}</span>
-                              </p>
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                <span
-                                  className={`text-[11px] font-black tabular-nums ${line.amountNgn < 0 ? 'text-red-700' : 'text-emerald-700'}`}
-                                >
-                                  {amtLabel}
-                                </span>
-                                <span
-                                  className={`text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border ${statusChip}`}
-                                >
-                                  {line.status}
-                                </span>
-                              </div>
-                            </div>
-                            <p className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2" title={meta2}>
-                              {meta2}
-                            </p>
-                          </div>
-                        </div>
-                        {line.status === 'Review' && canReconcileBank && ws?.canMutate ? (
-                          <div className="pt-1.5 mt-1 border-t border-dashed border-slate-200 flex flex-col sm:flex-row sm:items-center gap-2">
-                            <input
-                              type="text"
-                              value={reconDrafts[line.id] ?? line.systemMatch ?? ''}
-                              onChange={(e) =>
-                                setReconDrafts((d) => ({ ...d, [line.id]: e.target.value }))
-                              }
-                              placeholder="System match e.g. receipt id, treasury ref, GL batch…"
-                              className="flex-1 min-w-0 rounded-lg border border-gray-200 bg-white px-3 py-2 text-[11px] outline-none focus:ring-2 focus:ring-[#134e4a]/15"
-                            />
-                            {reconSuggestionsById[line.id] ? (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setReconDrafts((d) => ({
-                                    ...d,
-                                    [line.id]: reconSuggestionsById[line.id].text,
-                                  }))
-                                }
-                                className="rounded-lg border border-teal-200 bg-teal-50 text-teal-800 px-3 py-2 text-[10px] font-bold uppercase tracking-wide"
-                              >
-                                Use suggestion ({reconSuggestionsById[line.id].confidence})
-                              </button>
-                            ) : null}
-                            <div className="flex flex-wrap gap-2 shrink-0">
-                              <button
-                                type="button"
-                                onClick={() => saveBankReconLine(line, 'Matched')}
-                                className="rounded-lg bg-[#134e4a] text-white px-3 py-2 text-[10px] font-bold uppercase tracking-wide"
-                              >
-                                Mark matched
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => saveBankReconLine(line, 'Excluded', 'Excluded — not applicable')}
-                                className="rounded-lg border border-gray-200 bg-white text-gray-600 px-3 py-2 text-[10px] font-bold uppercase tracking-wide"
-                              >
-                                Exclude
-                              </button>
-                            </div>
-                          </div>
-                        ) : null}
-                      </li>
-                    );
-                    })}
-                  </ul>
-                </div>
+                <p className="text-[10px] text-slate-600 rounded-lg border border-slate-200/60 bg-slate-50/80 px-3 py-2">
+                  Bank statement matching and customer receipt settlement live on the{' '}
+                  <button
+                    type="button"
+                    className="font-bold text-teal-800 underline-offset-2 hover:underline"
+                    onClick={() => handleAccountTabChange('receipts')}
+                  >
+                    Receipts &amp; recon
+                  </button>{' '}
+                  tab.
+                </p>
 
                 <div>
                   <h3 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest mb-3">
@@ -2021,6 +3145,7 @@ const Account = () => {
                 </div>
               </div>
             )}
+            </>
           </MainPanel>
         </div>
       </div>
@@ -2672,7 +3797,8 @@ const Account = () => {
             <p className="text-[10px] text-gray-500 leading-relaxed">
               Enter one row from the bank statement. It starts in <span className="font-semibold">Review</span>; match
               it to a receipt or treasury reference on the Audit tab. Marking <span className="font-semibold">Matched</span>{' '}
-              with an <span className="font-semibold">RC-…</span> id checks that the receipt exists.
+              with a <span className="font-semibold">LE-…</span> or <span className="font-semibold">RC-…</span>{' '}
+              receipt id checks that the receipt exists.
             </p>
             {ws?.viewAllBranches && branchOptions.length > 0 ? (
               <div>
@@ -2735,12 +3861,103 @@ const Account = () => {
               <input
                 value={bankReconForm.systemMatch}
                 onChange={(e) => setBankReconForm((f) => ({ ...f, systemMatch: e.target.value }))}
-                placeholder="e.g. RC-2026-014 — can add after save"
+                placeholder="e.g. LE-… or RC-26-014 — can add after save"
                 className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
               />
             </div>
             <button type="submit" className="z-btn-primary w-full justify-center py-3">
               Save statement line
+            </button>
+          </form>
+        </div>
+      </ModalFrame>
+
+      <ModalFrame isOpen={showBankImportModal} onClose={() => setShowBankImportModal(false)}>
+        <div className="z-modal-panel max-w-2xl p-8 overflow-y-auto">
+          <div className="flex justify-between items-center mb-6">
+            <h3 className="text-xl font-bold text-[#134e4a]">Import bank lines (JSON)</h3>
+            <button
+              type="button"
+              onClick={() => setShowBankImportModal(false)}
+              className="p-2 text-gray-400 hover:text-red-500 rounded-xl"
+            >
+              <X size={22} />
+            </button>
+          </div>
+          <form className="space-y-4" onSubmit={runBankImport}>
+            <p className="text-[10px] text-gray-500 leading-relaxed">
+              Paste a JSON array of objects with <code className="font-mono">bankDateISO</code> (YYYY-MM-DD),{' '}
+              <code className="font-mono">description</code>, and <code className="font-mono">amountNgn</code> (negative
+              for debits). Up to 500 rows per request. Lines are created in <span className="font-semibold">Review</span>.
+            </p>
+            <textarea
+              value={bankImportJson}
+              onChange={(e) => setBankImportJson(e.target.value)}
+              rows={12}
+              className="w-full font-mono text-xs bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 outline-none focus:ring-2 focus:ring-[#134e4a]/15"
+              spellCheck={false}
+            />
+            <button type="submit" disabled={bankImportBusy} className="z-btn-primary w-full justify-center py-3 disabled:opacity-50">
+              {bankImportBusy ? 'Importing…' : 'Import lines'}
+            </button>
+          </form>
+        </div>
+      </ModalFrame>
+
+      <ModalFrame isOpen={showBankCsvModal} onClose={() => setShowBankCsvModal(false)}>
+        <div className="z-modal-panel max-w-2xl p-8 overflow-y-auto">
+          <div className="flex justify-between items-center mb-6">
+            <h3 className="text-xl font-bold text-[#134e4a]">Import bank lines (CSV)</h3>
+            <button
+              type="button"
+              onClick={() => setShowBankCsvModal(false)}
+              className="p-2 text-gray-400 hover:text-red-500 rounded-xl"
+            >
+              <X size={22} />
+            </button>
+          </div>
+          <form className="space-y-4" onSubmit={runBankCsvImport}>
+            <p className="text-[10px] text-gray-500 leading-relaxed">
+              First row can be the header{' '}
+              <code className="font-mono">bankDateISO,description,amountNgn</code>. Then one row per statement line.
+              Use quotes around the description if it contains commas. Amounts are whole naira (negative = debit). Max
+              500 rows.
+            </p>
+            <input
+              ref={bankCsvFileRef}
+              type="file"
+              accept=".csv,text/csv"
+              className="hidden"
+              onChange={async (e) => {
+                const f = e.target.files?.[0];
+                if (!f) return;
+                try {
+                  const text = await f.text();
+                  setBankCsvText(text);
+                } catch {
+                  showToast('Could not read that file.', { variant: 'error' });
+                }
+                e.target.value = '';
+              }}
+            />
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => bankCsvFileRef.current?.click()}
+                className="z-btn-secondary !text-[10px] py-2 px-3"
+              >
+                Choose CSV file
+              </button>
+            </div>
+            <textarea
+              value={bankCsvText}
+              onChange={(e) => setBankCsvText(e.target.value)}
+              rows={12}
+              className="w-full font-mono text-xs bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 outline-none focus:ring-2 focus:ring-[#134e4a]/15"
+              spellCheck={false}
+            />
+            <button type="submit" disabled={bankCsvBusy} className="z-btn-primary w-full justify-center py-3 disabled:opacity-50">
+              {bankCsvBusy ? 'Importing…' : 'Import CSV'}
             </button>
           </form>
         </div>
@@ -2876,7 +4093,7 @@ const Account = () => {
                 />
               </div>
               <p className="text-[10px] text-gray-400">
-                Expense ID is generated on save (e.g. EXP-2026-015).
+                Expense ID is generated on save (e.g. EXP-26-015).
               </p>
               <button type="submit" className="z-btn-primary w-full justify-center py-3">
                 Save expense
@@ -3135,6 +4352,93 @@ const Account = () => {
               Submit for approval
             </button>
           </form>
+        </div>
+      </ModalFrame>
+
+      <ModalFrame
+        isOpen={receiptFinanceRow != null}
+        onClose={() => {
+          setReceiptFinanceEditApprovalId('');
+          setReceiptFinanceRow(null);
+        }}
+      >
+        <div className="z-modal-panel max-w-md w-full p-6 sm:p-8">
+          <div className="flex justify-between items-start gap-3 mb-4">
+            <h3 className="text-lg font-bold text-[#134e4a]">Receipt settlement</h3>
+            <button
+              type="button"
+              onClick={() => {
+                setReceiptFinanceEditApprovalId('');
+                setReceiptFinanceRow(null);
+              }}
+              className="p-2 text-gray-400 hover:text-red-500 rounded-xl"
+              aria-label="Close"
+            >
+              <X size={20} />
+            </button>
+          </div>
+          {receiptFinanceRow ? (
+            <form className="space-y-4" onSubmit={saveReceiptFinance}>
+              <p className="text-[10px] text-slate-600 font-mono break-all">{receiptFinanceRow.id}</p>
+              <p className="text-xs text-slate-700">
+                Customer paid:{' '}
+                <span className="font-bold tabular-nums">
+                  {formatNgn(
+                    receiptFinanceRow.cashReceivedNgn != null
+                      ? Number(receiptFinanceRow.cashReceivedNgn) || 0
+                      : Number(receiptFinanceRow.amountNgn) || 0
+                  )}
+                </span>
+                {receiptFinanceRow.cashReceivedNgn != null &&
+                Math.round(Number(receiptFinanceRow.cashReceivedNgn) || 0) !==
+                  Math.round(Number(receiptFinanceRow.amountNgn) || 0) ? (
+                  <span className="text-slate-600 font-normal">
+                    {' '}
+                    (allocated to quote {formatNgn(Number(receiptFinanceRow.amountNgn) || 0)})
+                  </span>
+                ) : null}
+              </p>
+              <div>
+                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
+                  Amount received in bank (₦)
+                </label>
+                <input
+                  required
+                  type="text"
+                  inputMode="numeric"
+                  value={receiptBankAmtInput}
+                  onChange={(e) => setReceiptBankAmtInput(e.target.value)}
+                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
+                />
+              </div>
+              <label className="flex items-start gap-2 text-[11px] text-slate-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 rounded border-slate-300"
+                  checked={receiptClearDelivery}
+                  onChange={(e) => setReceiptClearDelivery(e.target.checked)}
+                />
+                <span>
+                  Cleared for delivery — finance confirms this receipt is good to release downstream.
+                </span>
+              </label>
+              {receiptFinanceRow?.id ? (
+                <EditSecondApprovalInline
+                  entityKind="sales_receipt"
+                  entityId={receiptFinanceRow.id}
+                  value={receiptFinanceEditApprovalId}
+                  onChange={setReceiptFinanceEditApprovalId}
+                />
+              ) : null}
+              <button
+                type="submit"
+                disabled={receiptFinanceBusy}
+                className="z-btn-primary w-full justify-center py-3 disabled:opacity-50"
+              >
+                {receiptFinanceBusy ? 'Saving…' : 'Save settlement'}
+              </button>
+            </form>
+          ) : null}
         </div>
       </ModalFrame>
     </PageShell>

@@ -3,7 +3,10 @@ import { LayoutGrid, Pencil, Plus, Save, Search, Trash2, X } from 'lucide-react'
 import { ModalFrame } from '../layout';
 import { apiFetch } from '../../lib/apiBase';
 import { useToast } from '../../context/ToastContext';
+import { EditSecondApprovalInline } from '../EditSecondApprovalInline';
 import { useWorkspace } from '../../context/WorkspaceContext';
+import { APP_DATA_TABLE_PAGE_SIZE, useAppTablePaging } from '../../lib/appDataTable';
+import { AppTablePager } from '../ui/AppDataTable';
 
 /** Logical clusters for the Data & catalog tab — each opens a modal with tables. */
 const WORKBENCH_GROUPS = [
@@ -152,6 +155,7 @@ function SetupCollectionCard({
   const ws = useWorkspace();
   const { show: showToast } = useToast();
   const [editingId, setEditingId] = useState('');
+  const [setupEditApprovalId, setSetupEditApprovalId] = useState('');
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState(() => emptyForm(fields));
 
@@ -165,13 +169,17 @@ function SetupCollectionCard({
     return rows.filter((row) => rowMatchesSearch(row, filterQuery, rowSummary, tableFields));
   }, [rows, filterQuery, rowSummary, tableFields]);
 
+  const rowPage = useAppTablePaging(visibleRows, APP_DATA_TABLE_PAGE_SIZE, filterQuery, kind);
+
   const resetForm = () => {
     setEditingId('');
+    setSetupEditApprovalId('');
     setForm(emptyForm(fields));
   };
 
   const startEdit = (row) => {
     setEditingId(row.id);
+    setSetupEditApprovalId('');
     setForm(formFromRow(fields, row));
   };
 
@@ -187,9 +195,13 @@ function SetupCollectionCard({
     const path = editingId
       ? `/api/setup/${encodeURIComponent(kind)}/${encodeURIComponent(editingId)}`
       : `/api/setup/${encodeURIComponent(kind)}`;
+    const patchBody =
+      method === 'PATCH' && String(setupEditApprovalId || '').trim()
+        ? { ...body, editApprovalId: String(setupEditApprovalId).trim() }
+        : body;
     const { ok, data } = await apiFetch(path, {
       method,
-      body: JSON.stringify(body),
+      body: JSON.stringify(method === 'PATCH' ? patchBody : body),
     });
     setSaving(false);
     if (!ok || !data?.ok) {
@@ -251,6 +263,16 @@ function SetupCollectionCard({
             {renderFieldInput(field, form[field.key], (value) => applyChange(field, value), saving)}
           </div>
         ))}
+        {editingId ? (
+          <div className="md:col-span-2">
+            <EditSecondApprovalInline
+              entityKind="setup_record"
+              entityId={`${kind}:${editingId}`}
+              value={setupEditApprovalId}
+              onChange={setSetupEditApprovalId}
+            />
+          </div>
+        ) : null}
         <div className="md:col-span-2 flex flex-wrap justify-end gap-1.5 pt-1">
           {editingId ? (
             <button type="button" onClick={resetForm} className="z-btn-secondary !px-3 !py-1.5 !text-[10px] gap-1">
@@ -265,15 +287,15 @@ function SetupCollectionCard({
 
       {tableLayout ? (
         <div className="mt-3 overflow-x-auto rounded-xl border border-slate-200/90">
-          <table className="w-full min-w-[520px] text-left text-[11px]">
-            <thead className="border-b border-slate-200 bg-slate-50/90 text-[9px] font-black uppercase tracking-[0.1em] text-slate-500">
+          <table className="w-full min-w-[520px] text-left text-sm">
+            <thead className="border-b border-slate-200 bg-slate-50/90 text-xs font-bold uppercase tracking-wide text-slate-600">
               <tr>
                 {tableFields.map((f) => (
-                  <th key={f.key} className="px-2.5 py-2">
+                  <th key={f.key} className="px-2.5 py-2.5">
                     {f.label}
                   </th>
                 ))}
-                <th className="px-2.5 py-2 text-right">Actions</th>
+                <th className="px-2.5 py-2.5 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -290,14 +312,18 @@ function SetupCollectionCard({
                   </td>
                 </tr>
               ) : (
-                visibleRows.map((row) => (
-                  <tr key={row.id} className="bg-white/95">
+                rowPage.slice.map((row) => (
+                  <tr key={row.id} className="bg-white/95 hover:bg-teal-50/30">
                     {tableFields.map((f) => (
-                      <td key={f.key} className="px-2.5 py-2 align-top text-slate-800">
+                      <td
+                        key={f.key}
+                        className="px-2.5 py-2.5 align-middle text-slate-800 max-w-0 whitespace-nowrap truncate"
+                        title={String(renderCellValue(f, row))}
+                      >
                         {renderCellValue(f, row)}
                       </td>
                     ))}
-                    <td className="px-2.5 py-2 text-right whitespace-nowrap">
+                    <td className="px-2.5 py-2.5 text-right whitespace-nowrap">
                       <button
                         type="button"
                         onClick={() => startEdit(row)}
@@ -319,7 +345,19 @@ function SetupCollectionCard({
             </tbody>
           </table>
         </div>
-      ) : (
+      ) : null}
+      {tableLayout && visibleRows.length > 0 ? (
+        <AppTablePager
+          showingFrom={rowPage.showingFrom}
+          showingTo={rowPage.showingTo}
+          total={rowPage.total}
+          hasPrev={rowPage.hasPrev}
+          hasNext={rowPage.hasNext}
+          onPrev={rowPage.goPrev}
+          onNext={rowPage.goNext}
+        />
+      ) : null}
+      {!tableLayout ? (
         <div className="mt-3 space-y-1.5">
           {rows.length === 0 ? (
             <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/70 px-3 py-3 text-[11px] text-slate-500">
@@ -330,14 +368,13 @@ function SetupCollectionCard({
               No rows match your filter.
             </div>
           ) : (
-            visibleRows.map((row) => (
+            rowPage.slice.map((row) => (
               <div
                 key={row.id}
                 className="flex flex-col gap-2 rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2.5 md:flex-row md:items-center md:justify-between"
               >
-                <div className="min-w-0">
-                  <p className="text-[11px] font-medium text-slate-800 leading-snug">{rowSummary(row)}</p>
-                  <p className="mt-0.5 text-[10px] font-mono text-slate-400">{row.id}</p>
+                <div className="min-w-0 text-sm font-medium text-slate-800 truncate" title={`${rowSummary(row)} · ${row.id}`}>
+                  {rowSummary(row)} <span className="font-mono text-slate-500">· {row.id}</span>
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   <button type="button" onClick={() => startEdit(row)} className="z-btn-secondary !px-2.5 !py-1 !text-[10px] gap-1">
@@ -351,7 +388,18 @@ function SetupCollectionCard({
             ))
           )}
         </div>
-      )}
+      ) : null}
+      {!tableLayout && visibleRows.length > 0 ? (
+        <AppTablePager
+          showingFrom={rowPage.showingFrom}
+          showingTo={rowPage.showingTo}
+          total={rowPage.total}
+          hasPrev={rowPage.hasPrev}
+          hasNext={rowPage.hasNext}
+          onPrev={rowPage.goPrev}
+          onNext={rowPage.goNext}
+        />
+      ) : null}
     </section>
   );
 }

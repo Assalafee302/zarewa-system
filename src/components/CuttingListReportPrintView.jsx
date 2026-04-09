@@ -1,5 +1,6 @@
 import { ZAREWA_QUOTATION_BRANDING } from '../Data/companyQuotation';
 import { formatNgn } from '../Data/mockData';
+import { receiptCashReceivedNgn } from '../lib/salesReceiptsList';
 import { CUTTING_LIST_REPORT_ROWS_PER_PAGE } from './cuttingListReportConstants';
 
 export { CUTTING_LIST_REPORT_ROWS_PER_PAGE } from './cuttingListReportConstants';
@@ -181,7 +182,7 @@ function ProductionScratchpad({ footerName }) {
           </div>
         </div>
         <div>
-          <span className="cl-factory-field-label">Meters produced</span>
+          <span className="cl-factory-field-label">Metres produced</span>
           <div className="cl-factory-write-line" />
         </div>
         <div>
@@ -350,7 +351,9 @@ export default function CuttingListReportPrintView({
                           <span className="cl-factory-receipt-sep">·</span>
                           <span className="cl-factory-receipt-date">{r.date ?? r.dateISO}</span>
                           <span className="cl-factory-receipt-sep">·</span>
-                          <span className="cl-factory-receipt-amt tabular-nums">{r.amount ?? formatNgn(r.amountNgn)}</span>
+                          <span className="cl-factory-receipt-amt tabular-nums">
+                            {formatNgn(receiptCashReceivedNgn(r))}
+                          </span>
                           <span className="cl-factory-receipt-sep">·</span>
                           <span className="cl-factory-receipt-bank">{r.bankReference || r.method || r.paymentMethod || '—'}</span>
                         </div>

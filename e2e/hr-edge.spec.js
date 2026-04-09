@@ -116,7 +116,7 @@ test.describe('HR edge cases', () => {
     expect(row).toBeTruthy();
     expect(row.status).toBe('rejected');
 
-    // Manager approve should fail because it is no longer in manager_review.
+    // Further approval should fail because the request was rejected at HR.
     const mgr = await page.request.patch(`/api/hr/requests/${encodeURIComponent(requestId)}/manager-review`, {
       data: { approve: true, note: 'Should not be allowed', reasonCode: 'policy' },
     });
@@ -144,7 +144,7 @@ test.describe('HR edge cases', () => {
         jobTitle: 'Loan tester',
         department: 'Operations',
         employmentType: 'permanent',
-        dateJoinedIso: '2025-01-15',
+        dateJoinedIso: '2019-01-15',
         baseSalaryNgn: 220_000,
       },
     });
@@ -196,6 +196,12 @@ test.describe('HR edge cases', () => {
       });
       if (mgr.status() !== 200) {
         throw new Error(`Manager approve failed (${mgr.status()}): ${await mgr.text()}`);
+      }
+      const mgr2 = await page.request.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/manager-review`, {
+        data: { approve: true, note: 'GM ok', reasonCode: 'policy' },
+      });
+      if (mgr2.status() !== 200) {
+        throw new Error(`Second approve failed (${mgr2.status()}): ${await mgr2.text()}`);
       }
     };
     await approveLoan(loan1);

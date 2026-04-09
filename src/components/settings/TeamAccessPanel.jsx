@@ -1,9 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { Settings2, UserPlus } from 'lucide-react';
 import { ModalFrame } from '../layout';
 import { apiFetch } from '../../lib/apiBase';
 import { useToast } from '../../context/ToastContext';
 import { WORKSPACE_DEPARTMENT_IDS, WORKSPACE_DEPARTMENT_LABELS } from '../../lib/departmentWorkspace';
+import { APP_DATA_TABLE_PAGE_SIZE, useAppTablePaging } from '../../lib/appDataTable';
+import { AppTablePager } from '../ui/AppDataTable';
+import { EditSecondApprovalInline } from '../EditSecondApprovalInline';
 
 /**
  * Admin UI: assign role, status, and granular permissions (settings.view).
@@ -20,6 +23,8 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
   const [draftPerms, setDraftPerms] = useState([]);
   const [fullAccess, setFullAccess] = useState(false);
   const [permSaving, setPermSaving] = useState(false);
+  const [userEditAidById, setUserEditAidById] = useState({});
+  const [permModalEditApprovalId, setPermModalEditApprovalId] = useState('');
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createBusy, setCreateBusy] = useState(false);
@@ -81,6 +86,13 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
     });
   }, [permissionKeys]);
 
+  const userPage = useAppTablePaging(
+    Array.isArray(appUsers) ? appUsers : [],
+    APP_DATA_TABLE_PAGE_SIZE,
+    appUsers?.length
+  );
+  const pagedUsers = userPage.slice;
+
   const refresh = async () => {
     try {
       await onRefresh?.();
@@ -93,9 +105,13 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
     if (!user?.id || nextRoleKey === user.roleKey) return;
     setRowBusyId(user.id);
     try {
+      const aid = String(userEditAidById[user.id] || '').trim();
       const { ok, data } = await apiFetch(`/api/users/${encodeURIComponent(user.id)}/role`, {
         method: 'PATCH',
-        body: JSON.stringify({ roleKey: nextRoleKey }),
+        body: JSON.stringify({
+          roleKey: nextRoleKey,
+          ...(aid ? { editApprovalId: aid } : {}),
+        }),
       });
       if (!ok || !data?.ok) {
         showToast(data?.error || 'Could not update role.', { variant: 'error' });
@@ -134,9 +150,13 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
     if (!user?.id || nextStatus === user.status) return;
     setRowBusyId(user.id);
     try {
+      const aid = String(userEditAidById[user.id] || '').trim();
       const { ok, data } = await apiFetch(`/api/users/${encodeURIComponent(user.id)}/status`, {
         method: 'PATCH',
-        body: JSON.stringify({ status: nextStatus }),
+        body: JSON.stringify({
+          status: nextStatus,
+          ...(aid ? { editApprovalId: aid } : {}),
+        }),
       });
       if (!ok || !data?.ok) {
         showToast(data?.error || 'Could not update status.', { variant: 'error' });
@@ -154,6 +174,7 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
   };
 
   const openPermModal = (user) => {
+    setPermModalEditApprovalId('');
     const perms = Array.isArray(user.permissions) ? [...user.permissions] : [];
     const isStar = perms.includes('*');
     setPermModalUser(user);
@@ -163,6 +184,7 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
 
   const closePermModal = () => {
     setPermModalUser(null);
+    setPermModalEditApprovalId('');
     setDraftPerms([]);
     setFullAccess(false);
     setPermSaving(false);
@@ -194,11 +216,15 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
     }
     setPermSaving(true);
     try {
+      const aid = String(permModalEditApprovalId || '').trim();
       const { ok, data } = await apiFetch(
         `/api/users/${encodeURIComponent(permModalUser.id)}/permissions`,
         {
           method: 'PATCH',
-          body: JSON.stringify({ permissions: next }),
+          body: JSON.stringify({
+            permissions: next,
+            ...(aid ? { editApprovalId: aid } : {}),
+          }),
         }
       );
       if (!ok || !data?.ok) {
@@ -293,8 +319,8 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
           <p className="text-sm text-slate-500">No users in the directory snapshot.</p>
         ) : (
           <div className="overflow-x-auto rounded-2xl border border-slate-200/90">
-            <table className="w-full min-w-[720px] text-left text-xs">
-              <thead className="border-b border-slate-200 bg-slate-50/80 text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
+            <table className="w-full min-w-[720px] text-left text-sm">
+              <thead className="border-b border-slate-200 bg-slate-50/80 text-xs font-bold uppercase tracking-wide text-slate-600">
                 <tr>
                   <th className="px-3 py-2.5">User</th>
                   <th className="px-3 py-2.5">Dept</th>
@@ -304,20 +330,23 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {appUsers.map((user) => {
+                {pagedUsers.map((user) => {
                   const busy = rowBusyId === user.id;
+                  const who = `${user.displayName} · ${user.username}${user.hasCustomPermissions ? ' · custom perms' : ''}`;
                   return (
-                    <tr key={user.id} className="bg-white/90">
-                      <td className="px-3 py-3 align-top">
-                        <p className="font-bold text-slate-800">{user.displayName}</p>
-                        <p className="mt-0.5 font-mono text-[10px] text-slate-500">{user.username}</p>
+                    <Fragment key={user.id}>
+                      <tr className="bg-white/90 hover:bg-teal-50/30">
+                      <td className="px-3 py-3 align-middle max-w-[14rem] whitespace-nowrap truncate" title={who}>
+                        <span className="font-bold text-slate-800">{user.displayName}</span>
+                        <span className="text-slate-500"> · </span>
+                        <span className="font-mono text-xs text-slate-600">{user.username}</span>
                         {user.hasCustomPermissions ? (
-                          <span className="mt-1 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-amber-900">
-                            Custom perms
+                          <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">
+                            Custom
                           </span>
                         ) : null}
                       </td>
-                      <td className="px-3 py-3 align-top">
+                      <td className="px-3 py-3 align-middle">
                         <select
                           className="z-input !py-1.5 !text-[11px] max-w-[12rem]"
                           value={user.department || 'general'}
@@ -331,7 +360,7 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
                           ))}
                         </select>
                       </td>
-                      <td className="px-3 py-3 align-top">
+                      <td className="px-3 py-3 align-middle">
                         <select
                           className="z-input !py-1.5 !text-[11px] max-w-[11rem]"
                           value={user.roleKey}
@@ -345,7 +374,7 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
                           ))}
                         </select>
                       </td>
-                      <td className="px-3 py-3 align-top">
+                      <td className="px-3 py-3 align-middle">
                         <select
                           className="z-input !py-1.5 !text-[11px] max-w-[9rem]"
                           value={user.status}
@@ -357,7 +386,7 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
                           <option value="suspended">suspended</option>
                         </select>
                       </td>
-                      <td className="px-3 py-3 align-top">
+                      <td className="px-3 py-3 align-middle whitespace-nowrap">
                         <button
                           type="button"
                           disabled={busy}
@@ -367,13 +396,36 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
                           <Settings2 size={14} /> Edit
                         </button>
                       </td>
-                    </tr>
+                      </tr>
+                      <tr className="bg-slate-50/80">
+                        <td colSpan={5} className="px-3 py-2 border-b border-slate-100">
+                          <EditSecondApprovalInline
+                            entityKind="user"
+                            entityId={user.id}
+                            value={userEditAidById[user.id] || ''}
+                            onChange={(v) => setUserEditAidById((prev) => ({ ...prev, [user.id]: v }))}
+                            className="!p-2"
+                          />
+                        </td>
+                      </tr>
+                    </Fragment>
                   );
                 })}
               </tbody>
             </table>
           </div>
         )}
+        {appUsers.length > 0 ? (
+          <AppTablePager
+            showingFrom={userPage.showingFrom}
+            showingTo={userPage.showingTo}
+            total={userPage.total}
+            hasPrev={userPage.hasPrev}
+            hasNext={userPage.hasNext}
+            onPrev={userPage.goPrev}
+            onNext={userPage.goNext}
+          />
+        ) : null}
       </div>
 
       <ModalFrame
@@ -517,6 +569,16 @@ export default function TeamAccessPanel({ appUsers, currentUserId, onRefresh }) 
           ) : (
             <p className="text-[11px] text-slate-500 mb-3">All other permission toggles are ignored while full access is on.</p>
           )}
+
+          {permModalUser?.id ? (
+            <EditSecondApprovalInline
+              entityKind="user"
+              entityId={permModalUser.id}
+              value={permModalEditApprovalId}
+              onChange={setPermModalEditApprovalId}
+              className="mt-4"
+            />
+          ) : null}
 
           <div className="mt-5 flex flex-wrap gap-2 justify-end">
             <button type="button" onClick={applyRoleTemplate} className="z-btn-secondary !text-[11px]">

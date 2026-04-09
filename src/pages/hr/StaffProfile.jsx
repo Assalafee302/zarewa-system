@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Navigate, useParams } from 'react-router-dom';
 import {
   FileText,
@@ -11,6 +11,9 @@ import {
   GraduationCap,
   CalendarRange,
   ShieldAlert,
+  Building2,
+  MessageSquareText,
+  ClipboardList,
 } from 'lucide-react';
 import { MainPanel, ModalFrame, PageHeader } from '../../components/layout';
 import { useHrWorkspace } from '../../context/HrWorkspaceContext';
@@ -33,6 +36,8 @@ function mergeSelfProfile(user, hr) {
       branchId: null,
       employeeNo: null,
       _noHrFile: true,
+      lineManagerUserId: null,
+      leaveEntitlementBand: null,
     };
   }
   return {
@@ -66,6 +71,9 @@ function mergeSelfProfile(user, hr) {
     pensionPercentOverride: hr.pensionPercentOverride,
     nextOfKin: hr.nextOfKin,
     profileExtra: hr.profileExtra || {},
+    selfServiceEligible: Boolean(hr.selfServiceEligible),
+    lineManagerUserId: hr.lineManagerUserId ?? null,
+    leaveEntitlementBand: hr.leaveEntitlementBand ?? null,
   };
 }
 
@@ -107,6 +115,10 @@ const emptyEdit = {
   gender: '',
   maritalStatus: '',
   nationalId: '',
+  selfServiceEligible: false,
+  lineManagerUserId: '',
+  leaveEntitlementBand: '',
+  branchChangeReason: '',
 };
 
 export default function StaffProfile() {
@@ -130,6 +142,12 @@ export default function StaffProfile() {
   const [staffRequests, setStaffRequests] = useState([]);
   const [approvedLoans, setApprovedLoans] = useState([]);
   const [attendanceUploads, setAttendanceUploads] = useState([]);
+  const [branchHistoryRows, setBranchHistoryRows] = useState([]);
+  const [hrDisciplineCases, setHrDisciplineCases] = useState([]);
+  const [appraisalBundle, setAppraisalBundle] = useState([]);
+  const [feedbackNotesList, setFeedbackNotesList] = useState([]);
+  const [disciplineEventsByCase, setDisciplineEventsByCase] = useState({});
+  const loadedDisciplineEventsRef = useRef(new Set());
 
   const branches = useMemo(
     () => ws?.snapshot?.workspaceBranches ?? ws?.session?.branches ?? [],
@@ -169,11 +187,16 @@ export default function StaffProfile() {
   useEffect(() => {
     if (!row?.userId) return;
     let active = true;
+    const uid = row.userId;
     const run = async () => {
-      const [reqRes, welfareRes, attRes] = await Promise.all([
+      const [reqRes, welfareRes, attRes, bhRes, fbRes, discRes, cycRes] = await Promise.all([
         apiFetch('/api/hr/requests'),
         apiFetch('/api/hr/salary-welfare/snapshot'),
         apiFetch('/api/hr/attendance'),
+        apiFetch(`/api/hr/staff/${encodeURIComponent(uid)}/branch-history`),
+        apiFetch(`/api/hr/feedback/${encodeURIComponent(uid)}`),
+        apiFetch(`/api/hr/discipline/cases?subjectUserId=${encodeURIComponent(uid)}`),
+        apiFetch('/api/hr/appraisal/cycles'),
       ]);
       if (!active) return;
       if (reqRes.ok && reqRes.data?.ok) setStaffRequests(reqRes.data.requests || []);
@@ -182,6 +205,30 @@ export default function StaffProfile() {
       else setApprovedLoans([]);
       if (attRes.ok && attRes.data?.ok) setAttendanceUploads(attRes.data.uploads || []);
       else setAttendanceUploads([]);
+      if (bhRes.ok && bhRes.data?.ok) setBranchHistoryRows(bhRes.data.history || []);
+      else setBranchHistoryRows([]);
+      if (fbRes.ok && fbRes.data?.ok) setFeedbackNotesList(fbRes.data.notes || []);
+      else setFeedbackNotesList([]);
+      if (discRes.ok && discRes.data?.ok) setHrDisciplineCases(discRes.data.cases || []);
+      else setHrDisciplineCases([]);
+      setDisciplineEventsByCase({});
+      loadedDisciplineEventsRef.current = new Set();
+      if (cycRes.ok && cycRes.data?.ok) {
+        const cycles = cycRes.data.cycles || [];
+        const rows = [];
+        await Promise.all(
+          cycles.map(async (cy) => {
+            const fr = await apiFetch(`/api/hr/appraisal/cycles/${encodeURIComponent(cy.id)}/forms`);
+            if (!active) return;
+            if (fr.ok && fr.data?.ok) {
+              (fr.data.forms || []).forEach((f) => {
+                if (f.subjectUserId === uid) rows.push({ cycle: cy, form: f });
+              });
+            }
+          })
+        );
+        if (active) setAppraisalBundle(rows);
+      } else if (active) setAppraisalBundle([]);
     };
     void run();
     return () => {
@@ -236,6 +283,10 @@ export default function StaffProfile() {
       gender: personal.gender || '',
       maritalStatus: personal.maritalStatus || '',
       nationalId: personal.nationalId || '',
+      selfServiceEligible: Boolean(row.selfServiceEligible),
+      lineManagerUserId: row.lineManagerUserId || '',
+      leaveEntitlementBand: row.leaveEntitlementBand || '',
+      branchChangeReason: '',
     });
     setEditOpen(true);
   };
@@ -284,6 +335,10 @@ export default function StaffProfile() {
         relationship: editForm.nextOfKinRelationship.trim() || '',
         address: editForm.nextOfKinAddress.trim() || '',
       },
+      selfServiceEligible: editForm.selfServiceEligible,
+      lineManagerUserId: editForm.lineManagerUserId.trim() || null,
+      leaveEntitlementBand: editForm.leaveEntitlementBand.trim() || null,
+      branchChangeReason: editForm.branchChangeReason.trim() || undefined,
       profileExtra: {
         ...(row.profileExtra || {}),
         compensationPackage: {
@@ -333,6 +388,16 @@ export default function StaffProfile() {
     setLetterOpen(true);
   };
 
+  const loadDisciplineEvents = useCallback(async (caseId) => {
+    const cid = String(caseId || '').trim();
+    if (!cid || loadedDisciplineEventsRef.current.has(cid)) return;
+    loadedDisciplineEventsRef.current.add(cid);
+    const { ok, data } = await apiFetch(`/api/hr/discipline/cases/${encodeURIComponent(cid)}/events`);
+    if (ok && data?.ok) {
+      setDisciplineEventsByCase((m) => ({ ...m, [cid]: data.events || [] }));
+    }
+  }, []);
+
   const extra = row?.profileExtra || {};
   const personal = extra.personalProfile || {};
   const compPkg = extra.compensationPackage || {};
@@ -362,7 +427,7 @@ export default function StaffProfile() {
   if (!row) {
     return (
       <MainPanel>
-        <PageHeader eyebrow="Human resources" title="Staff profile" />
+        <PageHeader title="Staff profile" />
         <p className="text-sm text-slate-600">Profile not found.</p>
         <Link className="mt-4 inline-block text-sm text-[#134e4a] hover:underline" to="/hr/staff">
           Back to directory
@@ -394,7 +459,11 @@ export default function StaffProfile() {
     { id: 'attendance', label: 'Attendance', icon: CalendarRange },
     { id: 'requests', label: 'HR requests', icon: FileText },
     { id: 'leave', label: 'Leave file', icon: CalendarRange },
-    { id: 'discipline', label: 'Disciplinary', icon: ShieldAlert },
+    { id: 'discipline-cases', label: 'Discipline cases', icon: ShieldAlert },
+    { id: 'branchhist', label: 'Branch moves', icon: Building2 },
+    { id: 'appraisals', label: 'Appraisals', icon: ClipboardList },
+    { id: 'feedback', label: 'Feedback', icon: MessageSquareText },
+    { id: 'discipline', label: 'Disciplinary (file)', icon: ShieldAlert },
   ];
   const scrollToId = (id) => {
     document.getElementById(`hrsp-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -403,7 +472,6 @@ export default function StaffProfile() {
   return (
     <>
       <PageHeader
-        eyebrow="Human resources"
         title={row.displayName || row.username || 'Staff'}
         subtitle={row.jobTitle || row.department || 'Employee record'}
         actions={
@@ -499,6 +567,28 @@ export default function StaffProfile() {
                     {leaveRec ? `${leaveUsed}/${leaveEntitlement} used` : 'No leave file'}
                   </p>
                 </div>
+                {!row._noHrFile ? (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50/50 px-3 py-3 sm:col-span-2 xl:col-span-1">
+                    <p className="text-[9px] font-bold uppercase text-slate-400">Self-service apps</p>
+                    <p className="mt-1 text-xs font-black text-slate-800">
+                      {row.selfServiceEligible ? 'Enabled' : 'Off'}
+                    </p>
+                    <p className="text-[10px] text-slate-500">Leave / loan buttons on My profile</p>
+                  </div>
+                ) : null}
+                {!row._noHrFile ? (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50/50 px-3 py-3 sm:col-span-2 xl:col-span-2">
+                    <p className="text-[9px] font-bold uppercase text-slate-400">Job &amp; reporting</p>
+                    <p className="mt-1 text-[10px] text-slate-600">
+                      <span className="font-bold text-slate-700">Line manager (user id):</span>{' '}
+                      <span className="font-mono text-xs text-slate-900">{row.lineManagerUserId || '—'}</span>
+                    </p>
+                    <p className="mt-0.5 text-[10px] text-slate-600">
+                      <span className="font-bold text-slate-700">Leave band:</span>{' '}
+                      {row.leaveEntitlementBand || 'Policy default'}
+                    </p>
+                  </div>
+                ) : null}
               </div>
             </section>
 
@@ -547,6 +637,20 @@ export default function StaffProfile() {
                 <dt className="text-slate-500">Probation end</dt>
                 <dd className="font-medium text-slate-900">{row.probationEndIso || '—'}</dd>
               </div>
+              {!row._noHrFile ? (
+                <>
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-slate-500">Line manager</dt>
+                    <dd className="font-medium font-mono text-slate-900 text-right break-all">
+                      {row.lineManagerUserId || '—'}
+                    </dd>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-slate-500">Leave entitlement band</dt>
+                    <dd className="font-medium text-slate-900">{row.leaveEntitlementBand || '—'}</dd>
+                  </div>
+                </>
+              ) : null}
             </dl>
           </section>
 
@@ -813,6 +917,113 @@ export default function StaffProfile() {
           </section>
         ) : null}
 
+        {!row._noHrFile ? (
+          <section id="hrsp-discipline-cases" className="mt-6 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm scroll-mt-28">
+            <h3 className="text-[11px] font-black uppercase text-slate-800">Discipline cases</h3>
+            <p className="mt-1 text-xs text-slate-500">Formal cases (queries, suspensions, decisions).</p>
+            {hrDisciplineCases.length === 0 ? (
+              <p className="mt-3 text-sm text-slate-600">No discipline cases for this employee.</p>
+            ) : (
+              <ul className="mt-3 space-y-3 text-sm">
+                {hrDisciplineCases.map((c) => (
+                  <li key={c.id} className="rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-mono text-slate-600">{c.id}</span>
+                      <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-800">
+                        {c.status}
+                      </span>
+                    </div>
+                    {c.offenceCategory ? (
+                      <p className="mt-1 text-[10px] font-bold uppercase text-slate-500">{c.offenceCategory}</p>
+                    ) : null}
+                    <p className="mt-1 text-slate-800">{c.summary}</p>
+                    <p className="mt-1 text-[10px] text-slate-500">
+                      Opened {c.openedAtIso ? String(c.openedAtIso).slice(0, 10) : '—'}
+                    </p>
+                    <button
+                      type="button"
+                      className="mt-2 text-[11px] font-bold uppercase text-[#134e4a] hover:underline"
+                      onClick={() => void loadDisciplineEvents(c.id)}
+                    >
+                      Load timeline
+                    </button>
+                    {disciplineEventsByCase[c.id]?.length ? (
+                      <ul className="mt-2 space-y-1 border-t border-slate-200/80 pt-2 text-xs text-slate-700">
+                        {disciplineEventsByCase[c.id].map((ev) => (
+                          <li key={ev.id}>
+                            <span className="font-bold text-slate-500">
+                              {ev.createdAtIso ? String(ev.createdAtIso).slice(0, 16) : '—'}
+                            </span>{' '}
+                            · {ev.eventKind}: {ev.note}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        ) : null}
+
+        {branchHistoryRows.length > 0 ? (
+          <section id="hrsp-branchhist" className="mt-6 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm scroll-mt-28">
+            <h3 className="text-[11px] font-black uppercase text-[#134e4a]">Branch moves</h3>
+            <ul className="mt-3 space-y-2 text-sm">
+              {branchHistoryRows.map((h) => (
+                <li key={h.id} className="rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2">
+                  <p className="font-semibold text-slate-800">
+                    {h.fromBranchId || '—'} → {h.toBranchId || '—'}
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    Effective {h.effectiveFromIso || '—'}
+                    {h.reason ? ` · ${h.reason}` : ''}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+
+        {appraisalBundle.length > 0 ? (
+          <section id="hrsp-appraisals" className="mt-6 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm scroll-mt-28">
+            <h3 className="text-[11px] font-black uppercase text-[#134e4a]">Appraisals</h3>
+            <ul className="mt-3 space-y-2 text-sm">
+              {appraisalBundle.map(({ cycle, form }) => (
+                <li key={`${cycle.id}-${form.id}`} className="rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2">
+                  <p className="font-semibold text-slate-800">
+                    {cycle.label || cycle.year}
+                    {form.status ? (
+                      <span className="ml-2 text-xs font-normal text-slate-500">({form.status})</span>
+                    ) : null}
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    Reviewer: {form.reviewerUserId || '—'} · MD confirmed:{' '}
+                    {Number(form.mdConfirmed) ? 'Yes' : 'No'}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+
+        {feedbackNotesList.length > 0 ? (
+          <section id="hrsp-feedback" className="mt-6 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm scroll-mt-28">
+            <h3 className="text-[11px] font-black uppercase text-[#134e4a]">Continuous feedback</h3>
+            <ul className="mt-3 space-y-2 text-sm">
+              {feedbackNotesList.map((n) => (
+                <li key={n.id} className="rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2">
+                  <p className="text-xs font-bold text-slate-500">
+                    {n.createdAtIso ? String(n.createdAtIso).slice(0, 16) : '—'}
+                    {n.authorUserId ? ` · ${n.authorUserId}` : ''}
+                  </p>
+                  <p className="mt-1 text-slate-800">{n.body}</p>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+
         {disciplinary.length > 0 ? (
           <section id="hrsp-discipline" className="mt-6 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm scroll-mt-28">
             <h3 className="text-[11px] font-black uppercase text-rose-800">Disciplinary notes (file)</h3>
@@ -907,6 +1118,59 @@ export default function StaffProfile() {
                 <option value="temporary">Temporary</option>
               </select>
             </label>
+            {caps?.canManageStaff ? (
+              <>
+                <label className="block text-xs font-bold text-slate-700">
+                  Line manager (user ID)
+                  <input
+                    className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm font-mono"
+                    value={editForm.lineManagerUserId}
+                    placeholder="Supervisor app_users.id"
+                    onChange={(e) => setEditForm((f) => ({ ...f, lineManagerUserId: e.target.value }))}
+                  />
+                </label>
+                <label className="block text-xs font-bold text-slate-700">
+                  Leave entitlement band
+                  <select
+                    className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                    value={editForm.leaveEntitlementBand}
+                    onChange={(e) => setEditForm((f) => ({ ...f, leaveEntitlementBand: e.target.value }))}
+                  >
+                    <option value="">Default (policy)</option>
+                    <option value="senior">Senior</option>
+                    <option value="junior">Junior</option>
+                  </select>
+                </label>
+                {editForm.branchId.trim() && row?.branchId && editForm.branchId.trim() !== String(row.branchId) ? (
+                  <label className="block text-xs font-bold text-slate-700">
+                    Branch transfer reason
+                    <textarea
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                      rows={2}
+                      value={editForm.branchChangeReason}
+                      onChange={(e) => setEditForm((f) => ({ ...f, branchChangeReason: e.target.value }))}
+                      placeholder="Stored on branch history when you save"
+                    />
+                  </label>
+                ) : null}
+              </>
+            ) : null}
+            {caps?.canManageStaff ? (
+              <label className="flex cursor-pointer items-start gap-2 text-xs font-bold text-slate-700">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 rounded border-slate-300"
+                  checked={editForm.selfServiceEligible}
+                  onChange={(e) => setEditForm((f) => ({ ...f, selfServiceEligible: e.target.checked }))}
+                />
+                <span>
+                  Self-service enabled
+                  <span className="mt-0.5 block text-[10px] font-normal text-slate-500">
+                    Allows this employee to use Leave / Loan application on My profile.
+                  </span>
+                </span>
+              </label>
+            ) : null}
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="text-xs font-bold text-slate-700">
                 Date joined

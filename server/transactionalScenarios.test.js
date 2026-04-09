@@ -2,7 +2,7 @@
  * Maps the 20 end-to-end transactional scenarios (customer → quote → payment → stock → finance)
  * to automated API checks. Each scenario is one test for clear failure attribution.
  */
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import { createDatabase } from './db.js';
 import { createApp } from './app.js';
@@ -31,6 +31,17 @@ function amountDueFor(summary, quotationId) {
 }
 
 describe('Transactional scenarios (business checklist)', () => {
+  beforeEach(() => {
+    // These scenarios use fixed 2026 dates; freeze time so status derivations (e.g. Expired vs Pending)
+    // remain stable regardless of the real current date when tests run.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-29T12:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   afterAll(() => {
     for (const db of openDbs) db.close();
     openDbs.length = 0;
@@ -592,7 +603,7 @@ describe('Transactional scenarios (business checklist)', () => {
           {
             lineKey: 'L-TX12',
             productID: 'PRD-102',
-            productName: 'Aluzinc coil (kg)',
+            productName: 'Aluzinc (PPGI) coil (kg)',
             qtyOrdered: 500,
             unitPricePerKgNgn: 200,
             unitPriceNgn: 200,

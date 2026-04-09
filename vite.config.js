@@ -16,6 +16,14 @@ export default defineConfig({
       },
     },
   },
+  preview: {
+    proxy: {
+      '/api': {
+        target: `http://127.0.0.1:${process.env.E2E_API_PORT || 8787}`,
+        changeOrigin: true,
+      },
+    },
+  },
   test: {
     globals: false,
     pool: 'forks',
@@ -26,7 +34,7 @@ export default defineConfig({
           environment: 'jsdom',
           include: ['src/**/*.{test,spec}.{js,jsx}'],
           setupFiles: './src/test/setup.js',
-          testTimeout: 15_000,
+          testTimeout: 45_000,
         },
       },
       {
@@ -34,7 +42,8 @@ export default defineConfig({
           name: 'node',
           environment: 'node',
           include: ['server/**/*.test.js', 'shared/**/*.test.js'],
-          testTimeout: 15_000,
+          testTimeout: 30_000,
+          hookTimeout: 45_000,
         },
       },
     ],

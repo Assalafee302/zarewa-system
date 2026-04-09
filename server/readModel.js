@@ -1,5 +1,8 @@
+import { companionOverpayNgnByReceiptId } from '../src/lib/customerLedgerCore.js';
 import { accessoryFulfillmentSummaryForQuotation } from './accessoryFulfillment.js';
 import { publicUserFromRow } from './auth.js';
+import { procurementKindFromPoRow } from './procurementPoKind.js';
+import { listBranches } from './branches.js';
 import { branchPredicate } from './branchSql.js';
 /** @param {import('better-sqlite3').Database} db */
 
@@ -60,6 +63,7 @@ function mapCustomerRow(row) {
     followUpISO: row.follow_up_iso ?? '',
     crmTags: parseCrmTagsJson(row.crm_tags_json),
     crmProfileNotes: row.crm_profile_notes ?? '',
+    branchId: row.branch_id ?? '',
   };
 }
 
@@ -117,6 +121,7 @@ function mapQuotationRow(row) {
   let materialGauge = '';
   let materialColor = '';
   let materialDesign = '';
+  let materialTypeId = '';
   try {
     const raw = row.lines_json;
     if (raw) {
@@ -125,6 +130,7 @@ function mapQuotationRow(row) {
         if (typeof j.materialGauge === 'string') materialGauge = j.materialGauge;
         if (typeof j.materialColor === 'string') materialColor = j.materialColor;
         if (typeof j.materialDesign === 'string') materialDesign = j.materialDesign;
+        if (typeof j.materialTypeId === 'string') materialTypeId = j.materialTypeId;
         if (
           Array.isArray(j.products) &&
           Array.isArray(j.accessories) &&
@@ -161,11 +167,16 @@ function mapQuotationRow(row) {
     materialGauge,
     materialColor,
     materialDesign,
+    materialTypeId,
     branchId: row.branch_id ?? '',
     managerProductionApprovedAtISO: row.manager_production_approved_at_iso ?? null,
     managerClearedAtISO: row.manager_cleared_at_iso ?? null,
     managerFlaggedAtISO: row.manager_flagged_at_iso ?? null,
     managerFlagReason: row.manager_flag_reason ?? '',
+    mdPriceExceptionApprovedAtISO: row.md_price_exception_approved_at_iso ?? null,
+    mdPriceExceptionApprovedByUserId: row.md_price_exception_approved_by_user_id ?? null,
+    archived: Number(row.archived) === 1,
+    lifecycleNote: row.quotation_lifecycle_note ?? '',
   };
 }
 
@@ -563,10 +574,19 @@ export function listTransportAgents(db, branchScope = 'ALL') {
 }
 
 export function listProducts(db, branchScope = 'ALL') {
-  const b = branchWhere(db, 'products', branchScope);
-  return db
-    .prepare(`SELECT * FROM products WHERE 1=1${b.sql} ORDER BY name`)
-    .all(...b.args)
+  const hasPb = hasColumn(db, 'products', 'branch_id');
+  let rows;
+  if (branchScope === 'ALL' || !branchScope || !hasPb) {
+    const b = branchWhere(db, 'products', branchScope);
+    rows = db.prepare(`SELECT * FROM products WHERE 1=1${b.sql} ORDER BY name`).all(...b.args);
+  } else {
+    rows = db
+      .prepare(
+        `SELECT * FROM products WHERE branch_id = ? OR branch_id IS NULL OR TRIM(COALESCE(branch_id,'')) = '' ORDER BY name`
+      )
+      .all(branchScope);
+  }
+  return rows
     .map((row) => {
       let dashboardAttrs = {};
       try {
@@ -596,39 +616,43 @@ export function listPurchaseOrders(db, branchScope = 'ALL') {
     .prepare(`SELECT * FROM purchase_orders WHERE 1=1${b.sql} ORDER BY order_date_iso DESC`)
     .all(...b.args);
   const lineStmt = db.prepare(`SELECT * FROM purchase_order_lines WHERE po_id = ? ORDER BY line_key`);
-  return pos.map((row) => ({
-    poID: row.po_id,
-    supplierID: row.supplier_id,
-    supplierName: row.supplier_name,
-    orderDateISO: row.order_date_iso,
-    expectedDeliveryISO: row.expected_delivery_iso,
-    status: row.status,
-    invoiceNo: row.invoice_no ?? '',
-    invoiceDateISO: row.invoice_date_iso ?? '',
-    deliveryDateISO: row.delivery_date_iso ?? '',
-    transportAgentId: row.transport_agent_id ?? '',
-    transportAgentName: row.transport_agent_name ?? '',
-    transportReference: row.transport_reference ?? '',
-    transportNote: row.transport_note ?? '',
-    transportTreasuryMovementId: row.transport_treasury_movement_id ?? '',
-    transportAmountNgn: Number(row.transport_amount_ngn) || 0,
-    transportPaid: Boolean(row.transport_paid),
-    transportPaidAtISO: row.transport_paid_at_iso ?? '',
-    supplierPaidNgn: row.supplier_paid_ngn ?? 0,
-    lines: lineStmt.all(row.po_id).map((l) => ({
-      lineKey: l.line_key,
-      productID: l.product_id,
-      productName: l.product_name,
-      color: l.color ?? '',
-      gauge: l.gauge ?? '',
-      metersOffered: l.meters_offered,
-      conversionKgPerM: l.conversion_kg_per_m,
-      unitPricePerKgNgn: l.unit_price_per_kg_ngn,
-      unitPriceNgn: l.unit_price_ngn,
-      qtyOrdered: l.qty_ordered,
-      qtyReceived: l.qty_received,
-    })),
-  }));
+  return pos.map((row) => {
+    const rawLines = lineStmt.all(row.po_id);
+    return {
+      poID: row.po_id,
+      supplierID: row.supplier_id,
+      supplierName: row.supplier_name,
+      orderDateISO: row.order_date_iso,
+      expectedDeliveryISO: row.expected_delivery_iso,
+      status: row.status,
+      invoiceNo: row.invoice_no ?? '',
+      invoiceDateISO: row.invoice_date_iso ?? '',
+      deliveryDateISO: row.delivery_date_iso ?? '',
+      transportAgentId: row.transport_agent_id ?? '',
+      transportAgentName: row.transport_agent_name ?? '',
+      transportReference: row.transport_reference ?? '',
+      transportNote: row.transport_note ?? '',
+      transportTreasuryMovementId: row.transport_treasury_movement_id ?? '',
+      transportAmountNgn: Number(row.transport_amount_ngn) || 0,
+      transportPaid: Boolean(row.transport_paid),
+      transportPaidAtISO: row.transport_paid_at_iso ?? '',
+      supplierPaidNgn: row.supplier_paid_ngn ?? 0,
+      procurementKind: procurementKindFromPoRow(row, rawLines),
+      lines: rawLines.map((l) => ({
+        lineKey: l.line_key,
+        productID: l.product_id,
+        productName: l.product_name,
+        color: l.color ?? '',
+        gauge: l.gauge ?? '',
+        metersOffered: l.meters_offered,
+        conversionKgPerM: l.conversion_kg_per_m,
+        unitPricePerKgNgn: l.unit_price_per_kg_ngn,
+        unitPriceNgn: l.unit_price_ngn,
+        qtyOrdered: l.qty_ordered,
+        qtyReceived: l.qty_received,
+      })),
+    };
+  });
 }
 
 export function listCoilLots(db, branchScope = 'ALL') {
@@ -682,8 +706,49 @@ export function listStockMovements(db) {
     }));
 }
 
-export function getWipByProduct(db) {
-  const rows = db.prepare(`SELECT * FROM wip_balances`).all();
+/**
+ * Stock ledger for one product (in/out), newest first.
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} productID
+ * @param {number} [limit]
+ */
+export function listStockMovementsForProduct(db, productID, limit = 500) {
+  const pid = String(productID || '').trim();
+  if (!pid) return [];
+  const lim = Math.min(Math.max(Number(limit) || 500, 1), 2000);
+  return db
+    .prepare(
+      `SELECT * FROM stock_movements WHERE product_id = ? ORDER BY at_iso DESC, id DESC LIMIT ?`
+    )
+    .all(pid, lim)
+    .map((row) => ({
+      id: row.id,
+      atISO: row.at_iso,
+      type: row.type,
+      ref: row.ref,
+      productID: row.product_id,
+      qty: row.qty,
+      detail: row.detail,
+      dateISO: row.date_iso,
+      unitPriceNgn: row.unit_price_ngn,
+      valueNgn: row.value_ngn != null ? Number(row.value_ngn) : null,
+    }));
+}
+
+export function getWipByProduct(db, branchScope = 'ALL') {
+  const hasBb = hasColumn(db, 'wip_balances', 'branch_id');
+  let rows;
+  if (!hasBb) {
+    rows = db.prepare(`SELECT * FROM wip_balances`).all();
+  } else if (branchScope === 'ALL' || !branchScope) {
+    rows = db.prepare(`SELECT * FROM wip_balances`).all();
+  } else {
+    rows = db
+      .prepare(
+        `SELECT * FROM wip_balances WHERE branch_id = ? OR branch_id IS NULL OR TRIM(COALESCE(branch_id,'')) = ''`
+      )
+      .all(branchScope);
+  }
   const o = {};
   for (const r of rows) o[r.product_id] = r.qty;
   return o;
@@ -738,7 +803,48 @@ export function listSalesReceipts(db, branchScope = 'ALL') {
       status: row.status,
       handledBy: row.handled_by,
       ledgerEntryId: row.ledger_entry_id ?? null,
+      bankConfirmedAtISO: row.bank_confirmed_at_iso ?? null,
+      bankConfirmedByUserId: row.bank_confirmed_by_user_id ?? null,
+      bankReceivedAmountNgn:
+        row.bank_received_amount_ngn != null ? Number(row.bank_received_amount_ngn) : null,
+      financeDeliveryClearedAtISO: row.finance_delivery_cleared_at_iso ?? null,
+      financeDeliveryClearedByUserId: row.finance_delivery_cleared_by_user_id ?? null,
     }));
+}
+
+function ngnListDisplay(n) {
+  const v = Math.round(Number(n) || 0);
+  return `₦${v.toLocaleString('en-NG')}`;
+}
+
+/**
+ * Adds `cashReceivedNgn` (actual payment) while keeping `amountNgn` as quotation allocation for paid-AR math.
+ * Updates `amount` label when cash exceeds allocation (overpayment split).
+ * @param {object[]} receiptRows from listSalesReceipts
+ * @param {object[]} ledgerEntries
+ */
+export function enrichSalesReceiptRowsWithCashFromLedger(receiptRows, ledgerEntries) {
+  const rows = Array.isArray(receiptRows) ? receiptRows : [];
+  if (!ledgerEntries?.length) {
+    return rows.map((r) => ({
+      ...r,
+      cashReceivedNgn: Math.round(Number(r.amountNgn) || 0),
+    }));
+  }
+  const companion = companionOverpayNgnByReceiptId(ledgerEntries);
+  return rows.map((r) => {
+    const alloc = Math.round(Number(r.amountNgn) || 0);
+    const rid = String(r.id || '');
+    const lid = r.ledgerEntryId != null ? String(r.ledgerEntryId) : '';
+    const extra = companion.get(rid) || (lid ? companion.get(lid) : 0) || 0;
+    const cash = Math.round(alloc + extra);
+    const next = { ...r, cashReceivedNgn: cash };
+    if (extra > 0) {
+      next.quotationAllocatedNgn = alloc;
+      next.amount = ngnListDisplay(cash);
+    }
+    return next;
+  });
 }
 
 /** Advance deposits (ADVANCE_IN) mirrored at post time — query-friendly; balances still from ledger math. */
@@ -772,39 +878,95 @@ export function getCuttingList(db, id) {
   return mapCuttingListRow(db, row);
 }
 
+function fgAdjustmentTotalsByJobId(db, branchScope) {
+  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='production_completion_adjustments'`).get()) {
+    return new Map();
+  }
+  const b = branchWhere(db, 'production_jobs', branchScope);
+  const branchSql = b.sql ? b.sql.replace(/\bbranch_id\b/g, 'j.branch_id') : '';
+  const rows = db
+    .prepare(
+      `SELECT a.job_id AS job_id, COALESCE(SUM(a.delta_finished_goods_m), 0) AS total
+       FROM production_completion_adjustments a
+       INNER JOIN production_jobs j ON j.job_id = a.job_id
+       WHERE 1=1${branchSql}
+       GROUP BY a.job_id`
+    )
+    .all(...b.args);
+  const m = new Map();
+  for (const r of rows) m.set(r.job_id, Number(r.total) || 0);
+  return m;
+}
+
 export function listProductionJobs(db, branchScope = 'ALL') {
+  const adjByJob = fgAdjustmentTotalsByJobId(db, branchScope);
   const b = branchWhere(db, 'production_jobs', branchScope);
   return db
     .prepare(`SELECT * FROM production_jobs WHERE 1=1${b.sql} ORDER BY created_at_iso DESC, job_id DESC`)
     .all(...b.args)
-    .map((row) => ({
-      jobID: row.job_id,
-      cuttingListId: row.cutting_list_id ?? '',
-      quotationRef: row.quotation_ref ?? '',
-      customerID: row.customer_id ?? '',
-      customerName: row.customer_name ?? '',
-      productID: row.product_id ?? '',
-      productName: row.product_name ?? '',
-      plannedMeters: Number(row.planned_meters) || 0,
-      plannedSheets: Number(row.planned_sheets) || 0,
-      machineName: row.machine_name ?? '',
-      startDateISO: row.start_date_iso ?? '',
-      endDateISO: row.end_date_iso ?? '',
-      materialsNote: row.materials_note ?? '',
-      status: row.status ?? 'Planned',
-      createdAtISO: row.created_at_iso,
-      completedAtISO: row.completed_at_iso ?? '',
-      actualMeters: Number(row.actual_meters) || 0,
-      actualWeightKg: Number(row.actual_weight_kg) || 0,
-      conversionAlertState: row.conversion_alert_state ?? 'Pending',
-      managerReviewRequired: Boolean(row.manager_review_required),
-      managerReviewSignedAtISO: row.manager_review_signed_at_iso ?? '',
-      managerReviewSignedByUserId: row.manager_review_signed_by_user_id ?? '',
-      managerReviewSignedByName: row.manager_review_signed_by_name ?? '',
-      managerReviewRemark: row.manager_review_remark ?? '',
-      operatorName: row.operator_name ?? '',
-      branchId: row.branch_id ?? '',
-    }));
+    .map((row) => {
+      const baseActual = Number(row.actual_meters) || 0;
+      const fgAdj = adjByJob.get(row.job_id) || 0;
+      return {
+        jobID: row.job_id,
+        cuttingListId: row.cutting_list_id ?? '',
+        quotationRef: row.quotation_ref ?? '',
+        customerID: row.customer_id ?? '',
+        customerName: row.customer_name ?? '',
+        productID: row.product_id ?? '',
+        productName: row.product_name ?? '',
+        plannedMeters: Number(row.planned_meters) || 0,
+        plannedSheets: Number(row.planned_sheets) || 0,
+        machineName: row.machine_name ?? '',
+        startDateISO: row.start_date_iso ?? '',
+        endDateISO: row.end_date_iso ?? '',
+        materialsNote: row.materials_note ?? '',
+        status: row.status ?? 'Planned',
+        createdAtISO: row.created_at_iso,
+        completedAtISO: row.completed_at_iso ?? '',
+        actualMeters: baseActual,
+        fgAdjustmentMetersTotal: fgAdj,
+        effectiveOutputMeters: baseActual + fgAdj,
+        actualWeightKg: Number(row.actual_weight_kg) || 0,
+        conversionAlertState: row.conversion_alert_state ?? 'Pending',
+        managerReviewRequired: Boolean(row.manager_review_required),
+        managerReviewSignedAtISO: row.manager_review_signed_at_iso ?? '',
+        managerReviewSignedByUserId: row.manager_review_signed_by_user_id ?? '',
+        managerReviewSignedByName: row.manager_review_signed_by_name ?? '',
+        managerReviewRemark: row.manager_review_remark ?? '',
+        operatorName: row.operator_name ?? '',
+        branchId: row.branch_id ?? '',
+        coilSpecMismatchPending: Boolean(row.coil_spec_mismatch_pending),
+      };
+    });
+}
+
+export function listProductionCompletionAdjustments(db, branchScope = 'ALL') {
+  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='production_completion_adjustments'`).get()) {
+    return [];
+  }
+  const b = branchWhere(db, 'production_jobs', branchScope);
+  const branchSql = b.sql ? b.sql.replace(/\bbranch_id\b/g, 'j.branch_id') : '';
+  const rows = db
+    .prepare(
+      `SELECT a.id AS id, a.job_id AS job_id, a.delta_finished_goods_m AS delta_finished_goods_m,
+              a.note AS note, a.at_iso AS at_iso, a.created_by_user_id AS created_by_user_id,
+              a.created_by_name AS created_by_name
+       FROM production_completion_adjustments a
+       INNER JOIN production_jobs j ON j.job_id = a.job_id
+       WHERE 1=1${branchSql}
+       ORDER BY a.at_iso DESC, a.id DESC`
+    )
+    .all(...b.args);
+  return rows.map((row) => ({
+    id: row.id,
+    jobID: row.job_id,
+    deltaFinishedGoodsM: Number(row.delta_finished_goods_m) || 0,
+    note: row.note ?? '',
+    atISO: row.at_iso ?? '',
+    createdByUserId: row.created_by_user_id ?? '',
+    createdByName: row.created_by_name ?? '',
+  }));
 }
 
 export function listProductionJobAccessoryUsage(db, branchScope = 'ALL') {
@@ -844,16 +1006,37 @@ export function getRefundIntelligenceForQuotation(db, quotationRef, branchScope 
       summary: { producedMeters: 0, accessoriesSummary: { lines: [] } },
     };
   }
-  const receipts = listSalesReceipts(db, branchScope)
-    .filter((r) => String(r.quotationRef || '').trim() === ref)
-    .map((r) => ({ id: r.id, amountNgn: r.amountNgn }));
+  const ledgerRows = listLedgerEntries(db, branchScope);
+  const lb = branchWhere(db, 'ledger_entries', branchScope);
+  const overpayRow = db
+    .prepare(
+      `SELECT COALESCE(SUM(amount_ngn), 0) AS s FROM ledger_entries WHERE type = 'OVERPAY_ADVANCE' AND quotation_ref = ?${lb.sql}`
+    )
+    .get(ref, ...lb.args);
+  const overpayAdvanceNgn = Math.round(Number(overpayRow?.s) || 0);
+  const qb = branchWhere(db, 'quotations', branchScope);
+  const qPaidRow = db
+    .prepare(`SELECT paid_ngn FROM quotations WHERE id = ?${qb.sql}`)
+    .get(ref, ...qb.args);
+  const bookedOnQuotationNgn = Math.round(Number(qPaidRow?.paid_ngn) || 0);
+
+  const receipts = enrichSalesReceiptRowsWithCashFromLedger(
+    listSalesReceipts(db, branchScope).filter((r) => String(r.quotationRef || '').trim() === ref),
+    ledgerRows
+  ).map((r) => ({
+    id: r.id,
+    amountNgn: Math.round(Number(r.cashReceivedNgn ?? r.amountNgn) || 0),
+  }));
   const cuttingLists = listCuttingLists(db, branchScope).filter(
     (cl) => String(cl.quotationRef || '').trim() === ref
   );
   const jobs = listProductionJobs(db, branchScope).filter(
     (j) => String(j.quotationRef || '').trim() === ref
   );
-  const producedMeters = jobs.reduce((sum, j) => sum + (Number(j.actualMeters) || 0), 0);
+  const producedMeters = jobs.reduce(
+    (sum, j) => sum + (Number(j.effectiveOutputMeters ?? j.actualMeters) || 0),
+    0
+  );
   const accLines = accessoryFulfillmentSummaryForQuotation(db, ref);
   return {
     receipts,
@@ -861,6 +1044,9 @@ export function getRefundIntelligenceForQuotation(db, quotationRef, branchScope 
     summary: {
       producedMeters,
       accessoriesSummary: { lines: accLines },
+      overpayAdvanceNgn,
+      bookedOnQuotationNgn,
+      quotationCashInNgn: bookedOnQuotationNgn + overpayAdvanceNgn,
     },
   };
 }
@@ -1049,7 +1235,7 @@ export function listAccountsPayable(db, branchScope = 'ALL') {
   const b = branchPredicate(db, 'purchase_orders', branchScope, 'po');
   return db
     .prepare(
-      `SELECT ap.* FROM accounts_payable ap
+      `SELECT ap.*, po.branch_id AS po_branch_id FROM accounts_payable ap
        LEFT JOIN purchase_orders po ON po.po_id = ap.po_ref
        WHERE 1=1${b.sql}
        ORDER BY ap.due_date_iso DESC`
@@ -1064,6 +1250,7 @@ export function listAccountsPayable(db, branchScope = 'ALL') {
       paidNgn: row.paid_ngn,
       dueDateISO: row.due_date_iso,
       paymentMethod: row.payment_method,
+      branchId: row.po_branch_id ?? '',
     }));
 }
 
@@ -1080,6 +1267,15 @@ export function listBankReconciliation(db, branchScope = 'ALL') {
       systemMatch: row.system_match,
       status: row.status,
       branchId: row.branch_id || '',
+      settledAmountNgn: row.settled_amount_ngn ?? null,
+      matchedSystemAmountNgn: row.matched_system_amount_ngn ?? null,
+      varianceNgn: row.variance_ngn ?? null,
+      variancePercent: row.variance_percent ?? null,
+      treasuryAccountId: row.treasury_account_id ?? null,
+      treasuryAdjustmentMovementId: row.treasury_adjustment_movement_id ?? null,
+      managerClearedAtISO: row.manager_cleared_at_iso ?? null,
+      managerClearedByUserId: row.manager_cleared_by_user_id ?? null,
+      managerClearedByName: row.manager_cleared_by_name ?? null,
     }));
 }
 
@@ -1364,6 +1560,75 @@ export function dashboardSummary(db, branchScope = 'ALL', opts = {}) {
       quotations: recentQuotations,
       receipts: recentReceipts,
     },
+  };
+}
+
+/**
+ * Org-wide aggregates for executive (CEO) dashboard — no row payloads.
+ * @param {import('better-sqlite3').Database} db
+ */
+export function execOrgSummary(db) {
+  const counts = workspaceReportAggregateCounts(db, 'ALL');
+  const productionMetrics = computeProductionMetricsRollup(db, 'ALL');
+
+  let payrollDraftsAwaitingMd = 0;
+  try {
+    payrollDraftsAwaitingMd =
+      Number(
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM hr_payroll_runs
+             WHERE LOWER(TRIM(IFNULL(status,''))) = 'draft'
+               AND (md_approved_at_iso IS NULL OR TRIM(IFNULL(md_approved_at_iso,'')) = '')`
+          )
+          .get()?.c
+      ) || 0;
+  } catch {
+    /* HR tables or MD column not present */
+  }
+
+  let bankReconciliationLinesInReview = 0;
+  try {
+    bankReconciliationLinesInReview =
+      Number(
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM bank_reconciliation_lines
+             WHERE TRIM(IFNULL(status,'')) IN ('Review', 'PendingManager')`
+          )
+          .get()?.c
+      ) || 0;
+  } catch {
+    /* table missing in minimal test DBs */
+  }
+
+  const pendingRefunds =
+    Number(
+      db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM customer_refunds WHERE TRIM(LOWER(IFNULL(status,''))) IN ('pending','submitted','awaiting approval')`
+        )
+        .get()?.c
+    ) || 0;
+  const pendingPaymentRequests =
+    Number(
+      db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM payment_requests WHERE TRIM(IFNULL(approval_status,'')) IN ('Pending','Submitted','Awaiting approval','')`
+        )
+        .get()?.c
+    ) || 0;
+  const branches = listBranches(db).map((b) => ({ id: b.id, name: b.name ?? b.id }));
+  return {
+    ok: true,
+    generatedAtISO: new Date().toISOString(),
+    branches,
+    counts,
+    productionMetrics,
+    pendingRefunds,
+    pendingPaymentRequests,
+    payrollDraftsAwaitingMd,
+    bankReconciliationLinesInReview,
   };
 }
 

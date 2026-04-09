@@ -5,6 +5,17 @@ import { MainPanel, ModalFrame, PageHeader } from '../../components/layout';
 import { useHrWorkspace } from '../../context/HrWorkspaceContext';
 import { useToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/apiBase';
+import { APP_DATA_TABLE_PAGE_SIZE, useAppTablePaging } from '../../lib/appDataTable';
+import {
+  AppTable,
+  AppTableBody,
+  AppTablePager,
+  AppTableTd,
+  AppTableTh,
+  AppTableThead,
+  AppTableTr,
+  AppTableWrap,
+} from '../../components/ui/AppDataTable';
 import { downloadPayrollGlJournalTemplate, downloadPayrollTreasuryPack } from '../../lib/hrDownload';
 import { formatNgn } from '../../hr/hrFormat';
 import HrCapsLoading from './hrCapsLoading';
@@ -20,6 +31,12 @@ export default function HrPayroll() {
   const [detailLines, setDetailLines] = useState([]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [draftEdit, setDraftEdit] = useState({ taxPercent: '', pensionPercent: '', notes: '' });
+  const [signForm, setSignForm] = useState({
+    filingStatus: '',
+    filingReference: '',
+    filingAtIso: '',
+    signedPdfSha256: '',
+  });
   const [period, setPeriod] = useState(() => {
     const d = new Date();
     return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`;
@@ -54,6 +71,12 @@ export default function HrPayroll() {
         taxPercent: String(data.run.taxPercent ?? ''),
         pensionPercent: String(data.run.pensionPercent ?? ''),
         notes: data.run.notes ?? '',
+      });
+      setSignForm({
+        filingStatus: data.run.filingStatus ?? '',
+        filingReference: data.run.filingReference ?? '',
+        filingAtIso: data.run.filingAtIso ?? '',
+        signedPdfSha256: data.run.signedPdfSha256 ?? '',
       });
     } else {
       showToast(data?.error || 'Could not load run.', { variant: 'error' });
@@ -137,6 +160,34 @@ export default function HrPayroll() {
     load();
   };
 
+  const saveSigning = async (recordSignedNow = false) => {
+    if (!detailRun?.id) return;
+    if (detailRun.status !== 'locked' && detailRun.status !== 'paid') {
+      showToast('Lock the run before recording signing / filing.', { variant: 'error' });
+      return;
+    }
+    setBusy(true);
+    const { ok, data } = await apiFetch(`/api/hr/payroll-runs/${encodeURIComponent(detailRun.id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        filingStatus: signForm.filingStatus.trim() || null,
+        filingReference: signForm.filingReference.trim() || null,
+        filingAtIso: signForm.filingAtIso.trim() || null,
+        signedPdfSha256: signForm.signedPdfSha256.trim() || null,
+        signatureKind: signForm.signedPdfSha256.trim() ? 'pdf_sha256' : null,
+        recordSignedNow,
+      }),
+    });
+    setBusy(false);
+    if (!ok || !data?.ok) {
+      showToast(data?.error || 'Could not save signing record.', { variant: 'error' });
+      return;
+    }
+    showToast(recordSignedNow ? 'Signed timestamp recorded.' : 'Filing details saved.');
+    openDetail(detailRun.id);
+    load();
+  };
+
   const totals = useMemo(() => {
     let net = 0;
     let gross = 0;
@@ -146,6 +197,9 @@ export default function HrPayroll() {
     }
     return { net, gross, count: detailLines.length };
   }, [detailLines]);
+
+  const runsPage = useAppTablePaging(runs, APP_DATA_TABLE_PAGE_SIZE, runs.length);
+  const detailLinesPage = useAppTablePaging(detailLines, APP_DATA_TABLE_PAGE_SIZE, detailRun?.id);
 
   const treasuryDownload = async (id) => {
     try {
@@ -171,9 +225,8 @@ export default function HrPayroll() {
   return (
     <>
       <PageHeader
-        eyebrow="Human resources"
         title="Payroll runs"
-        subtitle="Draft → recompute → lock for treasury export → mark paid when complete. Staff files can set individual PAYE and pension; lines show effective % after recompute."
+        subtitle="Draft → recompute → Managing Director approval → lock for treasury export → mark paid when complete. Staff files can set individual PAYE and pension; lines show effective % after recompute."
         actions={
           <button
             type="button"
@@ -192,8 +245,9 @@ export default function HrPayroll() {
             <>
               <span className={`rounded px-2 py-1 text-[10px] font-bold ${statusChipClass('draft')}`}>1 Draft</span>
               <span className={`rounded px-2 py-1 text-[10px] font-bold ${statusChipClass('hr_review', 'bg-amber-100 text-amber-900')}`}>2 Recompute</span>
-              <span className={`rounded px-2 py-1 text-[10px] font-bold ${statusChipClass('locked')}`}>3 Lock</span>
-              <span className={`rounded px-2 py-1 text-[10px] font-bold ${statusChipClass('paid')}`}>4 Pay</span>
+              <span className={`rounded px-2 py-1 text-[10px] font-bold ${statusChipClass('hr_review', 'bg-violet-100 text-violet-900')}`}>3 MD OK</span>
+              <span className={`rounded px-2 py-1 text-[10px] font-bold ${statusChipClass('locked')}`}>4 Lock</span>
+              <span className={`rounded px-2 py-1 text-[10px] font-bold ${statusChipClass('paid')}`}>5 Pay</span>
             </>
           }
           right={
@@ -254,32 +308,43 @@ export default function HrPayroll() {
         {runs.length === 0 ? (
           <p className="text-sm text-slate-600">No payroll runs yet. Create a draft for the period you want to pay.</p>
         ) : (
-          <div className="overflow-x-auto rounded-2xl border border-slate-200/90 bg-white shadow-sm">
-            <table className="min-w-full text-left text-sm">
-              <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-500">
-                <tr>
-                  <th className="px-4 py-3">Period</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3 hidden md:table-cell">Tax %</th>
-                  <th className="px-4 py-3 hidden md:table-cell">Pension %</th>
-                  <th className="px-4 py-3 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {runs.map((r) => (
-                  <tr key={r.id} className="border-t border-slate-100 hover:bg-teal-50/40">
-                    <td className="px-4 py-3 font-semibold text-slate-900">{r.periodYyyymm}</td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-bold capitalize ${statusChipClass(r.status)}`}
-                      >
-                        {r.status}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 tabular-nums hidden md:table-cell">{r.taxPercent}</td>
-                    <td className="px-4 py-3 tabular-nums hidden md:table-cell">{r.pensionPercent}</td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="flex flex-wrap items-center justify-end gap-2">
+          <>
+            <AppTableWrap>
+              <AppTable role="numeric">
+                <AppTableThead>
+                  <AppTableTh>Period</AppTableTh>
+                  <AppTableTh>Status</AppTableTh>
+                  <AppTableTh className="hidden lg:table-cell">MD OK</AppTableTh>
+                  <AppTableTh className="hidden md:table-cell">Tax %</AppTableTh>
+                  <AppTableTh className="hidden md:table-cell">Pension %</AppTableTh>
+                  <AppTableTh align="right">Actions</AppTableTh>
+                </AppTableThead>
+                <AppTableBody>
+                  {runsPage.slice.map((r) => (
+                    <AppTableTr key={r.id}>
+                      <AppTableTd monospace title={r.periodYyyymm}>
+                        {r.periodYyyymm}
+                      </AppTableTd>
+                      <AppTableTd truncate={false}>
+                        <span
+                          className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-bold capitalize ${statusChipClass(r.status)}`}
+                        >
+                          {r.status}
+                        </span>
+                      </AppTableTd>
+                      <AppTableTd className="hidden lg:table-cell text-slate-600 text-xs">
+                        {r.mdApprovedAtIso ? (
+                          <span className="font-semibold text-emerald-800">Yes</span>
+                        ) : r.status === 'draft' ? (
+                          <span className="text-amber-800">Pending</span>
+                        ) : (
+                          '—'
+                        )}
+                      </AppTableTd>
+                      <AppTableTd className="hidden md:table-cell tabular-nums">{r.taxPercent}</AppTableTd>
+                      <AppTableTd className="hidden md:table-cell tabular-nums">{r.pensionPercent}</AppTableTd>
+                      <AppTableTd align="right" truncate={false}>
+                        <div className="flex flex-nowrap items-center justify-end gap-1 overflow-x-auto max-w-[min(28rem,85vw)]">
                         <button
                           type="button"
                           className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-black uppercase text-[#134e4a]"
@@ -300,7 +365,12 @@ export default function HrPayroll() {
                             <button
                               type="button"
                               className="text-[11px] font-black uppercase text-slate-600 disabled:opacity-50"
-                              disabled={busy}
+                              disabled={busy || !r.mdApprovedAtIso}
+                              title={
+                                !r.mdApprovedAtIso
+                                  ? 'Managing Director must approve this run on the Management dashboard before you can lock it.'
+                                  : undefined
+                              }
                               onClick={() => setStatus(r.id, 'locked')}
                             >
                               Lock
@@ -367,13 +437,23 @@ export default function HrPayroll() {
                             </button>
                           </>
                         ) : null}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                        </div>
+                      </AppTableTd>
+                    </AppTableTr>
+                  ))}
+                </AppTableBody>
+              </AppTable>
+            </AppTableWrap>
+            <AppTablePager
+              showingFrom={runsPage.showingFrom}
+              showingTo={runsPage.showingTo}
+              total={runsPage.total}
+              hasPrev={runsPage.hasPrev}
+              hasNext={runsPage.hasNext}
+              onPrev={runsPage.goPrev}
+              onNext={runsPage.goNext}
+            />
+          </>
         )}
       </MainPanel>
 
@@ -453,6 +533,93 @@ export default function HrPayroll() {
             ) : null}
 
             {!detailLoading && detailRun ? (
+              <ol className="mb-4 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-wide text-slate-600">
+                {[
+                  { label: 'Draft', done: detailRun.status === 'draft' || detailRun.status === 'locked' || detailRun.status === 'paid' },
+                  { label: 'MD OK', done: Boolean(detailRun.mdApprovedAtIso) },
+                  { label: 'Locked', done: detailRun.status === 'locked' || detailRun.status === 'paid' },
+                  { label: 'Signed', done: Boolean(detailRun.signedAtIso) },
+                  {
+                    label: 'Filed',
+                    done: String(detailRun.filingStatus || '').toLowerCase() === 'filed',
+                  },
+                ].map((s) => (
+                  <li
+                    key={s.label}
+                    className={`rounded-full px-2.5 py-1 ${s.done ? 'bg-emerald-100 text-emerald-900' : 'bg-slate-100 text-slate-500'}`}
+                  >
+                    {s.label}
+                  </li>
+                ))}
+              </ol>
+            ) : null}
+
+            {!detailLoading && detailRun && (detailRun.status === 'locked' || detailRun.status === 'paid') ? (
+              <div className="mb-4 rounded-xl border border-indigo-100 bg-indigo-50/40 p-4">
+                <h3 className="text-xs font-black uppercase text-indigo-950">Signing and filing</h3>
+                <p className="mt-1 text-xs text-slate-600">
+                  Store the SHA-256 of the signed payslip pack PDF and your statutory filing reference (audit only — upload pipeline can
+                  come later).
+                </p>
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  <label className="text-xs font-bold text-slate-700 sm:col-span-2">
+                    Signed PDF SHA-256
+                    <input
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 font-mono text-xs"
+                      value={signForm.signedPdfSha256}
+                      onChange={(e) => setSignForm((f) => ({ ...f, signedPdfSha256: e.target.value }))}
+                      placeholder="hex digest"
+                    />
+                  </label>
+                  <label className="text-xs font-bold text-slate-700">
+                    Filing status
+                    <input
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                      value={signForm.filingStatus}
+                      onChange={(e) => setSignForm((f) => ({ ...f, filingStatus: e.target.value }))}
+                      placeholder="e.g. filed"
+                    />
+                  </label>
+                  <label className="text-xs font-bold text-slate-700">
+                    Filing reference
+                    <input
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                      value={signForm.filingReference}
+                      onChange={(e) => setSignForm((f) => ({ ...f, filingReference: e.target.value }))}
+                    />
+                  </label>
+                  <label className="text-xs font-bold text-slate-700 sm:col-span-2">
+                    Filing at (ISO date)
+                    <input
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                      value={signForm.filingAtIso}
+                      onChange={(e) => setSignForm((f) => ({ ...f, filingAtIso: e.target.value }))}
+                      placeholder="2026-04-06"
+                    />
+                  </label>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => saveSigning(false)}
+                    className="rounded-xl bg-[#134e4a] px-4 py-2 text-[11px] font-black uppercase text-white disabled:opacity-50"
+                  >
+                    Save filing details
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => saveSigning(true)}
+                    className="rounded-xl border border-slate-200 px-4 py-2 text-[11px] font-black uppercase text-slate-800 disabled:opacity-50"
+                  >
+                    Record signed now
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {!detailLoading && detailRun ? (
               <div className="mb-4 flex flex-wrap gap-4 text-sm">
                 <div className="rounded-xl border border-teal-100 bg-teal-50/50 px-4 py-2">
                   <span className="text-[10px] font-black uppercase text-[#134e4a]">Employees</span>
@@ -470,56 +637,78 @@ export default function HrPayroll() {
             ) : null}
 
             {!detailLoading && detailLines.length > 0 ? (
-              <div className="overflow-x-auto rounded-xl border border-slate-200">
-                <table className="min-w-full text-left text-xs">
-                  <thead className="bg-slate-50 font-black uppercase text-slate-500">
-                    <tr>
-                      <th className="px-3 py-2">Name</th>
-                      <th className="px-3 py-2 text-right">Gross</th>
-                      <th className="px-3 py-2 text-right">Attend.</th>
-                      <th className="px-3 py-2 text-right">Other ded.</th>
-                      <th className="px-3 py-2 text-right hidden sm:table-cell">PAYE %</th>
-                      <th className="px-3 py-2 text-right hidden sm:table-cell">Pen. %</th>
-                      <th className="px-3 py-2 text-right">Tax</th>
-                      <th className="px-3 py-2 text-right">Pension</th>
-                      <th className="px-3 py-2 text-right">Net</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detailLines.map((l) => (
-                      <tr key={l.userId} className="border-t border-slate-100">
-                        <td className="px-3 py-2 font-medium text-slate-800">
-                          {l.userId ? (
-                            <Link to={`/hr/staff/${encodeURIComponent(l.userId)}`} className="text-[#134e4a] hover:underline">
-                              {l.displayName}
-                            </Link>
-                          ) : (
-                            l.displayName
-                          )}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums">₦{formatNgn(l.grossNgn)}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-amber-900">
-                          ₦{formatNgn(l.attendanceDeductionNgn)}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-rose-800">
-                          ₦{formatNgn(l.otherDeductionNgn)}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-600 hidden sm:table-cell">
-                          {l.impliedTaxPercent != null ? `${l.impliedTaxPercent}%` : '—'}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-600 hidden sm:table-cell">
-                          {l.impliedPensionPercent != null ? `${l.impliedPensionPercent}%` : '—'}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums">₦{formatNgn(l.taxNgn)}</td>
-                        <td className="px-3 py-2 text-right tabular-nums">₦{formatNgn(l.pensionNgn)}</td>
-                        <td className="px-3 py-2 text-right font-semibold tabular-nums text-[#134e4a]">
-                          ₦{formatNgn(l.netNgn)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <>
+                <AppTableWrap className="rounded-xl">
+                  <AppTable role="numeric">
+                    <AppTableThead>
+                      <AppTableTh>Name</AppTableTh>
+                      <AppTableTh align="right">Gross</AppTableTh>
+                      <AppTableTh align="right">Attend.</AppTableTh>
+                      <AppTableTh align="right">Other ded.</AppTableTh>
+                      <AppTableTh align="right" className="hidden sm:table-cell">
+                        PAYE %
+                      </AppTableTh>
+                      <AppTableTh align="right" className="hidden sm:table-cell">
+                        Pen. %
+                      </AppTableTh>
+                      <AppTableTh align="right">Tax</AppTableTh>
+                      <AppTableTh align="right">Pension</AppTableTh>
+                      <AppTableTh align="right">Net</AppTableTh>
+                    </AppTableThead>
+                    <AppTableBody>
+                      {detailLinesPage.slice.map((l) => {
+                        const nameTitle = l.displayName || '';
+                        return (
+                          <AppTableTr key={l.userId}>
+                            <AppTableTd title={nameTitle}>
+                              {l.userId ? (
+                                <Link to={`/hr/staff/${encodeURIComponent(l.userId)}`} className="font-semibold text-[#134e4a] hover:underline">
+                                  {l.displayName}
+                                </Link>
+                              ) : (
+                                <span className="font-medium">{l.displayName}</span>
+                              )}
+                            </AppTableTd>
+                            <AppTableTd align="right" monospace>
+                              ₦{formatNgn(l.grossNgn)}
+                            </AppTableTd>
+                            <AppTableTd align="right" monospace className="text-amber-900">
+                              ₦{formatNgn(l.attendanceDeductionNgn)}
+                            </AppTableTd>
+                            <AppTableTd align="right" monospace className="text-rose-800">
+                              ₦{formatNgn(l.otherDeductionNgn)}
+                            </AppTableTd>
+                            <AppTableTd align="right" monospace className="hidden sm:table-cell text-slate-600">
+                              {l.impliedTaxPercent != null ? `${l.impliedTaxPercent}%` : '—'}
+                            </AppTableTd>
+                            <AppTableTd align="right" monospace className="hidden sm:table-cell text-slate-600">
+                              {l.impliedPensionPercent != null ? `${l.impliedPensionPercent}%` : '—'}
+                            </AppTableTd>
+                            <AppTableTd align="right" monospace>
+                              ₦{formatNgn(l.taxNgn)}
+                            </AppTableTd>
+                            <AppTableTd align="right" monospace>
+                              ₦{formatNgn(l.pensionNgn)}
+                            </AppTableTd>
+                            <AppTableTd align="right" monospace className="font-semibold text-[#134e4a]">
+                              ₦{formatNgn(l.netNgn)}
+                            </AppTableTd>
+                          </AppTableTr>
+                        );
+                      })}
+                    </AppTableBody>
+                  </AppTable>
+                </AppTableWrap>
+                <AppTablePager
+                  showingFrom={detailLinesPage.showingFrom}
+                  showingTo={detailLinesPage.showingTo}
+                  total={detailLinesPage.total}
+                  hasPrev={detailLinesPage.hasPrev}
+                  hasNext={detailLinesPage.hasNext}
+                  onPrev={detailLinesPage.goPrev}
+                  onNext={detailLinesPage.goNext}
+                />
+              </>
             ) : null}
 
             {!detailLoading && detailRun && detailLines.length === 0 ? (
