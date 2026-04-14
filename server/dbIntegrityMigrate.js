@@ -539,6 +539,10 @@ function createNonNegativeTriggers(db) {
  * @param {import('better-sqlite3').Database} db
  */
 export function runDbIntegrityHardening(db) {
+  if (db?.pool && typeof db.pool.query === 'function') {
+    /* Postgres schema and constraints are managed separately (pgMigrate). */
+    return;
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_patches (
       name TEXT PRIMARY KEY,

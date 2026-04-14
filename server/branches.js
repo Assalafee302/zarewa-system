@@ -1,3 +1,5 @@
+import { pgListColumns, pgTableExists } from './pg/pgMeta.js';
+
 /** Default branch for legacy rows and first login. */
 export const DEFAULT_BRANCH_ID = 'BR-KD';
 
@@ -6,15 +8,10 @@ export const DEFAULT_BRANCH_ID = 'BR-KD';
  * @returns {Array<{ id: string; code: string; name: string; active: boolean; sortOrder: number; cuttingListMinPaidFraction: number }>}
  */
 export function listBranches(db) {
-  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='branches'`).get()) {
+  if (!pgTableExists(db, 'branches')) {
     return [];
   }
-  const cols = new Set(
-    db
-      .prepare(`PRAGMA table_info(branches)`)
-      .all()
-      .map((c) => c.name)
-  );
+  const cols = new Set(pgListColumns(db, 'branches').map((c) => c.name));
   const hasFrac = cols.has('cutting_list_min_paid_fraction');
   return db
     .prepare(`SELECT * FROM branches WHERE active = 1 ORDER BY sort_order ASC, id ASC`)
@@ -39,12 +36,7 @@ export function getBranch(db, id) {
   if (!id) return null;
   const row = db.prepare(`SELECT * FROM branches WHERE id = ?`).get(id);
   if (!row) return null;
-  const cols = new Set(
-    db
-      .prepare(`PRAGMA table_info(branches)`)
-      .all()
-      .map((c) => c.name)
-  );
+  const cols = new Set(pgListColumns(db, 'branches').map((c) => c.name));
   const hasFrac = cols.has('cutting_list_min_paid_fraction');
   return {
     id: row.id,

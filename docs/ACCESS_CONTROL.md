@@ -85,7 +85,7 @@ The SPA loads a single snapshot. Row-level lists are **filtered by role** in `se
 
 ## E2E (`npm run test:e2e`)
 
-Playwright starts `server/playwrightServer.js` (deletes and recreates `data/playwright.sqlite` each time) on port **8787** and Vite on **5173**. Free those ports locally, or stop any other Zarewa API using 8787. `e2e/access-control.spec.js` covers viewer, procurement, **CEO** (exec summary + forbidden customers + empty search), **MD** (customers + search), **branch manager** (refunds list), **sales** (forbidden delivery confirm), **HR** (payroll lock without MD), and related API assertions.
+Playwright starts `scripts/e2e-web.mjs`, which boots `server/playwrightServer.js` (Postgres via `DATABASE_URL`, then truncate+seed) and Vite on the configured ports (defaults **8788** API / **5180** UI — see `playwright.config.js`). Free those ports locally, or stop any other Zarewa API bound to them. `e2e/access-control.spec.js` covers viewer, procurement, **CEO** (exec summary + forbidden customers + empty search), **MD** (customers + search), **branch manager** (refunds list), **sales** (forbidden delivery confirm), **HR** (payroll lock without MD), and related API assertions.
 
 ## API test suite note
 

@@ -35,7 +35,8 @@ export function issueZarewaFilingReference(db, opts) {
   let seq = 1;
   db.transaction(() => {
     db.prepare(
-      `INSERT OR IGNORE INTO reference_counters (scope_key, last_seq, updated_at_iso) VALUES (?, 0, ?)`
+      `INSERT INTO reference_counters (scope_key, last_seq, updated_at_iso) VALUES (?, 0, ?)
+       ON CONFLICT (scope_key) DO NOTHING`
     ).run(scopeKey, t);
     db.prepare(
       `UPDATE reference_counters SET last_seq = last_seq + 1, updated_at_iso = ? WHERE scope_key = ?`

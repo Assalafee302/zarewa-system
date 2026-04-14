@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from 'vitest';
 import request from 'supertest';
-import { createDatabase } from './db.js';
+import { createDatabase, resetDatabaseDataForTests } from './db.js';
 import { createApp } from './app.js';
 
 function parseCookieValue(setCookieHeaders, name) {
@@ -16,21 +16,28 @@ describe('CSRF enforcement', () => {
   let originalNodeEnv;
   let originalEnforce;
 
+  beforeAll(() => {
+    db = createDatabase();
+  });
+
   beforeEach(() => {
     originalNodeEnv = process.env.NODE_ENV;
     originalEnforce = process.env.ZAREWA_TEST_ENFORCE_CSRF;
     process.env.NODE_ENV = 'test';
     process.env.ZAREWA_TEST_ENFORCE_CSRF = '1';
-    db = createDatabase(':memory:');
+    resetDatabaseDataForTests(db);
     app = createApp(db);
   });
 
   afterEach(() => {
     process.env.NODE_ENV = originalNodeEnv;
     process.env.ZAREWA_TEST_ENFORCE_CSRF = originalEnforce;
+    app = undefined;
+  });
+
+  afterAll(() => {
     db?.close();
     db = undefined;
-    app = undefined;
   });
 
   it('rejects POST without X-CSRF-Token even when authenticated', async () => {

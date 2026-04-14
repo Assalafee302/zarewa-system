@@ -1,3 +1,5 @@
+import { pgTableExists } from './pg/pgMeta.js';
+
 /**
  * Unified selling-price resolution: setup_price_lists (primary) with specificity scoring,
  * then optional floor from price_list_items when extended keys match.
@@ -61,7 +63,7 @@ export function resolveSetupPriceListUnitNgn(db, ctx) {
  * @param {import('better-sqlite3').Database} db
  */
 export function resolvePriceListItemFloorNgn(db, ctx) {
-  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='price_list_items'`).get()) {
+  if (!pgTableExists(db, 'price_list_items')) {
     return null;
   }
   const g = normKey(ctx.gaugeLabel || ctx.gaugeId);

@@ -1,18 +1,22 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import request from 'supertest';
-import { createDatabase } from './db.js';
+import { createDatabase, resetDatabaseDataForTests } from './db.js';
 import { createApp } from './app.js';
 
 describe('Branch isolation and rollups', () => {
   let db;
   let app;
 
+  beforeAll(() => {
+    db = createDatabase();
+  });
+
   beforeEach(() => {
-    db = createDatabase(':memory:');
+    resetDatabaseDataForTests(db);
     app = createApp(db);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     db?.close();
     db = undefined;
     app = undefined;

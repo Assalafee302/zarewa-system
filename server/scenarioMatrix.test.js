@@ -1,9 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import request from 'supertest';
-import { createDatabase } from './db.js';
+import { createDatabase, resetDatabaseDataForTests } from './db.js';
 import { createApp } from './app.js';
 
-const openDbs = [];
+let sharedDb;
 
 async function loginAs(agent, username = 'admin', password = 'Admin@123') {
   const res = await agent.post('/api/session/login').send({ username, password });
@@ -12,9 +12,9 @@ async function loginAs(agent, username = 'admin', password = 'Admin@123') {
 }
 
 async function createSession() {
-  const db = createDatabase(':memory:');
-  openDbs.push(db);
-  const app = createApp(db);
+  if (!sharedDb) sharedDb = createDatabase();
+  resetDatabaseDataForTests(sharedDb);
+  const app = createApp(sharedDb);
   const agent = request.agent(app);
   await loginAs(agent);
   return { app, agent };
@@ -1746,6 +1746,11 @@ function buildScenarioMatrix() {
 }
 
 describe('Scenario matrix', () => {
+  afterAll(() => {
+    sharedDb?.close();
+    sharedDb = undefined;
+  });
+
   it(
     'executes 114 live-like transactional scenarios',
     { timeout: 720_000 },
@@ -1754,21 +1759,12 @@ describe('Scenario matrix', () => {
       const failures = [];
 
       for (const scenario of scenarios) {
-        const dbCountBefore = openDbs.length;
         try {
           await scenario.run();
         } catch (error) {
           const msg = String(error?.message || error);
           const top = String(error?.stack || '').split('\n').slice(0, 2).join('\n');
           failures.push(`${scenario.id} ${scenario.name}: ${msg}${top ? `\n${top}` : ''}`);
-        } finally {
-          while (openDbs.length > dbCountBefore) {
-            try {
-              openDbs.pop()?.close();
-            } catch {
-              /* ignore */
-            }
-          }
         }
       }
 

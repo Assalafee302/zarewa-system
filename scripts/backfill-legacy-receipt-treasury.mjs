@@ -15,47 +15,39 @@
  *
  * --post-gl: also run tryPostCustomerReceiptGl (Dr cash / Cr AR) where missing — idempotent on ledger id.
  *
- * Stop the API if SQLITE_BUSY. Set ZAREWA_DB if not using default data/zarewa.sqlite.
+ * Requires DATABASE_URL. Stop the API if you get connection errors from concurrent access.
  */
-import Database from 'better-sqlite3';
-import fs from 'node:fs';
-import path from 'node:path';
-import { SCHEMA_SQL } from '../server/schemaSql.js';
+import { createDatabase } from '../server/db.js';
 import { runMigrations } from '../server/migrate.js';
-import { defaultDbPath } from '../server/db.js';
 import { recordCustomerReceiptCash } from '../server/writeOps.js';
 import { tryPostCustomerReceiptGl } from '../server/glOps.js';
 
 function parseArgs() {
-  let dbPath = process.env.ZAREWA_DB ? path.resolve(process.env.ZAREWA_DB) : defaultDbPath();
   let treasuryAccountId = 0;
   let dryRun = false;
   let postGl = false;
   for (let i = 2; i < process.argv.length; i++) {
     const a = process.argv[i];
-    if (a === '--db' && process.argv[i + 1]) dbPath = path.resolve(process.argv[++i]);
-    else if (a === '--treasury-account-id' && process.argv[i + 1]) treasuryAccountId = parseInt(process.argv[++i], 10);
+    if (a === '--treasury-account-id' && process.argv[i + 1]) treasuryAccountId = parseInt(process.argv[++i], 10);
     else if (a === '--dry-run') dryRun = true;
     else if (a === '--post-gl') postGl = true;
   }
-  return { dbPath, treasuryAccountId, dryRun, postGl };
+  return { treasuryAccountId, dryRun, postGl };
 }
 
-const { dbPath, treasuryAccountId, dryRun, postGl } = parseArgs();
+const { treasuryAccountId, dryRun, postGl } = parseArgs();
+
+if (!process.env.DATABASE_URL?.trim()) {
+  console.error('DATABASE_URL is required.');
+  process.exit(1);
+}
 
 if (!treasuryAccountId || treasuryAccountId <= 0) {
   console.error('Required: --treasury-account-id <number> (see treasury_accounts.id)');
   process.exit(1);
 }
 
-if (!fs.existsSync(dbPath)) {
-  console.error('Database not found:', dbPath);
-  process.exit(1);
-}
-
-const db = new Database(dbPath);
-db.pragma('foreign_keys = ON');
-db.exec(SCHEMA_SQL);
+const db = createDatabase();
 runMigrations(db);
 
 const acc = db.prepare(`SELECT id, name FROM treasury_accounts WHERE id = ?`).get(treasuryAccountId);
@@ -126,7 +118,7 @@ for (const row of rows) {
 db.close();
 
 console.log('Legacy receipt treasury backfill');
-console.log('  DB:', dbPath);
+console.log('  DB: postgres (DATABASE_URL)');
 console.log('  Treasury account:', acc.id, acc.name);
 console.log('  Ledger rows (LE-LEGACY-R* RECEIPT):', rows.length);
 console.log('  Treasury movements created:', dryRun ? `(dry-run) ${created}` : created);

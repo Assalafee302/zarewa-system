@@ -4,6 +4,7 @@
 import crypto from 'node:crypto';
 import { DEFAULT_BRANCH_ID, listBranches } from './branches.js';
 import { actorId } from './auth.js';
+import { pgTableExists } from './pg/pgMeta.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -19,9 +20,7 @@ function isBranchManagerUser(user) {
  */
 export function interBranchOfficeTableReady(db) {
   try {
-    return Boolean(
-      db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='office_inter_branch_requests'`).get()
-    );
+    return pgTableExists(db, 'office_inter_branch_requests');
   } catch {
     return false;
   }

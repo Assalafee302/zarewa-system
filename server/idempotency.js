@@ -24,8 +24,9 @@ export function normalizeIdempotencyKey(raw) {
 export function pruneIdempotency(db) {
   try {
     db.prepare(
-      `DELETE FROM http_idempotency WHERE datetime(created_at_iso) < datetime('now', ?)`
-    ).run(`-${TTL_HOURS} hours`);
+      `DELETE FROM http_idempotency
+       WHERE (nullif(trim(created_at_iso), '')::timestamptz < (now() - make_interval(0, 0, 0, 0, ?, 0, 0)))`
+    ).run(TTL_HOURS);
   } catch {
     /* table may not exist on very old files until migrate runs */
   }

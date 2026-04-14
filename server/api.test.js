@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import request from 'supertest';
-import { createDatabase } from './db.js';
+import { createDatabase, resetDatabaseDataForTests } from './db.js';
 import { createApp } from './app.js';
 
 describe.sequential('Zarewa API', () => {
@@ -17,15 +17,23 @@ describe.sequential('Zarewa API', () => {
   }
 
 
+  beforeAll(() => {
+    db = createDatabase();
+  });
+
   beforeEach(async () => {
     savedEnv.ZAREWA_AI_API_KEY = process.env.ZAREWA_AI_API_KEY;
     savedEnv.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
     savedEnv.ZAREWA_AI_BASE_URL = process.env.ZAREWA_AI_BASE_URL;
     savedEnv.ZAREWA_AI_MODEL = process.env.ZAREWA_AI_MODEL;
-    db = createDatabase(':memory:');
+    resetDatabaseDataForTests(db);
     app = createApp(db);
     agent = request.agent(app);
     await loginAs(agent);
+  });
+
+  afterAll(() => {
+    db?.close();
   });
 
   afterEach(() => {
@@ -34,8 +42,6 @@ describe.sequential('Zarewa API', () => {
       else process.env[k] = savedEnv[k];
     }
     vi.restoreAllMocks();
-    db?.close();
-    db = undefined;
   });
 
   it('GET /api/health', async () => {

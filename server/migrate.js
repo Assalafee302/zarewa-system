@@ -6,9 +6,11 @@ import { deriveProcurementKindFromProductIds } from './procurementPoKind.js';
 
 /**
  * Idempotent SQLite migrations for existing DB files (CREATE IF NOT EXISTS misses new columns).
- * @param {import('better-sqlite3').Database} db
+ * Postgres schema is managed by `server/pg/pgMigrate.js`; this function is a no-op there.
+ * @param {import('better-sqlite3').Database | import('./pg/pgSyncDb.js').PgSyncDatabase} db
  */
 export function runMigrations(db) {
+  if (db?.pool && typeof db.pool.query === 'function') return;
   ensureEditApprovalTable(db);
   const tableCols = (name) => {
     const rows = db.prepare(`PRAGMA table_info(${name})`).all();
@@ -1569,7 +1571,10 @@ function migrateHrExcellence2026(db) {
 
   const holCount = db.prepare(`SELECT COUNT(*) AS c FROM hr_public_holidays`).get().c;
   if (holCount === 0) {
-    const ins = db.prepare(`INSERT OR IGNORE INTO hr_public_holidays (day_iso, label, scope) VALUES (?,?,?)`);
+    const ins = db.prepare(
+      `INSERT INTO hr_public_holidays (day_iso, label, scope) VALUES (?,?,?)
+       ON CONFLICT (day_iso, scope) DO NOTHING`
+    );
     const y = new Date().getFullYear();
     const fixed = [
       [`${y}-01-01`, "New Year's Day", 'NG'],

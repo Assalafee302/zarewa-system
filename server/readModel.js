@@ -6,11 +6,12 @@ import { parseSupplierProfileJson, stripAgreementBodiesForList } from './supplie
 import { listBranches } from './branches.js';
 import { branchPredicate } from './branchSql.js';
 import { listInTransitLoads } from './inTransitOps.js';
+import { pgColumnExists, pgTableExists } from './pg/pgMeta.js';
 /** @param {import('better-sqlite3').Database} db */
 
 function hasColumn(db, table, column) {
   try {
-    return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+    return pgColumnExists(db, table, column);
   } catch {
     return false;
   }
@@ -72,7 +73,7 @@ function mapCustomerRow(row) {
 export function listCustomers(db, branchScope = 'ALL') {
   const b = branchWhere(db, 'customers', branchScope);
   return db
-    .prepare(`SELECT * FROM customers WHERE 1=1${b.sql} ORDER BY name COLLATE NOCASE`)
+    .prepare(`SELECT * FROM customers WHERE 1=1${b.sql} ORDER BY LOWER(name)`)
     .all(...b.args)
     .map((row) => mapCustomerRow(row));
 }
@@ -556,7 +557,7 @@ export function listLedgerEntriesForCustomer(db, customerId, branchScope = 'ALL'
 export function listSuppliers(db, branchScope = 'ALL') {
   const b = branchWhere(db, 'suppliers', branchScope);
   return db
-    .prepare(`SELECT * FROM suppliers WHERE 1=1${b.sql} ORDER BY name COLLATE NOCASE`)
+    .prepare(`SELECT * FROM suppliers WHERE 1=1${b.sql} ORDER BY LOWER(name)`)
     .all(...b.args)
     .map((row) => {
       const rawProfile = hasColumn(db, 'suppliers', 'supplier_profile_json')
@@ -688,7 +689,7 @@ export function listCoilControlEvents(db, branchScope = 'ALL') {
   const lim = 2000;
   return db
     .prepare(
-      `SELECT * FROM coil_control_events WHERE 1=1${b.sql} ORDER BY datetime(created_at_iso) DESC, id DESC LIMIT ?`
+      `SELECT * FROM coil_control_events WHERE 1=1${b.sql} ORDER BY (nullif(trim(created_at_iso), '')::timestamptz) DESC NULLS LAST, id DESC LIMIT ?`
     )
     .all(...b.args, lim)
     .map((row) => ({
@@ -946,7 +947,7 @@ export function getCuttingList(db, id) {
 }
 
 function fgAdjustmentTotalsByJobId(db, branchScope) {
-  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='production_completion_adjustments'`).get()) {
+  if (!pgTableExists(db, 'production_completion_adjustments')) {
     return new Map();
   }
   const b = branchWhere(db, 'production_jobs', branchScope);
@@ -1009,7 +1010,7 @@ export function listProductionJobs(db, branchScope = 'ALL') {
 }
 
 export function listProductionCompletionAdjustments(db, branchScope = 'ALL') {
-  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='production_completion_adjustments'`).get()) {
+  if (!pgTableExists(db, 'production_completion_adjustments')) {
     return [];
   }
   const b = branchWhere(db, 'production_jobs', branchScope);
@@ -1460,7 +1461,7 @@ export function listProcurementCatalog(db) {
 
 export function listAppUsers(db) {
   return db
-    .prepare(`SELECT * FROM app_users ORDER BY display_name COLLATE NOCASE, username COLLATE NOCASE`)
+    .prepare(`SELECT * FROM app_users ORDER BY LOWER(display_name), LOWER(username)`)
     .all()
     .map((row) => {
       const u = publicUserFromRow(row);
@@ -1701,7 +1702,7 @@ export function computeOperationsInventoryAttention(db, branchScope = 'ALL') {
           WHERE j.status = 'Planned'
             AND NOT EXISTS (SELECT 1 FROM production_job_coils c WHERE c.job_id = j.job_id)
             AND 1=1${b.sql}
-          ORDER BY datetime(COALESCE(j.created_at_iso, '')) ASC, j.job_id ASC
+          ORDER BY (nullif(trim(j.created_at_iso), '')::timestamptz) ASC NULLS LAST, j.job_id ASC
           LIMIT ?`
       )
       .all(...b.args, OPS_ATTENTION_SAMPLES);
@@ -1712,7 +1713,7 @@ export function computeOperationsInventoryAttention(db, branchScope = 'ALL') {
           .prepare(
             `SELECT COUNT(*) AS c FROM production_jobs j
              WHERE j.status = 'Planned'
-               AND date(j.created_at_iso) <= date('now', ?)
+               AND (nullif(trim(j.created_at_iso), '')::timestamptz <= now() + ?::interval)
                AND 1=1${b.sql}`
           )
           .get(plannedMod, ...b.args)?.c
@@ -1723,9 +1724,9 @@ export function computeOperationsInventoryAttention(db, branchScope = 'ALL') {
         `SELECT j.job_id, j.cutting_list_id, j.customer_name, j.quotation_ref, j.created_at_iso, j.start_date_iso, j.status
            FROM production_jobs j
           WHERE j.status = 'Planned'
-            AND date(j.created_at_iso) <= date('now', ?)
+            AND (nullif(trim(j.created_at_iso), '')::timestamptz <= now() + ?::interval)
             AND 1=1${b.sql}
-          ORDER BY datetime(COALESCE(j.created_at_iso, '')) ASC, j.job_id ASC
+          ORDER BY (nullif(trim(j.created_at_iso), '')::timestamptz) ASC NULLS LAST, j.job_id ASC
           LIMIT ?`
       )
       .all(plannedMod, ...b.args, OPS_ATTENTION_SAMPLES);
@@ -1736,8 +1737,8 @@ export function computeOperationsInventoryAttention(db, branchScope = 'ALL') {
           .prepare(
             `SELECT COUNT(*) AS c FROM production_jobs j
              WHERE j.status = 'Running'
-               AND TRIM(IFNULL(j.start_date_iso,'')) != ''
-               AND date(j.start_date_iso) <= date('now', ?)
+               AND TRIM(COALESCE(j.start_date_iso::text, '')) != ''
+               AND (nullif(trim(j.start_date_iso), '')::timestamptz <= now() + ?::interval)
                AND 1=1${b.sql}`
           )
           .get(runningMod, ...b.args)?.c
@@ -1748,10 +1749,10 @@ export function computeOperationsInventoryAttention(db, branchScope = 'ALL') {
         `SELECT j.job_id, j.cutting_list_id, j.customer_name, j.quotation_ref, j.created_at_iso, j.start_date_iso, j.status
            FROM production_jobs j
           WHERE j.status = 'Running'
-            AND TRIM(IFNULL(j.start_date_iso,'')) != ''
-            AND date(j.start_date_iso) <= date('now', ?)
+            AND TRIM(COALESCE(j.start_date_iso::text, '')) != ''
+            AND (nullif(trim(j.start_date_iso), '')::timestamptz <= now() + ?::interval)
             AND 1=1${b.sql}
-          ORDER BY datetime(COALESCE(j.start_date_iso, j.created_at_iso, '')) ASC, j.job_id ASC
+          ORDER BY (nullif(trim(COALESCE(j.start_date_iso, j.created_at_iso)), '')::timestamptz) ASC NULLS LAST, j.job_id ASC
           LIMIT ?`
       )
       .all(runningMod, ...b.args, OPS_ATTENTION_SAMPLES);
@@ -1775,7 +1776,7 @@ export function computeOperationsInventoryAttention(db, branchScope = 'ALL') {
           WHERE j.status IN ('Planned','Running')
             AND j.manager_review_required = 1
             AND 1=1${b.sql}
-          ORDER BY datetime(COALESCE(j.created_at_iso, '')) DESC, j.job_id DESC
+          ORDER BY (nullif(trim(j.created_at_iso), '')::timestamptz) DESC NULLS LAST, j.job_id DESC
           LIMIT ?`
       )
       .all(...b.args, OPS_ATTENTION_SAMPLES);
@@ -1813,9 +1814,9 @@ export function computeOperationsInventoryAttention(db, branchScope = 'ALL') {
                AND 1=1${b.sql}
                AND (
                  (j.status = 'Planned' AND NOT EXISTS (SELECT 1 FROM production_job_coils c WHERE c.job_id = j.job_id))
-                 OR (j.status = 'Planned' AND date(j.created_at_iso) <= date('now', ?))
-                 OR (j.status = 'Running' AND TRIM(IFNULL(j.start_date_iso,'')) != ''
-                     AND date(j.start_date_iso) <= date('now', ?))
+                 OR (j.status = 'Planned' AND (nullif(trim(j.created_at_iso), '')::timestamptz <= now() + ?::interval))
+                 OR (j.status = 'Running' AND TRIM(COALESCE(j.start_date_iso::text, '')) != ''
+                     AND (nullif(trim(j.start_date_iso), '')::timestamptz <= now() + ?::interval))
                  OR j.manager_review_required = 1
                  OR j.coil_spec_mismatch_pending = 1
                )`
@@ -1837,7 +1838,7 @@ export function computeOperationsInventoryAttention(db, branchScope = 'ALL') {
     }
 
     let completionAdjustmentsLast30d = 0;
-    if (db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='production_completion_adjustments'`).get()) {
+    if (pgTableExists(db, 'production_completion_adjustments')) {
       const ba = branchWhere(db, 'production_jobs', branchScope);
       const branchSqlA = ba.sql ? ba.sql.replace(/\bbranch_id\b/g, 'j.branch_id') : '';
       completionAdjustmentsLast30d =
@@ -1847,7 +1848,7 @@ export function computeOperationsInventoryAttention(db, branchScope = 'ALL') {
               `SELECT COUNT(*) AS c
                  FROM production_completion_adjustments a
                  INNER JOIN production_jobs j ON j.job_id = a.job_id
-                WHERE date(a.at_iso) >= date('now', '-30 day')
+                WHERE (nullif(trim(a.at_iso), '')::timestamptz >= (now() - interval '30 days'))
                   AND 1=1${branchSqlA}`
             )
             .get(...ba.args)?.c
@@ -1860,7 +1861,7 @@ export function computeOperationsInventoryAttention(db, branchScope = 'ALL') {
         db
           .prepare(
             `SELECT COUNT(*) AS c FROM deliveries d
-              WHERE LOWER(TRIM(IFNULL(d.status,''))) NOT IN ('delivered','cancelled','void')
+              WHERE LOWER(TRIM(COALESCE(d.status::text, ''))) NOT IN ('delivered','cancelled','void')
                 AND 1=1${bd.sql}`
           )
           .get(...bd.args)?.c
@@ -1870,9 +1871,9 @@ export function computeOperationsInventoryAttention(db, branchScope = 'ALL') {
       .prepare(
         `SELECT d.id, d.cutting_list_id, d.customer_name, d.status, d.ship_date, d.eta
            FROM deliveries d
-          WHERE LOWER(TRIM(IFNULL(d.status,''))) NOT IN ('delivered','cancelled','void')
+          WHERE LOWER(TRIM(COALESCE(d.status::text, ''))) NOT IN ('delivered','cancelled','void')
             AND 1=1${bd.sql}
-          ORDER BY datetime(COALESCE(d.ship_date, d.eta, '')) DESC, d.id DESC
+          ORDER BY (nullif(trim(COALESCE(d.ship_date::text, d.eta::text, '')), '')::timestamptz) DESC NULLS LAST, d.id DESC
           LIMIT ?`
       )
       .all(...bd.args, OPS_ATTENTION_SAMPLES);
@@ -1885,8 +1886,8 @@ export function computeOperationsInventoryAttention(db, branchScope = 'ALL') {
             `SELECT COUNT(DISTINCT po.po_id) AS c
                FROM purchase_orders po
                INNER JOIN purchase_order_lines l ON l.po_id = po.po_id
-              WHERE LOWER(TRIM(IFNULL(po.status,''))) NOT IN ('cancelled','void','draft','rejected')
-                AND (IFNULL(l.qty_received,0) + 0.001) < IFNULL(l.qty_ordered,0)
+              WHERE LOWER(TRIM(COALESCE(po.status::text, ''))) NOT IN ('cancelled','void','draft','rejected')
+                AND (COALESCE(l.qty_received,0) + 0.001) < COALESCE(l.qty_ordered,0)
                 AND 1=1${bpo.sql}`
           )
           .get(...bpo.args)?.c
@@ -2054,8 +2055,8 @@ export function execOrgSummary(db) {
         db
           .prepare(
             `SELECT COUNT(*) AS c FROM hr_payroll_runs
-             WHERE LOWER(TRIM(IFNULL(status,''))) = 'draft'
-               AND (md_approved_at_iso IS NULL OR TRIM(IFNULL(md_approved_at_iso,'')) = '')`
+             WHERE LOWER(TRIM(COALESCE(status::text, ''))) = 'draft'
+               AND (md_approved_at_iso IS NULL OR TRIM(COALESCE(md_approved_at_iso::text, '')) = '')`
           )
           .get()?.c
       ) || 0;
@@ -2070,7 +2071,7 @@ export function execOrgSummary(db) {
         db
           .prepare(
             `SELECT COUNT(*) AS c FROM bank_reconciliation_lines
-             WHERE TRIM(IFNULL(status,'')) IN ('Review', 'PendingManager')`
+             WHERE TRIM(COALESCE(status::text, '')) IN ('Review', 'PendingManager')`
           )
           .get()?.c
       ) || 0;
@@ -2082,7 +2083,7 @@ export function execOrgSummary(db) {
     Number(
       db
         .prepare(
-          `SELECT COUNT(*) AS c FROM customer_refunds WHERE TRIM(LOWER(IFNULL(status,''))) IN ('pending','submitted','awaiting approval')`
+          `SELECT COUNT(*) AS c FROM customer_refunds WHERE TRIM(LOWER(COALESCE(status::text, ''))) IN ('pending','submitted','awaiting approval')`
         )
         .get()?.c
     ) || 0;
@@ -2090,7 +2091,7 @@ export function execOrgSummary(db) {
     Number(
       db
         .prepare(
-          `SELECT COUNT(*) AS c FROM payment_requests WHERE TRIM(IFNULL(approval_status,'')) IN ('Pending','Submitted','Awaiting approval','')`
+          `SELECT COUNT(*) AS c FROM payment_requests WHERE TRIM(COALESCE(approval_status::text, '')) IN ('Pending','Submitted','Awaiting approval','')`
         )
         .get()?.c
     ) || 0;
@@ -2120,5 +2121,10 @@ export function getJsonBlob(db, key) {
 
 export function setJsonBlob(db, key, value) {
   const payload = typeof value === 'string' ? value : JSON.stringify(value ?? null);
-  db.prepare(`INSERT OR REPLACE INTO app_json_blobs (key, payload) VALUES (?,?)`).run(key, payload);
+  db
+    .prepare(
+      `INSERT INTO app_json_blobs (key, payload) VALUES (?,?)
+       ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload`
+    )
+    .run(key, payload);
 }

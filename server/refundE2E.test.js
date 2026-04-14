@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import request from 'supertest';
-import { createDatabase } from './db.js';
+import { createDatabase, resetDatabaseDataForTests } from './db.js';
 import { createApp } from './app.js';
 
 /**
@@ -18,14 +18,18 @@ describe('Refund E2E (HTTP)', () => {
     expect(res.body.ok).toBe(true);
   }
 
+  beforeAll(() => {
+    db = createDatabase();
+  });
+
   beforeEach(async () => {
-    db = createDatabase(':memory:');
+    resetDatabaseDataForTests(db);
     app = createApp(db);
     agent = request.agent(app);
     await loginAs(agent);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     db?.close();
   });
 

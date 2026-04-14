@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { DEFAULT_BRANCH_ID, listBranches } from './branches.js';
 import { normalizeWorkspaceDepartment } from './departmentRoleTemplates.js';
+import { pgColumnExists, pgListColumns } from './pg/pgMeta.js';
 
 export const SESSION_COOKIE = 'zarewa_session';
 export const CSRF_COOKIE = 'zarewa_csrf';
@@ -464,7 +465,7 @@ export function seedAuthUsers(db) {
   }
   const count = db.prepare(`SELECT COUNT(*) AS c FROM app_users`).get().c;
   if (count > 0) return;
-  const cols = db.prepare(`PRAGMA table_info(app_users)`).all();
+  const cols = pgListColumns(db, 'app_users');
   const hasDept = cols.some((c) => c.name === 'department');
   const ins = hasDept
     ? db.prepare(
@@ -528,7 +529,7 @@ export function ensureDefaultAdminUser(db) {
   const admin = DEFAULT_ADMIN_ROW;
   const hash = createPasswordHash(admin.password);
   const createdAtISO = nowIso();
-  const cols = db.prepare(`PRAGMA table_info(app_users)`).all();
+  const cols = pgListColumns(db, 'app_users');
   const hasDept = cols.some((c) => c.name === 'department');
   const dept = normalizeWorkspaceDepartment(admin.department);
   const existing = db
@@ -595,7 +596,7 @@ export function createAppUserRecord(db, row) {
   }
   const userId = `USR-${crypto.randomBytes(8).toString('hex').toUpperCase()}`;
   const createdAtISO = nowIso();
-  const hasDeptCol = db.prepare(`PRAGMA table_info(app_users)`).all().some((c) => c.name === 'department');
+  const hasDeptCol = pgColumnExists(db, 'app_users', 'department');
   try {
     if (hasDeptCol) {
       db.prepare(
@@ -840,8 +841,7 @@ export function loginWithPassword(db, username, password) {
   const branchId = defaultBranchIdForDb(db);
   db.transaction(() => {
     db.prepare(`DELETE FROM user_sessions WHERE user_id = ?`).run(row.id);
-    const sessCols = db.prepare(`PRAGMA table_info(user_sessions)`).all();
-    const hasBranch = sessCols.some((c) => c.name === 'current_branch_id');
+    const hasBranch = pgColumnExists(db, 'user_sessions', 'current_branch_id');
     if (hasBranch) {
       db.prepare(
         `INSERT INTO user_sessions (session_token, user_id, created_at_iso, last_seen_at_iso, expires_at_iso, current_branch_id, view_all_branches)
@@ -963,7 +963,7 @@ export function patchAppUserWorkspaceDepartment(db, actorUser, targetUserId, raw
   }
   const tid = String(targetUserId || '').trim();
   if (!tid) return { ok: false, error: 'User id is required.' };
-  const cols = db.prepare(`PRAGMA table_info(app_users)`).all();
+  const cols = pgListColumns(db, 'app_users');
   if (!cols.some((c) => c.name === 'department')) {
     return { ok: false, error: 'Workspace department is not available on this database version.' };
   }

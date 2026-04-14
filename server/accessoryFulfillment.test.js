@@ -3,15 +3,15 @@
  */
 import { describe, it, expect, afterAll } from 'vitest';
 import request from 'supertest';
-import { createDatabase } from './db.js';
+import { createDatabase, resetDatabaseDataForTests } from './db.js';
 import { createApp } from './app.js';
 
-const openDbs = [];
+let sharedDb;
 
 function makeApp() {
-  const db = createDatabase(':memory:');
-  openDbs.push(db);
-  return createApp(db);
+  if (!sharedDb) sharedDb = createDatabase();
+  resetDatabaseDataForTests(sharedDb);
+  return createApp(sharedDb);
 }
 
 async function loginAs(agent, username = 'admin', password = 'Admin@123') {
@@ -97,8 +97,8 @@ async function seedOneCoil(agent, coilNo, kg) {
 
 describe('Accessory fulfillment', () => {
   afterAll(() => {
-    for (const db of openDbs) db.close();
-    openDbs.length = 0;
+    sharedDb?.close();
+    sharedDb = undefined;
   });
 
   it('production complete posts usage, deducts mapped stock, refund preview shows shortfall', async () => {

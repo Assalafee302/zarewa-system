@@ -6,6 +6,7 @@ import {
   canSeeRefundsList,
 } from './workspaceAccess.js';
 import { hrListScope, hrTablesReady } from './hrOps.js';
+import { pgListColumns } from './pg/pgMeta.js';
 
 /** @param {string} s */
 export function escapeSqlLikePattern(s) {
@@ -44,7 +45,7 @@ export function workspaceQuickSearch(db, req, rawQuery, limit) {
           `SELECT customer_id, name, phone_number, email, company_name FROM customers WHERE 1=1${bp.sql}
            AND (customer_id LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR IFNULL(phone_number,'') LIKE ? ESCAPE '\\'
                 OR IFNULL(email,'') LIKE ? ESCAPE '\\' OR IFNULL(company_name,'') LIKE ? ESCAPE '\\')
-           ORDER BY name COLLATE NOCASE LIMIT ?`
+           ORDER BY LOWER(name) LIMIT ?`
         )
         .all(...bp.args, likeArg, likeArg, likeArg, likeArg, likeArg, n);
       for (const c of rows) {
@@ -141,7 +142,7 @@ export function workspaceQuickSearch(db, req, rawQuery, limit) {
         .prepare(
           `SELECT supplier_id, name, IFNULL(city,'') AS city FROM suppliers WHERE 1=1${bp.sql}
            AND (supplier_id LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR IFNULL(city,'') LIKE ? ESCAPE '\\')
-           ORDER BY name COLLATE NOCASE LIMIT ?`
+           ORDER BY LOWER(name) LIMIT ?`
         )
         .all(...bp.args, likeArg, likeArg, likeArg, n);
       for (const s of rows) {
@@ -239,7 +240,7 @@ export function workspaceQuickSearch(db, req, rawQuery, limit) {
     const n = room();
     if (n > 0) {
       let rows;
-      const cols = db.prepare(`PRAGMA table_info(products)`).all();
+      const cols = pgListColumns(db, 'products');
       const hasPb = cols.some((c) => c.name === 'branch_id');
       if (!hasPb || branchScope === 'ALL' || !branchScope) {
         const bp = branchPredicate(db, 'products', branchScope);
@@ -247,16 +248,16 @@ export function workspaceQuickSearch(db, req, rawQuery, limit) {
           .prepare(
             `SELECT product_id, name FROM products WHERE 1=1${bp.sql}
              AND (product_id LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\')
-             ORDER BY name COLLATE NOCASE LIMIT ?`
+             ORDER BY LOWER(name) LIMIT ?`
           )
           .all(...bp.args, likeArg, likeArg, n);
       } else {
         rows = db
           .prepare(
             `SELECT product_id, name FROM products
-             WHERE (branch_id = ? OR branch_id IS NULL OR TRIM(COALESCE(branch_id,'')) = '')
+             WHERE (branch_id = ? OR branch_id IS NULL OR TRIM(COALESCE(branch_id::text, '')) = '')
              AND (product_id LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\')
-             ORDER BY name COLLATE NOCASE LIMIT ?`
+             ORDER BY LOWER(name) LIMIT ?`
           )
           .all(branchScope, likeArg, likeArg, n);
       }
@@ -298,7 +299,7 @@ export function workspaceQuickSearch(db, req, rawQuery, limit) {
         sql += ` AND p.branch_id = ?`;
         args.push(branchId);
       }
-      sql += ` ORDER BY u.display_name COLLATE NOCASE LIMIT ?`;
+      sql += ` ORDER BY LOWER(u.display_name) LIMIT ?`;
       args.push(n);
       const rows = db.prepare(sql).all(...args);
       for (const row of rows) {

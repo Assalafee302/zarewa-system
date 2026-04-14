@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import request from 'supertest';
-import { createDatabase } from './db.js';
+import { createDatabase, resetDatabaseDataForTests } from './db.js';
 import { createApp } from './app.js';
 import { getEligibleRefundQuotations } from './controlOps.js';
 
@@ -33,8 +33,16 @@ function seedData(db) {
   });
 
   const insQ = db.prepare(
-    `INSERT OR REPLACE INTO quotations (id, customer_id, customer_name, total_ngn, paid_ngn, payment_status, status, lines_json)
-     VALUES (?,?,?,?,?,?,?,?)`
+    `INSERT INTO quotations (id, customer_id, customer_name, total_ngn, paid_ngn, payment_status, status, lines_json)
+     VALUES (?,?,?,?,?,?,?,?)
+     ON CONFLICT (id) DO UPDATE SET
+       customer_id = EXCLUDED.customer_id,
+       customer_name = EXCLUDED.customer_name,
+       total_ngn = EXCLUDED.total_ngn,
+       paid_ngn = EXCLUDED.paid_ngn,
+       payment_status = EXCLUDED.payment_status,
+       status = EXCLUDED.status,
+       lines_json = EXCLUDED.lines_json`
   );
   insQ.run('QT-RFS-OVR-001', 'CUS-001', 'John Doe', 100000, 120000, 'Paid', 'Finished', linesOvr);
   insQ.run('QT-RFS-UNPR-001', 'CUS-001', 'John Doe', 100000, 100000, 'Paid', 'Finished', linesUnpr);
@@ -63,70 +71,40 @@ function seedData(db) {
   });
   insQ.run('QT-RFS-CALC-001', 'CUS-001', 'John Doe', 50001, 50001, 'Paid', 'Finished', linesCalcMismatch);
 
-  db.prepare(
-    `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
-     VALUES ('RCT-RFS-BND', 'CUS-001', 'John Doe', 'QT-RFS-BND-001', 124000, 'Confirmed', '2026-04-01')`
-  ).run();
+  const insRcpt = db.prepare(
+    `INSERT INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
+     VALUES (?,?,?,?,?,?,?)
+     ON CONFLICT (id) DO UPDATE SET
+       customer_id = EXCLUDED.customer_id,
+       customer_name = EXCLUDED.customer_name,
+       quotation_ref = EXCLUDED.quotation_ref,
+       amount_ngn = EXCLUDED.amount_ngn,
+       status = EXCLUDED.status,
+       date_iso = EXCLUDED.date_iso`
+  );
+  insRcpt.run('RCT-RFS-BND', 'CUS-001', 'John Doe', 'QT-RFS-BND-001', 124000, 'Confirmed', '2026-04-01');
+  insRcpt.run('RCT-RFS-CALC', 'CUS-001', 'John Doe', 'QT-RFS-CALC-001', 50001, 'Confirmed', '2026-04-01');
+  insRcpt.run('RCT-RFS-OVR', 'CUS-001', 'John Doe', 'QT-RFS-OVR-001', 120000, 'Confirmed', '2026-04-01');
+  insRcpt.run('RCT-RFS-UNPR', 'CUS-001', 'John Doe', 'QT-RFS-UNPR-001', 100000, 'Confirmed', '2026-04-01');
+  insRcpt.run('RCT-RFS-DUP', 'CUS-001', 'John Doe', 'QT-RFS-DUP-001', 1000, 'Confirmed', '2026-04-01');
+  insRcpt.run('RCT-RFS-SELF', 'CUS-001', 'John Doe', 'QT-RFS-SELF-002', 50000, 'Confirmed', '2026-04-01');
+  insRcpt.run('RCT-RFS-PRICE', 'CUS-NDA', 'NDA Corp', 'QT-RFS-PRICE-027', 12000, 'Confirmed', '2026-04-01');
+  insRcpt.run('RCT-RFS-TRN', 'CUS-001', 'John Doe', 'QT-RFS-TRN-001', 125000, 'Confirmed', '2026-04-01');
 
-  db.prepare(
-    `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
-     VALUES ('RCT-RFS-CALC', 'CUS-001', 'John Doe', 'QT-RFS-CALC-001', 50001, 'Confirmed', '2026-04-01')`
-  ).run();
-
-  db.prepare(
-    `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
-     VALUES ('RCT-RFS-OVR', 'CUS-001', 'John Doe', 'QT-RFS-OVR-001', 120000, 'Confirmed', '2026-04-01')`
-  ).run();
-
-  db.prepare(
-    `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
-     VALUES ('RCT-RFS-UNPR', 'CUS-001', 'John Doe', 'QT-RFS-UNPR-001', 100000, 'Confirmed', '2026-04-01')`
-  ).run();
-
-  db.prepare(
-    `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
-     VALUES ('RCT-RFS-DUP', 'CUS-001', 'John Doe', 'QT-RFS-DUP-001', 1000, 'Confirmed', '2026-04-01')`
-  ).run();
-
-  db.prepare(
-    `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
-     VALUES ('RCT-RFS-SELF', 'CUS-001', 'John Doe', 'QT-RFS-SELF-002', 50000, 'Confirmed', '2026-04-01')`
-  ).run();
-
-  db.prepare(
-    `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
-     VALUES ('RCT-RFS-PRICE', 'CUS-NDA', 'NDA Corp', 'QT-RFS-PRICE-027', 12000, 'Confirmed', '2026-04-01')`
-  ).run();
-
-  db.prepare(
-    `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
-     VALUES ('RCT-RFS-TRN', 'CUS-001', 'John Doe', 'QT-RFS-TRN-001', 125000, 'Confirmed', '2026-04-01')`
-  ).run();
-
-  db.prepare(
-    `INSERT OR REPLACE INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
-     VALUES ('JOB-RFS-OVR', 'QT-RFS-OVR-001', 100, 'Completed', '2026-04-01T10:00:00Z')`
-  ).run();
-
-  db.prepare(
-    `INSERT OR REPLACE INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
-     VALUES ('JOB-RFS-UNPR', 'QT-RFS-UNPR-001', 0, 'Cancelled', '2026-04-01T10:00:00Z')`
-  ).run();
-
-  db.prepare(
-    `INSERT OR REPLACE INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
-     VALUES ('JOB-RFS-DUP', 'QT-RFS-DUP-001', 0, 'Cancelled', '2026-04-01T10:00:00Z')`
-  ).run();
-
-  db.prepare(
-    `INSERT OR REPLACE INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
-     VALUES ('JOB-RFS-SELF', 'QT-RFS-SELF-002', 0, 'Cancelled', '2026-04-01T10:00:00Z')`
-  ).run();
-
-  db.prepare(
-    `INSERT OR REPLACE INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
-     VALUES ('JOB-RFS-PRICE', 'QT-RFS-PRICE-027', 0, 'Cancelled', '2026-04-01T10:00:00Z')`
-  ).run();
+  const insJob = db.prepare(
+    `INSERT INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
+     VALUES (?,?,?,?,?)
+     ON CONFLICT (job_id) DO UPDATE SET
+       quotation_ref = EXCLUDED.quotation_ref,
+       actual_meters = EXCLUDED.actual_meters,
+       status = EXCLUDED.status,
+       created_at_iso = EXCLUDED.created_at_iso`
+  );
+  insJob.run('JOB-RFS-OVR', 'QT-RFS-OVR-001', 100, 'Completed', '2026-04-01T10:00:00Z');
+  insJob.run('JOB-RFS-UNPR', 'QT-RFS-UNPR-001', 0, 'Cancelled', '2026-04-01T10:00:00Z');
+  insJob.run('JOB-RFS-DUP', 'QT-RFS-DUP-001', 0, 'Cancelled', '2026-04-01T10:00:00Z');
+  insJob.run('JOB-RFS-SELF', 'QT-RFS-SELF-002', 0, 'Cancelled', '2026-04-01T10:00:00Z');
+  insJob.run('JOB-RFS-PRICE', 'QT-RFS-PRICE-027', 0, 'Cancelled', '2026-04-01T10:00:00Z');
 
   const linesSub = JSON.stringify({
     products: [{ name: 'Roofing Premium', qty: 20, unitPrice: 5000 }],
@@ -134,20 +112,49 @@ function seedData(db) {
     services: [],
   });
   insQ.run('QT-RFS-SUB-001', 'CUS-001', 'John Doe', 100000, 100000, 'Paid', 'Finished', linesSub);
-  db.prepare(
-    `INSERT OR REPLACE INTO products (product_id, name, stock_level, unit, branch_id, gauge, colour, material_type)
-     VALUES ('SUB-FG-TEST', 'Longspan economy', 0, 'm', 'BR-KD', '0.24mm', 'IV', 'Aluminium')`
-  ).run();
-  db.prepare(
-    `INSERT OR REPLACE INTO price_list_items (
+  db
+    .prepare(
+      `INSERT INTO products (product_id, name, stock_level, unit, branch_id, gauge, colour, material_type)
+     VALUES ('SUB-FG-TEST', 'Longspan economy', 0, 'm', 'BR-KD', '0.24mm', 'IV', 'Aluminium')
+     ON CONFLICT (product_id) DO UPDATE SET
+       name = EXCLUDED.name,
+       stock_level = EXCLUDED.stock_level,
+       unit = EXCLUDED.unit,
+       branch_id = EXCLUDED.branch_id,
+       gauge = EXCLUDED.gauge,
+       colour = EXCLUDED.colour,
+       material_type = EXCLUDED.material_type`
+    )
+    .run();
+  db
+    .prepare(
+      `INSERT INTO price_list_items (
       id, gauge_key, design_key, unit_price_per_meter_ngn, sort_order, notes, branch_id, effective_from_iso
-    ) VALUES ('PL-RFS-SUB', '0.24mm', 'iv', 3000, 0, 'test', NULL, '2026-01-01')`
-  ).run();
-  db.prepare(
-    `INSERT OR REPLACE INTO production_jobs (
+    ) VALUES ('PL-RFS-SUB', '0.24mm', 'iv', 3000, 0, 'test', NULL, '2026-01-01')
+    ON CONFLICT (id) DO UPDATE SET
+      gauge_key = EXCLUDED.gauge_key,
+      design_key = EXCLUDED.design_key,
+      unit_price_per_meter_ngn = EXCLUDED.unit_price_per_meter_ngn,
+      sort_order = EXCLUDED.sort_order,
+      notes = EXCLUDED.notes,
+      branch_id = EXCLUDED.branch_id,
+      effective_from_iso = EXCLUDED.effective_from_iso`
+    )
+    .run();
+  db
+    .prepare(
+      `INSERT INTO production_jobs (
       job_id, quotation_ref, product_id, product_name, actual_meters, status, created_at_iso
-    ) VALUES ('JOB-RFS-SUB', 'QT-RFS-SUB-001', 'SUB-FG-TEST', 'Longspan economy', 10, 'Completed', '2026-04-01T10:00:00Z')`
-  ).run();
+    ) VALUES ('JOB-RFS-SUB', 'QT-RFS-SUB-001', 'SUB-FG-TEST', 'Longspan economy', 10, 'Completed', '2026-04-01T10:00:00Z')
+    ON CONFLICT (job_id) DO UPDATE SET
+      quotation_ref = EXCLUDED.quotation_ref,
+      product_id = EXCLUDED.product_id,
+      product_name = EXCLUDED.product_name,
+      actual_meters = EXCLUDED.actual_meters,
+      status = EXCLUDED.status,
+      created_at_iso = EXCLUDED.created_at_iso`
+    )
+    .run();
 }
 
 describe('Refund Security & Substitution Logic', () => {
@@ -160,13 +167,17 @@ describe('Refund Security & Substitution Logic', () => {
     return client;
   }
 
+  beforeAll(() => {
+    db = createDatabase();
+  });
+
   beforeEach(async () => {
-    db = createDatabase(':memory:');
+    resetDatabaseDataForTests(db);
     seedData(db);
     app = createApp(db);
   });
 
-  afterEach(() => {
+  afterAll(() => {
     db?.close();
   });
 
@@ -413,12 +424,31 @@ describe('Refund Security & Substitution Logic', () => {
   });
 
   it('blocks order cancellation after a delivery is marked for the quotation', async () => {
-    db.prepare(
-      `INSERT OR REPLACE INTO deliveries (
+    db
+      .prepare(
+        `INSERT INTO deliveries (
         id, quotation_ref, customer_id, customer_name, cutting_list_id, destination, method, status,
         tracking_no, ship_date, eta, delivered_date_iso, pod_notes, courier_confirmed, customer_signed_pod, fulfillment_posted, branch_id
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
-    ).run(
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT (id) DO UPDATE SET
+        quotation_ref = EXCLUDED.quotation_ref,
+        customer_id = EXCLUDED.customer_id,
+        customer_name = EXCLUDED.customer_name,
+        cutting_list_id = EXCLUDED.cutting_list_id,
+        destination = EXCLUDED.destination,
+        method = EXCLUDED.method,
+        status = EXCLUDED.status,
+        tracking_no = EXCLUDED.tracking_no,
+        ship_date = EXCLUDED.ship_date,
+        eta = EXCLUDED.eta,
+        delivered_date_iso = EXCLUDED.delivered_date_iso,
+        pod_notes = EXCLUDED.pod_notes,
+        courier_confirmed = EXCLUDED.courier_confirmed,
+        customer_signed_pod = EXCLUDED.customer_signed_pod,
+        fulfillment_posted = EXCLUDED.fulfillment_posted,
+        branch_id = EXCLUDED.branch_id`
+      )
+      .run(
       'DLV-RFS-BLK',
       'QT-RFS-UNPR-001',
       'CUS-001',
@@ -460,31 +490,72 @@ describe('Refund Security & Substitution Logic', () => {
   });
 
   it('getEligibleRefundQuotations includes quotations with Cancelled production job', () => {
-    db.prepare(
-      `INSERT OR REPLACE INTO quotations (id, customer_id, customer_name, total_ngn, paid_ngn, status, lines_json)
-       VALUES ('QT-RFS-CANC-JOB','CUS-001','John Doe',50000,50000,'Finished','{}')`
-    ).run();
-    db.prepare(
-      `INSERT OR REPLACE INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
-       VALUES ('JOB-RFS-CANC','QT-RFS-CANC-JOB',0,'Cancelled','2026-04-01T10:00:00Z')`
-    ).run();
+    db
+      .prepare(
+        `INSERT INTO quotations (id, customer_id, customer_name, total_ngn, paid_ngn, status, lines_json)
+       VALUES ('QT-RFS-CANC-JOB','CUS-001','John Doe',50000,50000,'Finished','{}')
+       ON CONFLICT (id) DO UPDATE SET
+         customer_id = EXCLUDED.customer_id,
+         customer_name = EXCLUDED.customer_name,
+         total_ngn = EXCLUDED.total_ngn,
+         paid_ngn = EXCLUDED.paid_ngn,
+         status = EXCLUDED.status,
+         lines_json = EXCLUDED.lines_json`
+      )
+      .run();
+    db
+      .prepare(
+        `INSERT INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
+       VALUES ('JOB-RFS-CANC','QT-RFS-CANC-JOB',0,'Cancelled','2026-04-01T10:00:00Z')
+       ON CONFLICT (job_id) DO UPDATE SET
+         quotation_ref = EXCLUDED.quotation_ref,
+         actual_meters = EXCLUDED.actual_meters,
+         status = EXCLUDED.status,
+         created_at_iso = EXCLUDED.created_at_iso`
+      )
+      .run();
     const rows = getEligibleRefundQuotations(db);
     expect(rows.some((r) => r.id === 'QT-RFS-CANC-JOB')).toBe(true);
   });
 
   it('preview counts actual metres from Cancelled production jobs', async () => {
-    db.prepare(
-      `INSERT OR REPLACE INTO quotations (id, customer_id, customer_name, total_ngn, paid_ngn, status, lines_json)
-       VALUES ('QT-RFS-CANC-M','CUS-001','John Doe',100000,100000,'Finished','{"products":[{"name":"R","qty":10,"unitPrice":10000}],"accessories":[],"services":[]}')`
-    ).run();
-    db.prepare(
-      `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
-       VALUES ('RCT-RFS-CM','CUS-001','John Doe','QT-RFS-CANC-M',100000,'Confirmed','2026-04-01')`
-    ).run();
-    db.prepare(
-      `INSERT OR REPLACE INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
-       VALUES ('JOB-RFS-CM','QT-RFS-CANC-M',14.5,'Cancelled','2026-04-01T10:00:00Z')`
-    ).run();
+    db
+      .prepare(
+        `INSERT INTO quotations (id, customer_id, customer_name, total_ngn, paid_ngn, status, lines_json)
+       VALUES ('QT-RFS-CANC-M','CUS-001','John Doe',100000,100000,'Finished','{"products":[{"name":"R","qty":10,"unitPrice":10000}],"accessories":[],"services":[]}')
+       ON CONFLICT (id) DO UPDATE SET
+         customer_id = EXCLUDED.customer_id,
+         customer_name = EXCLUDED.customer_name,
+         total_ngn = EXCLUDED.total_ngn,
+         paid_ngn = EXCLUDED.paid_ngn,
+         status = EXCLUDED.status,
+         lines_json = EXCLUDED.lines_json`
+      )
+      .run();
+    db
+      .prepare(
+        `INSERT INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
+       VALUES ('RCT-RFS-CM','CUS-001','John Doe','QT-RFS-CANC-M',100000,'Confirmed','2026-04-01')
+       ON CONFLICT (id) DO UPDATE SET
+         customer_id = EXCLUDED.customer_id,
+         customer_name = EXCLUDED.customer_name,
+         quotation_ref = EXCLUDED.quotation_ref,
+         amount_ngn = EXCLUDED.amount_ngn,
+         status = EXCLUDED.status,
+         date_iso = EXCLUDED.date_iso`
+      )
+      .run();
+    db
+      .prepare(
+        `INSERT INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
+       VALUES ('JOB-RFS-CM','QT-RFS-CANC-M',14.5,'Cancelled','2026-04-01T10:00:00Z')
+       ON CONFLICT (job_id) DO UPDATE SET
+         quotation_ref = EXCLUDED.quotation_ref,
+         actual_meters = EXCLUDED.actual_meters,
+         status = EXCLUDED.status,
+         created_at_iso = EXCLUDED.created_at_iso`
+      )
+      .run();
 
     const agent = request.agent(app);
     await loginAs(agent, 'sales.staff', 'Sales@123');
@@ -503,10 +574,20 @@ describe('Refund Security & Substitution Logic', () => {
   });
 
   it('getEligibleRefundQuotations includes paid Void quotations without a production job', () => {
-    db.prepare(
-      `INSERT OR REPLACE INTO quotations (id, customer_id, customer_name, total_ngn, paid_ngn, status, archived, lines_json)
-       VALUES ('QT-RFS-VOID-PAID','CUS-001','John Doe',30000,30000,'Void',1,'{}')`
-    ).run();
+    db
+      .prepare(
+        `INSERT INTO quotations (id, customer_id, customer_name, total_ngn, paid_ngn, status, archived, lines_json)
+       VALUES ('QT-RFS-VOID-PAID','CUS-001','John Doe',30000,30000,'Void',1,'{}')
+       ON CONFLICT (id) DO UPDATE SET
+         customer_id = EXCLUDED.customer_id,
+         customer_name = EXCLUDED.customer_name,
+         total_ngn = EXCLUDED.total_ngn,
+         paid_ngn = EXCLUDED.paid_ngn,
+         status = EXCLUDED.status,
+         archived = EXCLUDED.archived,
+         lines_json = EXCLUDED.lines_json`
+      )
+      .run();
     const rows = getEligibleRefundQuotations(db);
     expect(rows.some((r) => r.id === 'QT-RFS-VOID-PAID')).toBe(true);
   });

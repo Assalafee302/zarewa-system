@@ -1,5 +1,5 @@
 /**
- * Org-wide governance policy (SQLite-backed) with audit trail.
+ * Org-wide governance policy (Postgres-backed) with audit trail.
  * Defaults match shared/workspaceGovernance.js constants.
  */
 import crypto from 'node:crypto';
@@ -7,6 +7,7 @@ import {
   EXPENSE_MD_APPROVAL_THRESHOLD_NGN,
   REFUND_MD_APPROVAL_THRESHOLD_NGN,
 } from '../shared/workspaceGovernance.js';
+import { pgTableExists } from './pg/pgMeta.js';
 
 const KEY_EXPENSE = 'approval.expense_executive_threshold_ngn';
 const KEY_REFUND = 'approval.refund_executive_threshold_ngn';
@@ -17,9 +18,7 @@ function nowIso() {
 
 export function orgPolicyTablesReady(db) {
   try {
-    return Boolean(
-      db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='org_policy_kv'`).get()
-    );
+    return pgTableExists(db, 'org_policy_kv');
   } catch {
     return false;
   }

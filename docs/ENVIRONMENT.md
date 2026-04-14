@@ -2,7 +2,7 @@
 
 Use these when deploying or running automated tests. There is no committed `.env` in the repo; copy [`.env.example`](../.env.example) to `.env` locally or set values in your host / platform dashboard.
 
-The application is **PostgreSQL-only**: **`DATABASE_URL` is required** for `npm run server`, `npm run start`, Vitest suites that open the DB, Playwright’s API server, and `npm run db:migrate`.
+The application is **PostgreSQL-only**: **`DATABASE_URL` is required** for `npm run server`, `npm run start`, Vitest suites that open the DB, Playwright’s API server, and `npm run db:migrate`. Vitest loads `vitest.pg-env.js` first for the **node** project; if `DATABASE_URL` is unset, tests fail immediately with a short message (set it in `.env` or the shell before `npm run test`).
 
 | Variable | Purpose |
 |----------|---------|

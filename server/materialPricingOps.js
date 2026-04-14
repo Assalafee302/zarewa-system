@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { appendAuditLog } from './controlOps.js';
 import { upsertPriceListItem } from './pricingOps.js';
+import { pgTableExists } from './pg/pgMeta.js';
 
 /** @type {readonly string[]} */
 export const MATERIAL_PRICING_STANDARD_GAUGES_MM = [
@@ -47,7 +48,7 @@ export function theoreticalStandardKgPerM(materialKey, gaugeMm) {
  */
 export function catalogStandardKgPerM(db, productId, gaugeMm) {
   if (!productId || !gaugeMm) return null;
-  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='procurement_catalog'`).get()) {
+  if (!pgTableExists(db, 'procurement_catalog')) {
     return null;
   }
   const rows = db
@@ -143,7 +144,7 @@ export function listMaterialPricingSheet(db, materialKey, branchId) {
     return { ok: false, error: 'materialKey must be alu or aluzinc.' };
   }
   if (!bid) return { ok: false, error: 'branchId is required.' };
-  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='material_pricing_sheet_rows'`).get()) {
+  if (!pgTableExists(db, 'material_pricing_sheet_rows')) {
     return {
       ok: true,
       materialKey: mk,
@@ -190,7 +191,7 @@ export function listMaterialPricingSheet(db, materialKey, branchId) {
 export function listMaterialPricingEvents(db, q) {
   const mk = normKey(q?.materialKey);
   const limit = Math.min(200, Math.max(1, Math.round(Number(q?.limit) || 80)));
-  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='material_pricing_sheet_events'`).get()) {
+  if (!pgTableExists(db, 'material_pricing_sheet_events')) {
     return { ok: true, events: [] };
   }
   if (!mk || (mk !== 'alu' && mk !== 'aluzinc')) {
@@ -240,7 +241,7 @@ function positiveOrNull(v) {
  * @param {object} actor
  */
 export function upsertMaterialPricingSheetRow(db, body, actor) {
-  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='material_pricing_sheet_rows'`).get()) {
+  if (!pgTableExists(db, 'material_pricing_sheet_rows')) {
     return { ok: false, error: 'Pricing workbook tables are not available.' };
   }
   const materialKey = normKey(body?.materialKey);

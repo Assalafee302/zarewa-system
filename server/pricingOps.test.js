@@ -1,5 +1,5 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { createDatabase } from './db.js';
+import { describe, expect, it, beforeAll, beforeEach, afterAll } from 'vitest';
+import { createDatabase, resetDatabaseDataForTests } from './db.js';
 import {
   validatePriceListEffectiveIso,
   upsertPriceListItem,
@@ -13,13 +13,17 @@ describe('pricingOps', () => {
   /** Seeded admin satisfies audit_log.actor_user_id FK */
   let actor;
 
+  beforeAll(() => {
+    db = createDatabase();
+  });
+
   beforeEach(() => {
-    db = createDatabase(':memory:');
+    resetDatabaseDataForTests(db);
     const row = db.prepare(`SELECT id FROM app_users WHERE username = 'admin' LIMIT 1`).get();
     actor = { id: row?.id ?? 'admin', displayName: 'Admin' };
   });
 
-  afterEach(() => {
+  afterAll(() => {
     db?.close();
   });
 

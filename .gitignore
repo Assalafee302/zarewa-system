@@ -8,6 +8,8 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+# Legacy nested repo (was a broken gitlink without .gitmodules). Not part of the monorepo source tree.
+/app/
 .env
 data/*.sqlite
 data/*.sqlite-*

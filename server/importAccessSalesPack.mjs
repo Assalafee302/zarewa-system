@@ -43,11 +43,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import Database from 'better-sqlite3';
 import XLSX from 'xlsx';
-import { SCHEMA_SQL } from './schemaSql.js';
 import { runMigrations } from './migrate.js';
-import { defaultDbPath } from './db.js';
+import { createDatabase } from './db.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -57,7 +55,7 @@ function parseArgs(argv) {
   const out = {
     dryRun: false,
     dir: path.join(ROOT, 'docs', 'import'),
-    dbPath: process.env.ZAREWA_DB || defaultDbPath(),
+    dbPath: process.env.DATABASE_URL || '',
     branchId: DEFAULT_BRANCH_ID,
     customerMergeReport: false,
     customerMergeReportOut: '',
@@ -362,8 +360,9 @@ function applyLegacyProductionCoilLink(db, ctx) {
 
   const mvId = `MV-LIMP-${String(jobId).replace(/[^a-z0-9-]/gi, '').slice(0, 36)}`;
   db.prepare(
-    `INSERT OR IGNORE INTO stock_movements (id, at_iso, type, ref, product_id, qty, detail, date_iso, unit_price_ngn, value_ngn)
-     VALUES (?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO stock_movements (id, at_iso, type, ref, product_id, qty, detail, date_iso, unit_price_ngn, value_ngn)
+     VALUES (?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT (id) DO NOTHING`
   ).run(
     mvId,
     atIso,
@@ -902,12 +901,9 @@ function syncQuotationLineRows(db, quotationId, linesJson) {
   }
 }
 
-function openDb(dbPath, dryRun) {
+function openDb(_dbPath, dryRun) {
   if (dryRun) return null;
-  const db = new Database(dbPath);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-  db.exec(SCHEMA_SQL);
+  const db = createDatabase();
   runMigrations(db);
   return db;
 }
@@ -1364,8 +1360,13 @@ function runImport(db, plan, branchId) {
       production_released_by = cutting_lists.production_released_by
   `);
   const insCll = db.prepare(`
-    INSERT OR REPLACE INTO cutting_list_lines (cutting_list_id, sort_order, sheets, length_m, total_m, line_type)
+    INSERT INTO cutting_list_lines (cutting_list_id, sort_order, sheets, length_m, total_m, line_type)
     VALUES (?,?,?,?,?,?)
+    ON CONFLICT (cutting_list_id, sort_order) DO UPDATE SET
+      sheets = EXCLUDED.sheets,
+      length_m = EXCLUDED.length_m,
+      total_m = EXCLUDED.total_m,
+      line_type = EXCLUDED.line_type
   `);
 
   let cuttingSkipped = 0;
@@ -1823,12 +1824,8 @@ export function pruneLegacySalesLinkOrphans(db) {
 function main() {
   const args = parseArgs(process.argv);
   if (args.pruneLegacyLinksOnly) {
-    if (!fs.existsSync(path.dirname(args.dbPath))) {
-      console.error('Database directory missing:', path.dirname(args.dbPath));
-      process.exit(1);
-    }
-    if (!fs.existsSync(args.dbPath)) {
-      console.error('Database not found:', args.dbPath);
+    if (!process.env.DATABASE_URL?.trim()) {
+      console.error('DATABASE_URL is required.');
       process.exit(1);
     }
     const db = openDb(args.dbPath, false);
@@ -1905,8 +1902,9 @@ function main() {
     process.exit(0);
   }
 
-  if (!fs.existsSync(path.dirname(args.dbPath))) {
-    fs.mkdirSync(path.dirname(args.dbPath), { recursive: true });
+  if (!process.env.DATABASE_URL?.trim()) {
+    console.error('DATABASE_URL is required for import.');
+    process.exit(1);
   }
 
   const db = openDb(args.dbPath, false);

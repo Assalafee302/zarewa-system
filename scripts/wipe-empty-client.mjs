@@ -1,26 +1,26 @@
 #!/usr/bin/env node
 /**
- * Deletes the default SQLite file(s), same as db:wipe. After this, start the API with
- * ZAREWA_EMPTY_SEED=1 so the DB is recreated with schema + auth + master templates only
- * (no demo customers, quotations, receipts, procurement, etc.).
+ * Truncate and re-seed Postgres with ZAREWA_EMPTY_SEED (no transactional demo data).
  *
- * PowerShell:  $env:ZAREWA_EMPTY_SEED='1'; npm run server
- * Unix:        ZAREWA_EMPTY_SEED=1 npm run server
+ *   DATABASE_URL=postgres://... node scripts/wipe-empty-client.mjs
+ *
+ * Then start the API with the same ZAREWA_EMPTY_SEED=1 if you want an empty-client runtime.
  */
+import { openSchemaOnlyDatabase, resetDatabaseDataForTests } from '../server/db.js';
 
-import { spawnSync } from 'node:child_process';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+if (!process.env.DATABASE_URL?.trim()) {
+  console.error('DATABASE_URL is required.');
+  process.exit(1);
+}
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(__dirname, '..');
-const r = spawnSync(process.execPath, ['scripts/wipe-local-sqlite.mjs'], {
-  cwd: root,
-  stdio: 'inherit',
-  env: process.env,
-});
-if (r.status !== 0) process.exit(r.status ?? 1);
+process.env.ZAREWA_EMPTY_SEED = '1';
+const db = openSchemaOnlyDatabase();
+try {
+  resetDatabaseDataForTests(db);
+  console.log('[wipe-empty-client] Postgres truncated and re-seeded in empty-client mode.');
+} finally {
+  db.close();
+}
+
 console.log('');
-console.log('Next: set ZAREWA_EMPTY_SEED=1, then npm run server (stop any running API first).');
-console.log('  PowerShell:  $env:ZAREWA_EMPTY_SEED=\'1\'; npm run server');
-console.log('  cmd.exe:     set ZAREWA_EMPTY_SEED=1 && npm run server');
+console.log('Next: ZAREWA_EMPTY_SEED=1 npm run server');

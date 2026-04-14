@@ -1,5 +1,5 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { createDatabase } from './db.js';
+import { describe, expect, it, beforeAll, beforeEach, afterAll } from 'vitest';
+import { createDatabase, resetDatabaseDataForTests } from './db.js';
 import {
   ensureStoneProduct,
   isStoneMeterQuotationLinesJson,
@@ -9,11 +9,15 @@ import {
 describe('stoneInventory', () => {
   let db;
 
-  beforeEach(() => {
-    db = createDatabase(':memory:');
+  beforeAll(() => {
+    db = createDatabase();
   });
 
-  afterEach(() => {
+  beforeEach(() => {
+    resetDatabaseDataForTests(db);
+  });
+
+  afterAll(() => {
     db?.close();
   });
 

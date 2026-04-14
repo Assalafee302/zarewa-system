@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { isHrProductModuleEnabled } from './hrModuleEnabled.js';
 import { canUseAllBranchesRollup, createAppUserRecord, roleLabel, userHasPermission } from './auth.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
 import {
@@ -9,6 +10,7 @@ import {
   validateStaffLoanApplication,
 } from './hrBusinessRules.js';
 import { provisionStaffLoanForFinanceQueue } from './writeOps.js';
+import { pgTableExists } from './pg/pgMeta.js';
 
 const REQUEST_KINDS = new Set([
   'leave',
@@ -214,9 +216,7 @@ export function appendHrAuditEvent(db, event = {}) {
  * @param {import('better-sqlite3').Database} db
  */
 export function hrTablesReady(db) {
-  return Boolean(
-    db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='hr_staff_profiles'`).get()
-  );
+  return pgTableExists(db, 'hr_staff_profiles');
 }
 
 /**
@@ -930,11 +930,20 @@ export function createHrRequest(db, userId, body) {
   );
   if (kind === 'leave') {
     const p = body?.payload || {};
-    db.prepare(
-      `INSERT OR REPLACE INTO hr_request_leave (
+    db
+      .prepare(
+        `INSERT INTO hr_request_leave (
         request_id, leave_type, start_date_iso, end_date_iso, days_requested, handover_to, contact_during_leave
-      ) VALUES (?,?,?,?,?,?,?)`
-    ).run(
+      ) VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT (request_id) DO UPDATE SET
+        leave_type = EXCLUDED.leave_type,
+        start_date_iso = EXCLUDED.start_date_iso,
+        end_date_iso = EXCLUDED.end_date_iso,
+        days_requested = EXCLUDED.days_requested,
+        handover_to = EXCLUDED.handover_to,
+        contact_during_leave = EXCLUDED.contact_during_leave`
+      )
+      .run(
       id,
       String(p.leaveType || '').trim() || null,
       String(p.startDateIso || p.startDate || '').trim() || null,
@@ -965,11 +974,18 @@ export function createHrRequest(db, userId, body) {
     if (!loanVal.ok) {
       return { ok: false, error: loanVal.error || 'Loan does not meet policy.' };
     }
-    db.prepare(
-      `INSERT OR REPLACE INTO hr_request_loan (
+    db
+      .prepare(
+        `INSERT INTO hr_request_loan (
         request_id, amount_ngn, repayment_months, deduction_per_month_ngn, purpose
-      ) VALUES (?,?,?,?,?)`
-    ).run(
+      ) VALUES (?,?,?,?,?)
+      ON CONFLICT (request_id) DO UPDATE SET
+        amount_ngn = EXCLUDED.amount_ngn,
+        repayment_months = EXCLUDED.repayment_months,
+        deduction_per_month_ngn = EXCLUDED.deduction_per_month_ngn,
+        purpose = EXCLUDED.purpose`
+      )
+      .run(
       id,
       amountNgn,
       repaymentMonths,
@@ -1430,9 +1446,16 @@ export function recomputeHrLeaveBalances(db, actor, body = {}) {
     .all(leaveType, periodYyyymm);
   const adjustedByUser = new Map(adjustedExistingRows.map((r) => [String(r.user_id), Number(r.adjusted_days || 0)]));
   const upsert = db.prepare(
-    `INSERT OR REPLACE INTO hr_leave_balances (
+    `INSERT INTO hr_leave_balances (
       user_id, leave_type, period_yyyymm, opening_days, accrued_days, used_days, adjusted_days, closing_days, updated_at_iso
-    ) VALUES (?,?,?,?,?,?,?,?,?)`
+    ) VALUES (?,?,?,?,?,?,?,?,?)
+    ON CONFLICT (user_id, leave_type, period_yyyymm) DO UPDATE SET
+      opening_days = EXCLUDED.opening_days,
+      accrued_days = EXCLUDED.accrued_days,
+      used_days = EXCLUDED.used_days,
+      adjusted_days = EXCLUDED.adjusted_days,
+      closing_days = EXCLUDED.closing_days,
+      updated_at_iso = EXCLUDED.updated_at_iso`
   );
   const ledgerIns = db.prepare(
     `INSERT INTO hr_leave_accrual_ledger (
@@ -1558,11 +1581,20 @@ export function adjustHrLeaveBalance(db, actor, body = {}) {
     return { ok: false, error: 'Adjustment would make balance negative.' };
   }
   db.transaction(() => {
-    db.prepare(
-      `INSERT OR REPLACE INTO hr_leave_balances (
+    db
+      .prepare(
+        `INSERT INTO hr_leave_balances (
         user_id, leave_type, period_yyyymm, opening_days, accrued_days, used_days, adjusted_days, closing_days, updated_at_iso
-      ) VALUES (?,?,?,?,?,?,?,?,?)`
-    ).run(userId, leaveType, periodYyyymm, opening, accrued, used, adjustedNext, closingNext, now);
+      ) VALUES (?,?,?,?,?,?,?,?,?)
+      ON CONFLICT (user_id, leave_type, period_yyyymm) DO UPDATE SET
+        opening_days = EXCLUDED.opening_days,
+        accrued_days = EXCLUDED.accrued_days,
+        used_days = EXCLUDED.used_days,
+        adjusted_days = EXCLUDED.adjusted_days,
+        closing_days = EXCLUDED.closing_days,
+        updated_at_iso = EXCLUDED.updated_at_iso`
+      )
+      .run(userId, leaveType, periodYyyymm, opening, accrued, used, adjustedNext, closingNext, now);
     db.prepare(
       `INSERT INTO hr_leave_accrual_ledger (
         id, user_id, leave_type, period_yyyymm, movement_kind, days, reference_id, note, created_at_iso, created_by_user_id
@@ -2740,7 +2772,12 @@ export function putHrPublicHoliday(db, actor, body = {}) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dayIso)) return { ok: false, error: 'dayIso must be YYYY-MM-DD.' };
   if (label.length < 2) return { ok: false, error: 'label is required.' };
   try {
-    db.prepare(`INSERT OR REPLACE INTO hr_public_holidays (day_iso, label, scope) VALUES (?,?,?)`).run(dayIso, label, scope);
+    db
+      .prepare(
+        `INSERT INTO hr_public_holidays (day_iso, label, scope) VALUES (?,?,?)
+         ON CONFLICT (day_iso, scope) DO UPDATE SET label = EXCLUDED.label`
+      )
+      .run(dayIso, label, scope);
     appendHrAuditEvent(db, {
       actorUserId: actor?.id || null,
       action: 'hr.public_holiday.upsert',
@@ -2995,6 +3032,7 @@ export function createHrFeedbackNote(db, actor, body = {}) {
 }
 
 export function runHrScheduledJobs(db) {
+  if (!isHrProductModuleEnabled()) return { ok: true, skipped: 'hr_module_disabled' };
   if (!hrTablesReady(db)) return { ok: false, error: 'no_hr' };
   try {
     const row = db

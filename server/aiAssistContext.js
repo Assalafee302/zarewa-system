@@ -17,6 +17,7 @@ import {
   listHrStaff,
   listPayrollRuns,
 } from './hrOps.js';
+import { isHrProductModuleEnabled } from './hrModuleEnabled.js';
 import { canAccessModuleWithPermissions } from '../src/lib/moduleAccess.js';
 import { buildWorkspaceNotifications } from '../src/lib/workspaceNotifications.js';
 import { quotationNeedsFollowUpAlert } from '../src/lib/quotationLifecycleUi.js';
@@ -32,7 +33,7 @@ function inferAiModeFromPath(pathname) {
   if (path.startsWith('/procurement')) return 'procurement';
   if (path.startsWith('/operations') || path.startsWith('/deliveries')) return 'operations';
   if (path.startsWith('/accounts') || path.startsWith('/accounting')) return 'finance';
-  if (path.startsWith('/hr')) return 'hr';
+  if (path.startsWith('/hr') && isHrProductModuleEnabled()) return 'hr';
   return 'search';
 }
 
@@ -68,7 +69,7 @@ function allowedModesForPermissions(user, permissions) {
   if (canReadProcurementDomain(user)) modes.push('procurement');
   if (canReadOperationsDomain(user)) modes.push('operations');
   if (canReadFinanceDomain(user)) modes.push('finance');
-  if (canAccessModuleWithPermissions(permissions || [], 'hr')) modes.push('hr');
+  if (isHrProductModuleEnabled() && canAccessModuleWithPermissions(permissions || [], 'hr')) modes.push('hr');
   return modes;
 }
 
@@ -440,6 +441,9 @@ function financeContextLines(db, req, snapshot, branchScope, pageContext) {
 }
 
 function hrContextLines(db, req, pageContext) {
+  if (!isHrProductModuleEnabled()) {
+    return ['HR assistant context is disabled for this deployment (HR product module off).'];
+  }
   if (!hrTablesReady(db)) {
     return ['HR module tables are not initialized in this workspace.'];
   }

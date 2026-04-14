@@ -1,21 +1,21 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import request from 'supertest';
-import { createDatabase } from './db.js';
+import { createDatabase, resetDatabaseDataForTests } from './db.js';
 import { createApp } from './app.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
 
-const openDbs = [];
+let sharedDb;
 
 function makeApp() {
-  const db = createDatabase(':memory:');
-  openDbs.push(db);
-  return createApp(db);
+  if (!sharedDb) sharedDb = createDatabase();
+  resetDatabaseDataForTests(sharedDb);
+  return createApp(sharedDb);
 }
 
 describe('Session workspace / branch scope', () => {
   afterAll(() => {
-    for (const db of openDbs) db.close();
-    openDbs.length = 0;
+    sharedDb?.close();
+    sharedDb = undefined;
   });
 
   it('bootstrap includes workspaceBranches and branchScope; PATCH branch updates scope', async () => {

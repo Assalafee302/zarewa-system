@@ -180,7 +180,10 @@ export function seedEverything(db) {
     const insY = db.prepare(
       `INSERT INTO yard_coils (id, colour, gauge_label, material_type, weight_kg, loc) VALUES (?,?,?,?,?,?)`
     );
-    const insBlob = db.prepare(`INSERT OR REPLACE INTO app_json_blobs (key, payload) VALUES (?,?)`);
+    const insBlob = db.prepare(
+      `INSERT INTO app_json_blobs (key, payload) VALUES (?,?)
+       ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload`
+    );
 
     db.transaction(() => {
       for (const s of SUPPLIERS_SEED) {

@@ -1,22 +1,18 @@
 /**
- * Removes the Playwright E2E SQLite file so the next `npm run test:e2e` starts clean.
- * Safe: only deletes `data/playwright.sqlite` (not zarewa.sqlite).
+ * Truncate application data in the configured Postgres database (same as Playwright API startup).
+ * Requires DATABASE_URL. Safe for a dedicated E2E database only.
  */
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { resetDatabaseDataForTests, openSchemaOnlyDatabase } from '../server/db.js';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const db = path.join(root, 'data', 'playwright.sqlite');
-const shm = `${db}-shm`;
-const wal = `${db}-wal`;
-
-for (const f of [wal, shm, db]) {
-  try {
-    if (fs.existsSync(f)) fs.unlinkSync(f);
-  } catch (e) {
-    console.error(`[wipe-playwright-e2e] Could not remove ${f}:`, e.message);
-    process.exit(1);
-  }
+if (!process.env.DATABASE_URL?.trim()) {
+  console.error('[wipe-playwright-e2e] DATABASE_URL is required.');
+  process.exit(1);
 }
-console.log('[wipe-playwright-e2e] Removed data/playwright.sqlite (and -wal/-shm if present).');
+
+const db = openSchemaOnlyDatabase();
+try {
+  resetDatabaseDataForTests(db);
+  console.log('[wipe-playwright-e2e] Postgres data truncated and re-seeded (E2E clean slate).');
+} finally {
+  db.close();
+}

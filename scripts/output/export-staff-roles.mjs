@@ -1,12 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import Database from 'better-sqlite3';
+import { createDatabase } from '../../server/db.js';
 
 const outDir = path.join(process.cwd(), 'scripts', 'output');
 fs.mkdirSync(outDir, { recursive: true });
 
-const dbPath = process.env.ZAREWA_DB_PATH || path.join(process.cwd(), 'data', 'zarewa.sqlite');
-const db = new Database(dbPath);
+const db = createDatabase();
 
 const rows = db
   .prepare(
@@ -30,4 +29,5 @@ const lines = [header.join('\t'), ...rows.map((r) => [r.username, r.roleKey, r.b
 const tsvPath = path.join(outDir, 'staff-roles.tsv');
 fs.writeFileSync(tsvPath, `${lines.join('\n')}\n`, 'utf8');
 
+db.close();
 console.log(`Wrote ${rows.length} rows to ${tsvPath}`);

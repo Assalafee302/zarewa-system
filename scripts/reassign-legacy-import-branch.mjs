@@ -3,25 +3,13 @@
  * Reassign all Access-imported legacy rows to a workspace branch so they appear when that
  * branch is selected in the app (Sales / Customers / ledger are scoped by branch_id).
  *
- * Importer defaults to BR-KAD. If you work in BR-YOL or BR-MAI, run this after import.
- *
- *   node scripts/reassign-legacy-import-branch.mjs BR-YOL
- *   set ZAREWA_DB=C:\path\to\zarewa.sqlite && node scripts/reassign-legacy-import-branch.mjs BR-MAI
- *
- * Stop the API first if you get SQLITE_BUSY.
+ *   DATABASE_URL=postgres://... node scripts/reassign-legacy-import-branch.mjs BR-YOL
  */
-import Database from 'better-sqlite3';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { SCHEMA_SQL } from '../server/schemaSql.js';
+import { createDatabase } from '../server/db.js';
 import { runMigrations } from '../server/migrate.js';
-import { defaultDbPath } from '../server/db.js';
 import { listBranches } from '../server/branches.js';
 
-const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const targetBranch = String(process.argv[2] ?? '').trim();
-const dbPath = process.env.ZAREWA_DB ? path.resolve(process.env.ZAREWA_DB) : defaultDbPath();
 
 if (!targetBranch) {
   console.error('Usage: node scripts/reassign-legacy-import-branch.mjs <branchId>');
@@ -29,14 +17,12 @@ if (!targetBranch) {
   process.exit(1);
 }
 
-if (!fs.existsSync(dbPath)) {
-  console.error('Database not found:', dbPath);
+if (!process.env.DATABASE_URL?.trim()) {
+  console.error('DATABASE_URL is required.');
   process.exit(1);
 }
 
-const db = new Database(dbPath);
-db.pragma('foreign_keys = ON');
-db.exec(SCHEMA_SQL);
+const db = createDatabase();
 runMigrations(db);
 
 const valid = new Set(listBranches(db).map((b) => b.id));
@@ -47,11 +33,13 @@ if (!valid.has(targetBranch)) {
 }
 
 function hasCol(table) {
-  try {
-    return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === 'branch_id');
-  } catch {
-    return false;
-  }
+  if (!/^[a-zA-Z0-9_]+$/.test(table)) return false;
+  const row = db
+    .prepare(
+      `SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = ? AND column_name = 'branch_id'`
+    )
+    .get(table);
+  return Boolean(row);
 }
 
 /** @param {string} sql */

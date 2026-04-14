@@ -5,6 +5,7 @@ import { canUseAllBranchesRollup, userHasPermission } from './auth.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
 import { appendAuditLog, insertPaymentRequest } from './controlOps.js';
 import { hrListScope } from './hrOps.js';
+import { pgTableExists } from './pg/pgMeta.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -67,9 +68,7 @@ export function officeScopeFromReq(req) {
 
 export function officeTablesReady(db) {
   try {
-    return Boolean(
-      db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='office_threads'`).get()
-    );
+    return pgTableExists(db, 'office_threads');
   } catch {
     return false;
   }

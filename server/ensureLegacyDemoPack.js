@@ -9,10 +9,10 @@ const DEMO_RECEIPT_ID = 'RC-2026-1849';
 const DEMO_CL_ID = 'CL-2026-1592';
 
 /**
- * Ensures the legacy factory demo pack exists in the SQLite file even when the DB was
- * created before those rows were added to the seed arrays (seedEverything only fills an empty DB).
- * Uses INSERT OR IGNORE / line backfill so it is safe to run on every startup.
- * @param {import('better-sqlite3').Database} db
+ * Ensures the legacy factory demo pack exists even when the DB was created before those rows
+ * were added to the seed arrays (seedEverything only fills an empty DB).
+ * Uses INSERT … ON CONFLICT DO NOTHING / line backfill so it is safe to run on every startup.
+ * @param {import('better-sqlite3').Database | import('./pg/pgSyncDb.js').PgSyncDatabase} db
  */
 export function ensureLegacyDemoPack(db) {
   const customer = CUSTOMERS_SEED.find((c) => c.customerID === DEMO_CUSTOMER_ID);
@@ -38,11 +38,12 @@ export function ensureLegacyDemoPack(db) {
 
   step('customer', () => {
     const insC = db.prepare(`
-      INSERT OR IGNORE INTO customers (
+      INSERT INTO customers (
         customer_id, name, phone_number, email, address_shipping, address_billing,
         status, tier, payment_terms, created_by, created_at_iso, last_activity_iso,
         company_name, lead_source, preferred_contact, follow_up_iso, crm_tags_json, crm_profile_notes, branch_id
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT (customer_id) DO NOTHING
     `);
     const tagsJson = JSON.stringify(Array.isArray(customer.crmTags) ? customer.crmTags : []);
     inserted += insC.run(
@@ -70,11 +71,12 @@ export function ensureLegacyDemoPack(db) {
 
   step('quotation', () => {
     const insQ = db.prepare(`
-      INSERT OR IGNORE INTO quotations (
+      INSERT INTO quotations (
         id, customer_id, customer_name, date_label, date_iso, due_date_iso,
         total_display, total_ngn, paid_ngn, payment_status, status, approval_date, customer_feedback, handled_by,
         project_name, lines_json, branch_id
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT (id) DO NOTHING
     `);
     inserted += insQ.run(
       quotation.id,
@@ -99,9 +101,10 @@ export function ensureLegacyDemoPack(db) {
 
   step('receipt', () => {
     const insR = db.prepare(`
-      INSERT OR IGNORE INTO sales_receipts (
+      INSERT INTO sales_receipts (
         id, customer_id, customer_name, quotation_ref, date_label, date_iso, amount_display, amount_ngn, method, status, handled_by, ledger_entry_id, branch_id
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT (id) DO NOTHING
     `);
     inserted += insR.run(
       receipt.id,
@@ -122,12 +125,13 @@ export function ensureLegacyDemoPack(db) {
 
   step('cutting list', () => {
     const insCl = db.prepare(`
-      INSERT OR IGNORE INTO cutting_lists (
+      INSERT INTO cutting_lists (
         id, customer_id, customer_name, quotation_ref, product_id, product_name, date_label, date_iso,
         sheets_to_cut, total_meters, total_label, status, machine_name, operator_name,
         production_registered, production_register_ref, handled_by, branch_id,
         production_release_pending, production_released_at_iso, production_released_by
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT (id) DO NOTHING
     `);
     inserted += insCl.run(
       cutting.id,
@@ -161,8 +165,9 @@ export function ensureLegacyDemoPack(db) {
 
     if (lineCount === 0) {
       const insClLine = db.prepare(`
-        INSERT OR IGNORE INTO cutting_list_lines (cutting_list_id, sort_order, sheets, length_m, total_m, line_type)
+        INSERT INTO cutting_list_lines (cutting_list_id, sort_order, sheets, length_m, total_m, line_type)
         VALUES (?,?,?,?,?,?)
+        ON CONFLICT (cutting_list_id, sort_order) DO NOTHING
       `);
       for (const line of cutting.lines ?? []) {
         const sortOrder = line.lineNo ?? 0;

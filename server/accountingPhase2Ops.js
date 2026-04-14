@@ -5,10 +5,11 @@
 
 import { assertPeriodOpen } from './controlOps.js';
 import { listProducts } from './readModel.js';
+import { pgColumnExists } from './pg/pgMeta.js';
 
 function hasBranchColumn(db, table) {
   try {
-    return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === 'branch_id');
+    return pgColumnExists(db, table, 'branch_id');
   } catch {
     return false;
   }
@@ -126,7 +127,7 @@ export function listFixedAssets(db, branchScope) {
   const b = branchSqlArgs(db, 'fixed_assets', branchScope);
   const rows = db
     .prepare(
-      `SELECT * FROM fixed_assets WHERE 1=1${b.sql} ORDER BY acquisition_date_iso DESC, name COLLATE NOCASE`
+      `SELECT * FROM fixed_assets WHERE 1=1${b.sql} ORDER BY acquisition_date_iso DESC, LOWER(name)`
     )
     .all(...b.args);
   return { ok: true, assets: rows.map(mapFixedAssetRow) };

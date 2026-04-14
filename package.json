@@ -53,7 +53,8 @@
     "stress:qa-mega-lite": "node scripts/qa-mega-lite.mjs",
     "stress:finance100": "node scripts/finance-stress-100.mjs",
     "bench:dashboard": "node scripts/bench-dashboard-summary.mjs",
-    "retention:prune": "node scripts/retention-prune.mjs"
+    "retention:prune": "node scripts/retention-prune.mjs",
+    "trace:table-api-ui": "node scripts/trace-table-api-ui.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",

@@ -1,5 +1,7 @@
+import { pgColumnExists } from './pg/pgMeta.js';
+
 /**
- * Shared branch filtering for SQL (SQLite).
+ * Shared branch filtering for SQL (PostgreSQL).
  * @param {import('better-sqlite3').Database} db
  * @param {string} table
  * @param {'ALL' | string} scope
@@ -11,7 +13,7 @@ export function branchPredicate(db, table, scope, alias) {
   }
   let hasCol = false;
   try {
-    hasCol = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === 'branch_id');
+    hasCol = pgColumnExists(db, table, 'branch_id');
   } catch {
     hasCol = false;
   }

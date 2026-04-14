@@ -7,7 +7,7 @@
  * cancelled quotations & POs, coil scrap, material requests, coil requests, Office convert threads.
  *
  * Requires API with admin (finance.post, finance.pay, production.manage, inventory.receive, office.use, …).
- * Prefer dedicated DB: ZAREWA_DB=data/stress.sqlite — see docs/STRESS-DEDICATED-DB.md
+ * Prefer dedicated DB: separate DATABASE_URL for stress — see docs/STRESS-DEDICATED-DB.md
  *
  *   npm run server
  *   npm run stress:qa-mega

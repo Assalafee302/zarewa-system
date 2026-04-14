@@ -15,6 +15,22 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: zarewa_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/zarewa_ci
     steps:
       - uses: actions/checkout@v4
 
@@ -43,6 +59,22 @@ jobs:
   stress-lite:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: zarewa_stress_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/zarewa_stress_ci
     steps:
       - uses: actions/checkout@v4
 
@@ -56,9 +88,6 @@ jobs:
 
       - name: Mega stress (lite) + invariants
         run: |
-          DB_FILE="${RUNNER_TEMP}/zarewa-stress-$$.sqlite"
-          rm -f "$DB_FILE"
-          export ZAREWA_DB="$DB_FILE"
           export ZAREWA_TEST_SKIP_RATE_LIMIT=1
           export PORT=8791
           node server/index.js &
@@ -71,5 +100,4 @@ jobs:
           npm run stress:qa-mega-lite
           STATUS=$?
           kill "$API_PID" || true
-          rm -f "$DB_FILE"
           exit "$STATUS"

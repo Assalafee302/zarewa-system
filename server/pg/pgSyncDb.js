@@ -22,7 +22,7 @@ function splitSqlStatements(sql) {
   return out;
 }
 
-function blockOn(promise) {
+export function blockOn(promise) {
   // WARNING: This blocks the Node event loop.
   // It is used here only to preserve the existing synchronous better-sqlite3 API shape.
   const sab = new SharedArrayBuffer(4);

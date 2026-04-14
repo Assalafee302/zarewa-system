@@ -1,25 +1,19 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import request from 'supertest';
-import { createDatabase } from './db.js';
+import { createDatabase, resetDatabaseDataForTests } from './db.js';
 import { createApp } from './app.js';
 
-const openDbs = [];
+let sharedDb;
 
-afterAll(() => {
-  for (const d of openDbs) {
-    try {
-      d.close();
-    } catch {
-      /* ignore */
-    }
-  }
-});
+function freshApp() {
+  if (!sharedDb) sharedDb = createDatabase();
+  resetDatabaseDataForTests(sharedDb);
+  return createApp(sharedDb);
+}
 
 describe('Edit approval (second-party token)', () => {
   it('blocks procurement_officer PO status PATCH without token; approves and consumes single-use token', async () => {
-    const db = createDatabase(':memory:');
-    openDbs.push(db);
-    const app = createApp(db);
+    const app = freshApp();
     const admin = request.agent(app);
     let res = await admin.post('/api/session/login').send({ username: 'admin', password: 'Admin@123' });
     expect(res.status).toBe(200);
@@ -81,9 +75,7 @@ describe('Edit approval (second-party token)', () => {
   });
 
   it('admin may PATCH without editApprovalId', async () => {
-    const db = createDatabase(':memory:');
-    openDbs.push(db);
-    const app = createApp(db);
+    const app = freshApp();
     const admin = request.agent(app);
     await admin.post('/api/session/login').send({ username: 'admin', password: 'Admin@123' });
 
@@ -103,12 +95,16 @@ describe('Edit approval (second-party token)', () => {
       ],
       status: 'Pending',
     });
+    expect(po.status).toBe(201);
     const poId = po.body.poID;
 
-    const r = await admin
-      .patch(`/api/purchase-orders/${encodeURIComponent(poId)}/status`)
-      .send({ status: 'Approved' });
-    expect(r.status).toBe(200);
-    expect(r.body.ok).toBe(true);
+    const ok = await admin.patch(`/api/purchase-orders/${encodeURIComponent(poId)}/status`).send({ status: 'Approved' });
+    expect(ok.status).toBe(200);
+    expect(ok.body.ok).toBe(true);
+  });
+
+  afterAll(() => {
+    sharedDb?.close();
+    sharedDb = undefined;
   });
 });

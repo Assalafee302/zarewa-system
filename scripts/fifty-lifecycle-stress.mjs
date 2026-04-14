@@ -8,8 +8,7 @@
  *
  * Prerequisites: API server running (e.g. npm run server on STRESS_API_URL).
  *
- * Dedicated stress DB (keeps `data/zarewa.sqlite` untouched): set `ZAREWA_DB=data/stress.sqlite`
- * for `npm run db:wipe` and `npm run server`. See docs/STRESS-DEDICATED-DB.md.
+ * Dedicated stress DB: use a separate Postgres database in DATABASE_URL for `npm run db:wipe` and `npm run server` (see docs/STRESS-DEDICATED-DB.md).
  *
  * Usage:
  *   node scripts/fifty-lifecycle-stress.mjs

@@ -13,9 +13,11 @@ import {
   nextWorkItemDecisionHumanId,
   nextWorkItemHumanId,
 } from './humanId.js';
+import { isHrProductModuleEnabled } from './hrModuleEnabled.js';
 import { hrListScope, listHrRequests } from './hrOps.js';
 import { filingCompletenessForWorkItem } from './filingCompleteness.js';
 import { listCoilRequests, listManagementItems, listPaymentRequests } from './readModel.js';
+import { pgTableExists } from './pg/pgMeta.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -61,7 +63,7 @@ function normalizedDate(value) {
 
 export function workRegistryTablesReady(db) {
   try {
-    return Boolean(db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_items'`).get());
+    return pgTableExists(db, 'work_items');
   } catch {
     return false;
   }
@@ -332,8 +334,9 @@ export function userCanSeePersistedWorkItem(db, scope, user, row) {
 
 function insertVisibilityRows(db, workItemId, visibilityEntries = []) {
   const insert = db.prepare(
-    `INSERT OR IGNORE INTO work_item_visibility (work_item_id, visibility_kind, visibility_value, access_level)
-     VALUES (?,?,?,?)`
+    `INSERT INTO work_item_visibility (work_item_id, visibility_kind, visibility_value, access_level)
+     VALUES (?,?,?,?)
+     ON CONFLICT (work_item_id, visibility_kind, visibility_value, access_level) DO NOTHING`
   );
   for (const entry of visibilityEntries) {
     const visibilityKind = String(entry?.visibilityKind || '').trim();
@@ -346,8 +349,9 @@ function insertVisibilityRows(db, workItemId, visibilityEntries = []) {
 
 function insertLinkRows(db, workItemId, links = [], createdAtIso = nowIso()) {
   const insert = db.prepare(
-    `INSERT OR IGNORE INTO work_item_links (work_item_id, entity_kind, entity_id, note, created_at_iso)
-     VALUES (?,?,?,?,?)`
+    `INSERT INTO work_item_links (work_item_id, entity_kind, entity_id, note, created_at_iso)
+     VALUES (?,?,?,?,?)
+     ON CONFLICT (work_item_id, entity_kind, entity_id) DO NOTHING`
   );
   for (const link of links) {
     const entityKind = String(link?.entityKind || '').trim();
@@ -479,11 +483,20 @@ export function createWorkItem(db, payload) {
       );
     }
     if (payload?.filing) {
-      db.prepare(
-        `INSERT OR REPLACE INTO work_item_filing (
+      db
+        .prepare(
+          `INSERT INTO work_item_filing (
           work_item_id, filing_reference, filing_class, retention_label, archive_state, print_summary, updated_at_iso
-        ) VALUES (?,?,?,?,?,?,?)`
-      ).run(
+        ) VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT (work_item_id) DO UPDATE SET
+          filing_reference = EXCLUDED.filing_reference,
+          filing_class = EXCLUDED.filing_class,
+          retention_label = EXCLUDED.retention_label,
+          archive_state = EXCLUDED.archive_state,
+          print_summary = EXCLUDED.print_summary,
+          updated_at_iso = EXCLUDED.updated_at_iso`
+        )
+        .run(
         id,
         String(payload.filing?.filingReference || '').trim() || null,
         String(payload.filing?.filingClass || '').trim() || null,
@@ -623,11 +636,20 @@ export function upsertWorkItemBySource(db, payload) {
       replaceLinkRows(db, existing.id, links, updatedAtIso);
     }
     if (payload?.filing) {
-      db.prepare(
-        `INSERT OR REPLACE INTO work_item_filing (
+      db
+        .prepare(
+          `INSERT INTO work_item_filing (
           work_item_id, filing_reference, filing_class, retention_label, archive_state, print_summary, updated_at_iso
-        ) VALUES (?,?,?,?,?,?,?)`
-      ).run(
+        ) VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT (work_item_id) DO UPDATE SET
+          filing_reference = EXCLUDED.filing_reference,
+          filing_class = EXCLUDED.filing_class,
+          retention_label = EXCLUDED.retention_label,
+          archive_state = EXCLUDED.archive_state,
+          print_summary = EXCLUDED.print_summary,
+          updated_at_iso = EXCLUDED.updated_at_iso`
+        )
+        .run(
         existing.id,
         String(payload.filing?.filingReference || '').trim() || null,
         String(payload.filing?.filingClass || '').trim() || null,
@@ -1478,7 +1500,8 @@ export function linkMachineAsset(db, machineId, assetId, actor = null, relationK
   const asset = db.prepare(`SELECT id FROM fixed_assets WHERE id = ?`).get(aid);
   if (!asset) return { ok: false, error: 'Asset not found.' };
   db.prepare(
-    `INSERT OR REPLACE INTO machine_asset_links (machine_id, asset_id, relation_kind) VALUES (?,?,?)`
+    `INSERT INTO machine_asset_links (machine_id, asset_id, relation_kind) VALUES (?,?,?)
+     ON CONFLICT (machine_id, asset_id) DO UPDATE SET relation_kind = EXCLUDED.relation_kind`
   ).run(mid, aid, String(relationKind || 'primary').trim() || 'primary');
   appendAuditLog(db, {
     actor,
@@ -1533,7 +1556,7 @@ export function listMachines(db, scope) {
     sql += ` AND branch_id = ?`;
     args.push(String(scope?.branchId || DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID);
   }
-  sql += ` ORDER BY name COLLATE NOCASE`;
+  sql += ` ORDER BY LOWER(name)`;
   const assetsByMachine = new Map();
   const linkRows = db.prepare(`SELECT machine_id, asset_id, relation_kind FROM machine_asset_links`).all();
   for (const row of linkRows) {
@@ -1587,7 +1610,7 @@ export function listMachineLinkableAssets(db, scope) {
     sql += ` AND branch_id = ?`;
     args.push(String(scope?.branchId || DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID);
   }
-  sql += ` ORDER BY name COLLATE NOCASE`;
+  sql += ` ORDER BY LOWER(name)`;
   return db.prepare(sql).all(...args).map((row) => ({
     id: row.id,
     name: row.name,
@@ -1854,6 +1877,7 @@ export function appendMaintenanceEvent(db, workOrderId, body, actor) {
 }
 
 export function createHrPerformanceReview(db, body, actor, workspaceBranchId = DEFAULT_BRANCH_ID) {
+  if (!isHrProductModuleEnabled()) return { ok: false, error: 'HR product module is disabled.' };
   const branchId = String(body?.branchId || workspaceBranchId || DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID;
   const userId = String(body?.userId || '').trim();
   if (!userId) return { ok: false, error: 'userId is required.' };
@@ -1897,6 +1921,7 @@ export function createHrPerformanceReview(db, body, actor, workspaceBranchId = D
 }
 
 export function listHrPerformanceReviews(db, scope) {
+  if (!isHrProductModuleEnabled()) return [];
   const args = [];
   let sql = `SELECT * FROM hr_performance_reviews WHERE 1=1`;
   if (!scope?.viewAll) {
@@ -1925,6 +1950,7 @@ export function listHrPerformanceReviews(db, scope) {
 }
 
 function listLegacyHrDisciplineCaseWorkItems(db, scope, user) {
+  if (!isHrProductModuleEnabled()) return [];
   const canSee =
     userHasPermission(user, 'hr.staff.manage') ||
     userHasPermission(user, 'hr.requests.hr_review') ||
@@ -1960,6 +1986,7 @@ function listLegacyHrDisciplineCaseWorkItems(db, scope, user) {
 }
 
 function listLegacyHrPerformanceReviewWorkItems(db, scope, user) {
+  if (!isHrProductModuleEnabled()) return [];
   const canSee =
     userHasPermission(user, 'hr.staff.manage') ||
     userHasPermission(user, 'hr.requests.hr_review') ||

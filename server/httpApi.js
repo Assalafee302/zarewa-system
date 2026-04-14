@@ -61,6 +61,7 @@ import {
   listBranches,
   setBranchCuttingListMinPaidFraction,
 } from './branches.js';
+import { pgColumnExists } from './pg/pgMeta.js';
 import {
   appendAuditLog,
   assertPeriodOpen,
@@ -246,7 +247,7 @@ const STRICT_BRANCH_AUDIT_TABLES = [
 
 function tableHasColumn(db, table, column) {
   try {
-    return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+    return pgColumnExists(db, table, column);
   } catch {
     return false;
   }
@@ -935,10 +936,12 @@ export function registerHttpApi(app, db) {
     try {
       return handlePatchWithEditApproval(res, db, req.user, req.body || {}, 'manager_targets', 'manager_targets', (stripped) => {
         const { targets } = stripped || {};
-        db.prepare(`INSERT OR REPLACE INTO app_json_blobs (key, payload) VALUES (?, ?)`).run(
-          'manager_targets',
-          JSON.stringify(targets)
-        );
+        db
+          .prepare(
+            `INSERT INTO app_json_blobs (key, payload) VALUES (?, ?)
+             ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload`
+          )
+          .run('manager_targets', JSON.stringify(targets));
         return { ok: true };
       });
     } catch (e) {
@@ -1170,7 +1173,7 @@ export function registerHttpApi(app, db) {
     try {
       const token = req.sessionToken;
       if (!token) return res.status(401).json({ ok: false, error: 'No session.' });
-      const branchCol = db.prepare(`PRAGMA table_info(user_sessions)`).all().some((c) => c.name === 'current_branch_id');
+      const branchCol = pgColumnExists(db, 'user_sessions', 'current_branch_id');
       if (!branchCol) {
         return res.status(500).json({ ok: false, error: 'Workspace columns missing; restart server after migration.' });
       }
@@ -3151,11 +3154,20 @@ export function registerHttpApi(app, db) {
                   domain: 'REF',
                 });
                 const tiso = new Date().toISOString();
-                db.prepare(
-                  `INSERT OR REPLACE INTO work_item_filing (
+                db
+                  .prepare(
+                    `INSERT INTO work_item_filing (
                     work_item_id, filing_reference, filing_class, retention_label, archive_state, print_summary, updated_at_iso
-                  ) VALUES (?,?,?,?,?,?,?)`
-                ).run(wid, ref, 'refund_request', null, 'open', null, tiso);
+                  ) VALUES (?,?,?,?,?,?,?)
+                  ON CONFLICT (work_item_id) DO UPDATE SET
+                    filing_reference = EXCLUDED.filing_reference,
+                    filing_class = EXCLUDED.filing_class,
+                    retention_label = EXCLUDED.retention_label,
+                    archive_state = EXCLUDED.archive_state,
+                    print_summary = EXCLUDED.print_summary,
+                    updated_at_iso = EXCLUDED.updated_at_iso`
+                  )
+                  .run(wid, ref, 'refund_request', null, 'open', null, tiso);
               }
             } catch (e) {
               console.error('refund_request filing ref', e);
@@ -3427,11 +3439,20 @@ export function registerHttpApi(app, db) {
                   domain: 'PREQ',
                 });
                 const tiso = new Date().toISOString();
-                db.prepare(
-                  `INSERT OR REPLACE INTO work_item_filing (
+                db
+                  .prepare(
+                    `INSERT INTO work_item_filing (
                     work_item_id, filing_reference, filing_class, retention_label, archive_state, print_summary, updated_at_iso
-                  ) VALUES (?,?,?,?,?,?,?)`
-                ).run(wid, ref, 'payment_request', null, 'open', null, tiso);
+                  ) VALUES (?,?,?,?,?,?,?)
+                  ON CONFLICT (work_item_id) DO UPDATE SET
+                    filing_reference = EXCLUDED.filing_reference,
+                    filing_class = EXCLUDED.filing_class,
+                    retention_label = EXCLUDED.retention_label,
+                    archive_state = EXCLUDED.archive_state,
+                    print_summary = EXCLUDED.print_summary,
+                    updated_at_iso = EXCLUDED.updated_at_iso`
+                  )
+                  .run(wid, ref, 'payment_request', null, 'open', null, tiso);
               }
             } catch (e) {
               console.error('payment_request filing ref', e);

@@ -25,6 +25,7 @@ function hasTable(db, name) {
  * @param {import('better-sqlite3').Database} db
  */
 export function migrateTimestampStyleDocumentIds(db) {
+  if (db?.pool) return;
   if (!hasTable(db, 'ledger_entries')) return;
 
   ensureHumanIdSequencesTable(db);

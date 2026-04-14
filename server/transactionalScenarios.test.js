@@ -4,10 +4,10 @@
  */
 import { describe, it, expect, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
-import { createDatabase } from './db.js';
+import { createDatabase, resetDatabaseDataForTests } from './db.js';
 import { createApp } from './app.js';
 
-const openDbs = [];
+let sharedDb;
 
 async function loginAs(agent, username = 'admin', password = 'Admin@123') {
   const res = await agent.post('/api/session/login').send({ username, password });
@@ -16,9 +16,9 @@ async function loginAs(agent, username = 'admin', password = 'Admin@123') {
 }
 
 async function adminSession() {
-  const db = createDatabase(':memory:');
-  openDbs.push(db);
-  const app = createApp(db);
+  if (!sharedDb) sharedDb = createDatabase();
+  resetDatabaseDataForTests(sharedDb);
+  const app = createApp(sharedDb);
   const agent = request.agent(app);
   await loginAs(agent);
   return { app, agent };
@@ -43,8 +43,8 @@ describe('Transactional scenarios (business checklist)', () => {
   });
 
   afterAll(() => {
-    for (const db of openDbs) db.close();
-    openDbs.length = 0;
+    sharedDb?.close();
+    sharedDb = undefined;
   });
 
   it(

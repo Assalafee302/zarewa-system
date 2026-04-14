@@ -82,7 +82,8 @@ export function seedDefaultGlAccounts(db) {
 export function ensureSupplementalGlAccounts(db) {
   ensureGlSchema(db);
   const ins = db.prepare(
-    `INSERT OR IGNORE INTO gl_accounts (id, code, name, type, is_active, sort_order) VALUES (?,?,?,?,1,?)`
+    `INSERT INTO gl_accounts (id, code, name, type, is_active, sort_order) VALUES (?,?,?,?,1,?)
+     ON CONFLICT (id) DO NOTHING`
   );
   ins.run('acc-adv', '2500', 'Customer advances / deposits', 'liability', 75);
   ins.run('acc-revenue', '4000', 'Sales revenue (management)', 'revenue', 35);

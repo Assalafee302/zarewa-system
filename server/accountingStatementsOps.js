@@ -5,10 +5,11 @@
 
 import { branchPredicate } from './branchSql.js';
 import { trialBalanceRows } from './glOps.js';
+import { pgColumnExists } from './pg/pgMeta.js';
 
 function hasColumn(db, table, column) {
   try {
-    return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+    return pgColumnExists(db, table, column);
   } catch {
     return false;
   }

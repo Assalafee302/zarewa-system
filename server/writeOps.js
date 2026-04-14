@@ -11,6 +11,7 @@ import { deriveProcurementKindFromProductIds } from './procurementPoKind.js';
 import { normalizeCustomerEmailKey, normalizeCustomerPhoneKey } from '../shared/customerPhoneKey.js';
 import { actorId, actorName, userHasPermission } from './auth.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
+import { pgColumnExists, pgTableExists } from './pg/pgMeta.js';
 import { mergeSupplierProfilePatch, validateAndNormalizeSupplierProfile } from './supplierProfile.js';
 import {
   enrichSalesReceiptRowsWithCashFromLedger,
@@ -563,7 +564,7 @@ export function getCustomerDeleteBlockers(db, customerID) {
   push('customer_refunds', countWhere(db, `SELECT COUNT(*) AS c FROM customer_refunds WHERE customer_id = ?`, id));
   push('deliveries', countWhere(db, `SELECT COUNT(*) AS c FROM deliveries WHERE customer_id = ?`, id));
   push('advance_in_events', countWhere(db, `SELECT COUNT(*) AS c FROM advance_in_events WHERE customer_id = ?`, id));
-  if (db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='production_jobs'`).get()) {
+  if (pgTableExists(db, 'production_jobs')) {
     push('production_jobs', countWhere(db, `SELECT COUNT(*) AS c FROM production_jobs WHERE customer_id = ?`, id));
   }
   return { ok: true, blockers };
@@ -985,7 +986,7 @@ export function updatePurchaseOrderCoilDraft(db, poID, payload, branchId = DEFAU
 
 /** @param {import('better-sqlite3').Database} db */
 export function backfillAccountsPayableFromPurchaseOrders(db) {
-  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='purchase_orders'`).get()) return;
+  if (!pgTableExists(db, 'purchase_orders')) return;
   const ids = db.prepare(`SELECT po_id FROM purchase_orders`).all().map((r) => r.po_id);
   for (const id of ids) {
     syncAccountsPayableFromPurchaseOrder(db, id);
@@ -1795,7 +1796,7 @@ export function postAccessoryInventoryReceipt(db, payload, branchFallback = DEFA
 
 function pragmaHasColumn(db, table, col) {
   try {
-    return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
+    return pgColumnExists(db, table, col);
   } catch {
     return false;
   }
@@ -3916,9 +3917,17 @@ export function insertAdvanceInEvent(db, entry) {
   if (entry.type !== 'ADVANCE_IN') return;
   db.prepare(
     `
-    INSERT OR REPLACE INTO advance_in_events (
+    INSERT INTO advance_in_events (
       ledger_entry_id, customer_id, customer_name, amount_ngn, at_iso, payment_method, bank_reference, purpose
     ) VALUES (?,?,?,?,?,?,?,?)
+    ON CONFLICT (ledger_entry_id) DO UPDATE SET
+      customer_id = EXCLUDED.customer_id,
+      customer_name = EXCLUDED.customer_name,
+      amount_ngn = EXCLUDED.amount_ngn,
+      at_iso = EXCLUDED.at_iso,
+      payment_method = EXCLUDED.payment_method,
+      bank_reference = EXCLUDED.bank_reference,
+      purpose = EXCLUDED.purpose
   `
   ).run(
     entry.id,

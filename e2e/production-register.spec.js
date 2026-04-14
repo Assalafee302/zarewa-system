@@ -3,7 +3,7 @@ import { signInViaApi, csrfHeader } from './helpers/auth.js';
 import { waitForProductionJobInBootstrap } from './helpers/waitProductionJobBootstrap.js';
 
 /**
- * Exercises the production-register flow against the full Playwright stack (Vite + API + playwright.sqlite),
+ * Exercises the production-register flow against the full Playwright stack (Vite + API + Postgres from DATABASE_URL),
  * including CSRF-authenticated API calls — closer to real usage than Vitest supertest alone.
  *
  * Uses a fresh customer + quotation each run so the persistent E2E DB never hits "quotation already has a cutting list."

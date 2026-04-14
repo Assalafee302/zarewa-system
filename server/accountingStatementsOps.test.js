@@ -1,15 +1,19 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { createDatabase } from './db.js';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { createDatabase, resetDatabaseDataForTests } from './db.js';
 import { monthBounds, getAccountingStatementsPack } from './accountingStatementsOps.js';
 
 describe('accountingStatementsOps', () => {
   let db;
 
-  beforeEach(() => {
-    db = createDatabase(':memory:');
+  beforeAll(() => {
+    db = createDatabase();
   });
 
-  afterEach(() => {
+  beforeEach(() => {
+    resetDatabaseDataForTests(db);
+  });
+
+  afterAll(() => {
     db?.close();
   });
 

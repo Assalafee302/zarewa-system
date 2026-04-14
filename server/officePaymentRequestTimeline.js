@@ -1,3 +1,5 @@
+import { pgTableExists } from './pg/pgMeta.js';
+
 /**
  * Mirror payment-request lifecycle into linked Office Desk threads (system messages).
  */
@@ -16,10 +18,7 @@ export function appendPaymentRequestTimelineToOfficeThreads(db, requestId, bodyT
   const text = String(bodyText || '').trim();
   if (!rid || !text) return;
   try {
-    const tbl = db
-      .prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='office_threads'`)
-      .get();
-    if (!tbl) return;
+    if (!pgTableExists(db, 'office_threads')) return;
     const threads = db.prepare(`SELECT id FROM office_threads WHERE related_payment_request_id = ?`).all(rid);
     if (!threads.length) return;
     const now = new Date().toISOString();

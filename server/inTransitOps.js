@@ -1,6 +1,7 @@
 import { DEFAULT_BRANCH_ID } from './branches.js';
 import { appendAuditLog } from './controlOps.js';
 import { nextInTransitLoadHumanId } from './humanId.js';
+import { pgTableExists } from './pg/pgMeta.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -23,7 +24,7 @@ function normalizeDate(raw) {
 
 function inTransitTablesReady(db) {
   try {
-    return Boolean(db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='in_transit_loads'`).get());
+    return pgTableExists(db, 'in_transit_loads');
   } catch {
     return false;
   }

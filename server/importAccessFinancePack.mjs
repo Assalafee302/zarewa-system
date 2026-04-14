@@ -31,12 +31,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import Database from 'better-sqlite3';
 import XLSX from 'xlsx';
 import { mapLegacyExpenseCategoryToCanonical } from '../shared/expenseCategories.js';
-import { SCHEMA_SQL } from './schemaSql.js';
 import { runMigrations } from './migrate.js';
-import { defaultDbPath } from './db.js';
+import { createDatabase } from './db.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
 import {
   insertTreasuryMovementTx,
@@ -53,7 +51,7 @@ function parseArgs(argv) {
   const out = {
     dryRun: false,
     dir: path.join(ROOT, 'docs', 'import'),
-    dbPath: process.env.ZAREWA_DB || defaultDbPath(),
+    dbPath: process.env.DATABASE_URL || '',
     branchId: DEFAULT_BRANCH_ID,
     defaultTreasuryAccountId: 0,
   };
@@ -127,12 +125,9 @@ function sheetRows(wb, sheetName) {
   return XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: '', raw: true });
 }
 
-function openDb(dbPath, dryRun) {
+function openDb(_dbPath, dryRun) {
   if (dryRun) return null;
-  const db = new Database(dbPath);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-  db.exec(SCHEMA_SQL);
+  const db = createDatabase();
   runMigrations(db);
   return db;
 }
@@ -549,8 +544,9 @@ function main() {
     process.exit(0);
   }
 
-  if (!fs.existsSync(path.dirname(args.dbPath))) {
-    fs.mkdirSync(path.dirname(args.dbPath), { recursive: true });
+  if (!process.env.DATABASE_URL?.trim()) {
+    console.error('DATABASE_URL is required for import.');
+    process.exit(1);
   }
 
   const db = openDb(args.dbPath, false);

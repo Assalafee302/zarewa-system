@@ -1,7 +1,6 @@
-import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
+import { createDatabase } from '../../server/db.js';
 
-const dbPath = process.env.ZAREWA_DB_PATH || 'data/zarewa.sqlite';
 const nextPassword = process.env.ZAREWA_RESET_PASSWORD || '';
 
 if (!nextPassword || nextPassword.length < 12) {
@@ -28,7 +27,7 @@ const seeded = new Set([
   'ceo',
 ]);
 
-const db = new Database(dbPath);
+const db = createDatabase();
 const rows = db
   .prepare(`SELECT id, username FROM app_users WHERE status = 'active'`)
   .all()
@@ -42,4 +41,5 @@ const tx = db.transaction(() => {
 });
 tx();
 
-console.log(`Reset password for ${rows.length} active non-seeded users in ${dbPath}.`);
+db.close();
+console.log(`Reset password for ${rows.length} active non-seeded users (Postgres).`);

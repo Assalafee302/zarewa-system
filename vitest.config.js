@@ -22,6 +22,8 @@ export default defineConfig({
           name: 'node',
           environment: 'node',
           include: ['server/**/*.test.js', 'shared/**/*.test.js'],
+          setupFiles: ['vitest.pg-env.js'],
+          maxWorkers: 1,
           testTimeout: 30_000,
           hookTimeout: 45_000,
         },

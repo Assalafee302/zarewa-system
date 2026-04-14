@@ -20,10 +20,10 @@
  */
 import { describe, it, expect, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
-import { createDatabase } from './db.js';
+import { createDatabase, resetDatabaseDataForTests } from './db.js';
 import { createApp } from './app.js';
 
-const openDbs = [];
+let sharedDb;
 
 async function loginAs(agent, username, password) {
   const res = await agent.post('/api/session/login').send({ username, password });
@@ -32,18 +32,18 @@ async function loginAs(agent, username, password) {
 }
 
 async function createSession() {
-  const db = createDatabase(':memory:');
-  openDbs.push(db);
-  const app = createApp(db);
+  if (!sharedDb) sharedDb = createDatabase();
+  resetDatabaseDataForTests(sharedDb);
+  const app = createApp(sharedDb);
   const agent = request.agent(app);
   await loginAs(agent, 'admin', 'Admin@123');
   return { app, agent };
 }
 
 async function createSessionAs(username, password) {
-  const db = createDatabase(':memory:');
-  openDbs.push(db);
-  const app = createApp(db);
+  if (!sharedDb) sharedDb = createDatabase();
+  resetDatabaseDataForTests(sharedDb);
+  const app = createApp(sharedDb);
   const agent = request.agent(app);
   await loginAs(agent, username, password);
   return { app, agent };
@@ -685,7 +685,11 @@ function buildArchetypes() {
       id: 'ARC-17',
       title: 'Segregation: sales officer cannot pay out refunds (403)',
       run: async () => {
-        const app = createApp(createDatabase(':memory:'));
+        const app = (() => {
+          if (!sharedDb) sharedDb = createDatabase();
+          resetDatabaseDataForTests(sharedDb);
+          return createApp(sharedDb);
+        })();
         const admin = request.agent(app);
         await loginAs(admin, 'admin', 'Admin@123');
         const [acc] = await ensureTreasuryAccounts(admin, 1, 'A17');
@@ -1005,7 +1009,11 @@ function buildArchetypes() {
       id: 'ARC-26',
       title: 'Oversight: finance role reads audit log on same org session after cash posting',
       run: async () => {
-        const app = createApp(createDatabase(':memory:'));
+        const app = (() => {
+          if (!sharedDb) sharedDb = createDatabase();
+          resetDatabaseDataForTests(sharedDb);
+          return createApp(sharedDb);
+        })();
         const admin = request.agent(app);
         await loginAs(admin, 'admin', 'Admin@123');
         const [acc] = await ensureTreasuryAccounts(admin, 1, 'A26');
@@ -1234,7 +1242,11 @@ function buildArchetypes() {
       id: 'ARC-31',
       title: 'Dual control: sales raises refund → sales manager approves → finance pays (one org DB)',
       run: async () => {
-        const app = createApp(createDatabase(':memory:'));
+        const app = (() => {
+          if (!sharedDb) sharedDb = createDatabase();
+          resetDatabaseDataForTests(sharedDb);
+          return createApp(sharedDb);
+        })();
         const admin = request.agent(app);
         await loginAs(admin, 'admin', 'Admin@123');
         const snapAdm = await bootstrap(admin);
@@ -1307,7 +1319,11 @@ function buildArchetypes() {
       id: 'ARC-32',
       title: 'Sales cannot browse audit log (403) — reduces fishing for abuse targets',
       run: async () => {
-        const app = createApp(createDatabase(':memory:'));
+        const app = (() => {
+          if (!sharedDb) sharedDb = createDatabase();
+          resetDatabaseDataForTests(sharedDb);
+          return createApp(sharedDb);
+        })();
         const staff = request.agent(app);
         await loginAs(staff, 'sales.staff', 'Sales@123');
         const res = await staff.get('/api/audit-log');
@@ -1319,7 +1335,11 @@ function buildArchetypes() {
       id: 'ARC-33',
       title: 'Sales officer cannot approve refunds (403) — must escalate to manager/finance',
       run: async () => {
-        const app = createApp(createDatabase(':memory:'));
+        const app = (() => {
+          if (!sharedDb) sharedDb = createDatabase();
+          resetDatabaseDataForTests(sharedDb);
+          return createApp(sharedDb);
+        })();
         const admin = request.agent(app);
         await loginAs(admin, 'admin', 'Admin@123');
         const [acc33] = await ensureTreasuryAccounts(admin, 1, 'A33');
@@ -1382,7 +1402,11 @@ function buildArchetypes() {
       id: 'ARC-34',
       title: 'Finance cannot invent refund requests (403) — only sales-facing roles request',
       run: async () => {
-        const app = createApp(createDatabase(':memory:'));
+        const app = (() => {
+          if (!sharedDb) sharedDb = createDatabase();
+          resetDatabaseDataForTests(sharedDb);
+          return createApp(sharedDb);
+        })();
         const fin = request.agent(app);
         await loginAs(fin, 'finance.manager', 'Finance@123');
         const res = await fin.post('/api/refunds').send({
@@ -1498,7 +1522,11 @@ function buildArchetypes() {
       id: 'ARC-37',
       title: 'Operations cannot post customer receipts (403) — yard ≠ cashier',
       run: async () => {
-        const app = createApp(createDatabase(':memory:'));
+        const app = (() => {
+          if (!sharedDb) sharedDb = createDatabase();
+          resetDatabaseDataForTests(sharedDb);
+          return createApp(sharedDb);
+        })();
         const ops = request.agent(app);
         await loginAs(ops, 'operations', 'Ops@123');
         const res = await ops.post('/api/ledger/receipt').send({
@@ -1515,7 +1543,11 @@ function buildArchetypes() {
       id: 'ARC-38',
       title: 'Operations cannot create quotations (403) — pricing stays with sales',
       run: async () => {
-        const app = createApp(createDatabase(':memory:'));
+        const app = (() => {
+          if (!sharedDb) sharedDb = createDatabase();
+          resetDatabaseDataForTests(sharedDb);
+          return createApp(sharedDb);
+        })();
         const ops = request.agent(app);
         await loginAs(ops, 'operations', 'Ops@123');
         const res = await ops.post('/api/quotations').send({
@@ -1567,7 +1599,11 @@ function buildArchetypes() {
       id: 'ARC-40',
       title: 'Privileged reversal: sales cannot reverse receipts (403) — only finance.reverse',
       run: async () => {
-        const app = createApp(createDatabase(':memory:'));
+        const app = (() => {
+          if (!sharedDb) sharedDb = createDatabase();
+          resetDatabaseDataForTests(sharedDb);
+          return createApp(sharedDb);
+        })();
         const admin = request.agent(app);
         await loginAs(admin, 'admin', 'Admin@123');
         const [acc] = await ensureTreasuryAccounts(admin, 1, 'A40');
@@ -1599,7 +1635,11 @@ function buildArchetypes() {
       id: 'ARC-41',
       title: 'Procurement cannot lock accounting periods (403)',
       run: async () => {
-        const app = createApp(createDatabase(':memory:'));
+        const app = (() => {
+          if (!sharedDb) sharedDb = createDatabase();
+          resetDatabaseDataForTests(sharedDb);
+          return createApp(sharedDb);
+        })();
         const proc = request.agent(app);
         await loginAs(proc, 'procurement', 'Procure@123');
         const res = await proc.post('/api/controls/period-locks').send({
@@ -1613,7 +1653,11 @@ function buildArchetypes() {
       id: 'ARC-42',
       title: 'No session cookie → bootstrap returns 401 (stop anonymous data scrape)',
       run: async () => {
-        const app = createApp(createDatabase(':memory:'));
+        const app = (() => {
+          if (!sharedDb) sharedDb = createDatabase();
+          resetDatabaseDataForTests(sharedDb);
+          return createApp(sharedDb);
+        })();
         const res = await request(app).get('/api/bootstrap');
         expect(res.status).toBe(401);
         expect(res.body.code).toBe('AUTH_REQUIRED');
@@ -1642,7 +1686,11 @@ function buildArchetypes() {
       id: 'ARC-44',
       title: 'Alternate line: sales requests → finance approves (no sales manager in path)',
       run: async () => {
-        const app = createApp(createDatabase(':memory:'));
+        const app = (() => {
+          if (!sharedDb) sharedDb = createDatabase();
+          resetDatabaseDataForTests(sharedDb);
+          return createApp(sharedDb);
+        })();
         const admin = request.agent(app);
         await loginAs(admin, 'admin', 'Admin@123');
         const snapAdm = await bootstrap(admin);
@@ -1713,7 +1761,11 @@ function buildArchetypes() {
       id: 'ARC-45',
       title: 'Sales officer cannot post expenses (403) — petty cash stays in finance',
       run: async () => {
-        const app = createApp(createDatabase(':memory:'));
+        const app = (() => {
+          if (!sharedDb) sharedDb = createDatabase();
+          resetDatabaseDataForTests(sharedDb);
+          return createApp(sharedDb);
+        })();
         const staff = request.agent(app);
         await loginAs(staff, 'sales.staff', 'Sales@123');
         const res = await staff.post('/api/expenses').send({
@@ -1746,8 +1798,8 @@ describe('Customer service archetypes (45 personalities)', () => {
   });
 
   afterAll(() => {
-    for (const db of openDbs) db.close();
-    openDbs.length = 0;
+    sharedDb?.close();
+    sharedDb = undefined;
   });
 
   it.each(ARCHETYPES)('$id — $title', async ({ run }) => {

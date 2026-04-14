@@ -5,6 +5,7 @@ import { runOfficeThreadFilingExtract } from './aiAssist.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
 import { appendAuditLog } from './controlOps.js';
 import { getOfficeThread, listOfficeThreads, officeTablesReady } from './officeOps.js';
+import { pgTableExists } from './pg/pgMeta.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -22,9 +23,7 @@ function safeJsonParse(raw, fallback) {
 
 export function officeFilingTableReady(db) {
   try {
-    return Boolean(
-      db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='office_thread_filing'`).get()
-    );
+    return pgTableExists(db, 'office_thread_filing');
   } catch {
     return false;
   }

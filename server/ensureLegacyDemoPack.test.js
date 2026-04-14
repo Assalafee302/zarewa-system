@@ -9,7 +9,7 @@ describe('ensureLegacyDemoPack', () => {
   });
 
   it('applies legacy demo rows without FK errors on a fresh database', () => {
-    db = createDatabase(':memory:');
+    db = createDatabase();
 
     const cust = db.prepare(`SELECT customer_id FROM customers WHERE customer_id = ?`).get('CUS-NDA');
     expect(cust?.customer_id).toBe('CUS-NDA');

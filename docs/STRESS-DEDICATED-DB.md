@@ -1,31 +1,31 @@
-# Dedicated SQLite stress database
+# Dedicated PostgreSQL database for stress / heavy scripts
 
-Use a separate file so your normal dev database (`data/zarewa.sqlite`) is never wiped.
+Use a **separate Postgres database** (or separate Supabase project) so your normal dev database is never truncated.
 
-## Paths
+## Recommended layout
 
-- **Stress DB (recommended):** `data/stress.sqlite`
-- **Default dev DB:** `data/zarewa.sqlite`
-- **Playwright E2E:** `data/playwright.sqlite` (recreated when the e2e server starts)
+- **Normal dev:** `DATABASE_URL` → e.g. `postgresql://…/zarewa_dev`
+- **Stress / mega scripts:** `DATABASE_URL` → e.g. `postgresql://…/zarewa_stress` (create empty DB once; run `npm run db:migrate` against it)
+- **Playwright E2E:** another dedicated DB URI in `DATABASE_URL` when running `npm run test:e2e` (CI uses `zarewa_ci`)
 
-## Wipe and recreate the stress database
+## Wipe and re-seed the stress database
 
-1. Stop any API process that has `data/stress.sqlite` open.
-2. From the repo root (PowerShell):
+1. Stop any Node process using that `DATABASE_URL`.
+2. From the repo root (PowerShell), point at the stress database and truncate + seed:
 
 ```powershell
-$env:ZAREWA_DB = 'data/stress.sqlite'
+$env:DATABASE_URL = 'postgresql://USER:PASS@HOST:5432/zarewa_stress'
 npm run db:wipe
 ```
 
-3. Start the API with the same variable:
+`db:wipe` runs `scripts/wipe-playwright-e2e.mjs`: it truncates application tables and re-applies the same bootstrap as API startup.
+
+3. Start the API with the same `DATABASE_URL` if a script expects a live server:
 
 ```powershell
-$env:ZAREWA_DB = 'data/stress.sqlite'
+$env:DATABASE_URL = 'postgresql://USER:PASS@HOST:5432/zarewa_stress'
 npm run server
 ```
-
-The next boot creates schema, runs migrations, and seeds empty tables.
 
 ## Run the 50-scenario lifecycle stress script
 
@@ -52,4 +52,4 @@ After a run, see:
 
 ## Safety
 
-Never point `ZAREWA_DB` at a production database path. This workflow is for local and CI-style SQLite only.
+Never point stress tooling at **production** `DATABASE_URL`. Use a disposable database name and restricted credentials.

@@ -72,6 +72,7 @@ import {
   listUnifiedWorkItems,
 } from './workItems.js';
 import { getOrgGovernanceLimits } from './orgPolicy.js';
+import { isHrProductModuleEnabled } from './hrModuleEnabled.js';
 
 /**
  * Full workspace snapshot for SPA bootstrap (single round-trip), filtered by the signed-in user.
@@ -218,7 +219,8 @@ export function buildBootstrap(db, opts = {}) {
     machines: user ? listMachines(db, workScope) : [],
     maintenancePlans: user ? listMaintenancePlans(db, workScope) : [],
     maintenanceWorkOrders: user ? listMaintenanceWorkOrders(db, workScope) : [],
-    hrPerformanceReviews: user ? listHrPerformanceReviews(db, workScope) : [],
+    hrPerformanceReviews:
+      user && isHrProductModuleEnabled() ? listHrPerformanceReviews(db, workScope) : [],
     workspaceDepartmentIds: [...WORKSPACE_DEPARTMENT_IDS],
     suggestedRoleByDepartment: { ...SUGGESTED_ROLE_BY_DEPARTMENT },
   };
