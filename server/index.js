@@ -11,7 +11,8 @@ const port = Number(process.env.PORT || 8787);
 const listenHost = String(process.env.ZAREWA_LISTEN_HOST || '').trim() || undefined;
 
 function onListen() {
-  console.log(`Zarewa listening on http://127.0.0.1:${port} (db: ${dbPath})`);
+  const dbMode = process.env.DATABASE_URL ? 'postgres' : `sqlite:${dbPath}`;
+  console.log(`Zarewa listening on http://127.0.0.1:${port} (db: ${dbMode})`);
   if (listenHost === '0.0.0.0' || listenHost === '::') {
     for (const nets of Object.values(os.networkInterfaces())) {
       for (const net of nets || []) {
