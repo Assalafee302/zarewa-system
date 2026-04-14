@@ -3,6 +3,7 @@ import os from 'node:os';
 import { readAiAssistConfig } from './aiAssist.js';
 import { createDatabase, defaultDbPath } from './db.js';
 import { createApp } from './app.js';
+import { createStaticOnlyApp } from './staticOnlyApp.js';
 
 const dbPath = process.env.ZAREWA_DB || defaultDbPath();
 
@@ -10,6 +11,9 @@ const port = Number(process.env.PORT || 8787);
 const listenHost =
   String(process.env.ZAREWA_LISTEN_HOST || '').trim() ||
   (process.env.RENDER === 'true' ? '0.0.0.0' : undefined);
+
+const staticOnly =
+  process.env.ZAREWA_STATIC_ONLY === '1' || process.env.ZAREWA_STATIC_ONLY === 'true';
 
 /** Respond while DB is still initializing (Render needs an open port + 2xx on /api/health quickly). */
 function bootHandler(req, res) {
@@ -53,31 +57,47 @@ function logReady(dbMode) {
   }
 }
 
-const server = http.createServer(bootHandler);
-
-function mountApp() {
-  try {
-    const db = createDatabase(dbPath);
-    const app = createApp(db);
-    server.removeListener('request', bootHandler);
-    server.on('request', app);
-    const dbMode = process.env.DATABASE_URL ? 'postgres' : `sqlite:${dbPath}`;
-    logReady(dbMode);
-  } catch (err) {
-    console.error('[zarewa] Fatal startup error (database / app init):', err);
-    process.exit(1);
+if (staticOnly) {
+  const app = createStaticOnlyApp();
+  const server = http.createServer(app);
+  function onStaticListen() {
+    console.log(
+      '[zarewa] ZAREWA_STATIC_ONLY=1 — serving SPA from dist/ only. No database, no full API. Remove this env var to restore the real backend.'
+    );
+    logReady('static-only');
   }
-}
-
-function onListen() {
-  console.log(
-    `Zarewa listening on port ${port} — initializing database (Render can probe this port now)...`
-  );
-  setImmediate(mountApp);
-}
-
-if (listenHost) {
-  server.listen(port, listenHost, onListen);
+  if (listenHost) {
+    server.listen(port, listenHost, onStaticListen);
+  } else {
+    server.listen(port, onStaticListen);
+  }
 } else {
-  server.listen(port, onListen);
+  const server = http.createServer(bootHandler);
+
+  function mountApp() {
+    try {
+      const db = createDatabase(dbPath);
+      const app = createApp(db);
+      server.removeListener('request', bootHandler);
+      server.on('request', app);
+      const dbMode = process.env.DATABASE_URL ? 'postgres' : `sqlite:${dbPath}`;
+      logReady(dbMode);
+    } catch (err) {
+      console.error('[zarewa] Fatal startup error (database / app init):', err);
+      process.exit(1);
+    }
+  }
+
+  function onListen() {
+    console.log(
+      `Zarewa listening on port ${port} — initializing database (Render can probe this port now)...`
+    );
+    setImmediate(mountApp);
+  }
+
+  if (listenHost) {
+    server.listen(port, listenHost, onListen);
+  } else {
+    server.listen(port, onListen);
+  }
 }

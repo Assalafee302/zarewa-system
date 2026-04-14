@@ -3,7 +3,8 @@ services:
     name: zarewa-api
     env: node
     plan: starter
-    buildCommand: npm ci
+    # SPA needs dist/; static-only mode still requires `npm run build`.
+    buildCommand: npm ci && npm run build
     startCommand: npm run start
     healthCheckPath: /api/health
     autoDeploy: true
@@ -19,3 +20,6 @@ services:
       # Bind externally (common for PaaS/container networking).
       - key: ZAREWA_LISTEN_HOST
         value: 0.0.0.0
+      # Set to "1" to serve only the Vite SPA + stub /api (no DB). Debug blank page vs backend.
+      - key: ZAREWA_STATIC_ONLY
+        value: "0"
