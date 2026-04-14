@@ -11,9 +11,14 @@ node_modules
 .env
 data/*.sqlite
 data/*.sqlite-*
+data/*.bak-shm
+data/*.bak-wal
 dist
 dist-ssr
 *.local
+
+# Local scratch output
+dev-stack-out.txt
 
 # Tests
 coverage

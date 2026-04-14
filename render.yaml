@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: zarewa-api
+    env: node
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm run start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Use Supabase Postgres connection string here (server secret).
+      - key: DATABASE_URL
+        sync: false
+      # Cookies are marked Secure in production by default; keep explicit.
+      - key: COOKIE_SECURE
+        value: "1"
+      # Bind externally (common for PaaS/container networking).
+      - key: ZAREWA_LISTEN_HOST
+        value: 0.0.0.0

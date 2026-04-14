@@ -9,11 +9,47 @@ import { seedEverything } from './seedRun.js';
 import { backfillAccountsPayableFromPurchaseOrders } from './writeOps.js';
 import { ensureLegacyDemoPack } from './ensureLegacyDemoPack.js';
 import { isEmptySeedMode } from './emptySeed.js';
+import { PgSyncDatabase } from './pg/pgSyncDb.js';
+import { ensurePostgresSchema } from './pg/pgMigrate.js';
 
 /**
  * @param {string} dbPath File path or ':memory:'
  */
 export function createDatabase(dbPath) {
+  if (process.env.DATABASE_URL) {
+    const db = PgSyncDatabase.fromEnv();
+    // Baseline schema for Postgres (idempotent).
+    // We block until schema is present because the API expects tables at startup.
+    // This keeps startup behavior similar to SQLite's `db.exec(SCHEMA_SQL)`.
+    db.exec(`SELECT 1`); // initialize pool early
+    // `ensurePostgresSchema` is async, but PgSyncDatabase is sync; block on it here.
+    // eslint-disable-next-line no-undef
+    (function () {
+      const sab = new SharedArrayBuffer(4);
+      const ia = new Int32Array(sab);
+      let err;
+      ensurePostgresSchema(db.pool)
+        .catch((e) => {
+          err = e;
+        })
+        .finally(() => {
+          Atomics.store(ia, 0, 1);
+          Atomics.notify(ia, 0, 1);
+        });
+      while (Atomics.load(ia, 0) === 0) Atomics.wait(ia, 0, 0, 10_000);
+      if (err) throw err;
+    })();
+    // Keep startup behavior aligned with SQLite mode.
+    try {
+      runHrScheduledJobs(db);
+    } catch {
+      /* optional HR tick */
+    }
+    seedEverything(db);
+    if (!isEmptySeedMode()) ensureLegacyDemoPack(db);
+    backfillAccountsPayableFromPurchaseOrders(db);
+    return db;
+  }
   if (dbPath !== ':memory:') {
     const dir = path.dirname(path.resolve(dbPath));
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
