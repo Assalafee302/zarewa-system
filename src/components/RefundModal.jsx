@@ -16,7 +16,6 @@ import { useToast } from '../context/ToastContext';
 import { apiFetch } from '../lib/apiBase';
 import { printRefundRecord } from '../lib/refundRecordPrint';
 import { refundApprovedAmount, refundOutstandingAmount } from '../lib/refundsStore';
-import { formatNgn } from '../Data/mockData';
 import { flattenQuotationLineItems } from '../lib/managerDashboardCore';
 import {
   productionJobStatusClosesRefundEligibility,
@@ -396,6 +395,22 @@ const RefundModal = ({
     });
   }, [form.quotationRef, quotations, intelligence.summary?.accessoriesSummary?.lines]);
 
+  const fetchIntelligence = async (quoteRef) => {
+    if (!quoteRef) return;
+    setLoadingIntelligence(true);
+    // Fetch detailed intelligence for the sidebar
+    const { ok, data } = await apiFetch(`/api/refunds/intelligence?quotationRef=${encodeURIComponent(quoteRef)}`);
+    setLoadingIntelligence(false);
+    if (ok && data?.ok) {
+      setIntelligence({
+        receipts: data.receipts || [],
+        cuttingLists: data.cuttingLists || [],
+        summary: data.summary || { producedMeters: 0, accessoriesSummary: { lines: [] } },
+        dataQualityIssues: Array.isArray(data.dataQualityIssues) ? data.dataQualityIssues : [],
+      });
+    }
+  };
+
   const generatePreview = async (quoteRef, categories) => {
     if (!quoteRef) return;
     setPreviewLoading(true);
@@ -483,23 +498,9 @@ const RefundModal = ({
   };
 
   const generatePreviewRef = useRef(generatePreview);
-  generatePreviewRef.current = generatePreview;
-
-  const fetchIntelligence = async (quoteRef) => {
-    if (!quoteRef) return;
-    setLoadingIntelligence(true);
-    // Fetch detailed intelligence for the sidebar
-    const { ok, data } = await apiFetch(`/api/refunds/intelligence?quotationRef=${encodeURIComponent(quoteRef)}`);
-    setLoadingIntelligence(false);
-    if (ok && data?.ok) {
-      setIntelligence({
-        receipts: data.receipts || [],
-        cuttingLists: data.cuttingLists || [],
-        summary: data.summary || { producedMeters: 0, accessoriesSummary: { lines: [] } },
-        dataQualityIssues: Array.isArray(data.dataQualityIssues) ? data.dataQualityIssues : [],
-      });
-    }
-  };
+  useEffect(() => {
+    generatePreviewRef.current = generatePreview;
+  }, [generatePreview]);
 
   const toggleCategory = (cat) => {
     if (blockedRefundCategories.includes(cat)) return;

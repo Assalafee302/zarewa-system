@@ -180,20 +180,20 @@ const Sales = () => {
   const quotations = useMemo(
     () =>
       ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.quotations) ? ws.snapshot.quotations : [],
-    [ws?.hasWorkspaceData, ws?.snapshot?.quotations]
+    [ws]
   );
   const importedReceipts = useMemo(
     () => (ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.receipts) ? ws.snapshot.receipts : []),
-    [ws?.hasWorkspaceData, ws?.snapshot?.receipts]
+    [ws]
   );
   const cuttingLists = useMemo(
     () =>
       ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.cuttingLists) ? ws.snapshot.cuttingLists : [],
-    [ws?.hasWorkspaceData, ws?.snapshot?.cuttingLists]
+    [ws]
   );
   const yardRegister = useMemo(
     () => (Array.isArray(ws?.snapshot?.yardCoilRegister) ? ws.snapshot.yardCoilRegister : []),
-    [ws?.snapshot?.yardCoilRegister]
+    [ws]
   );
 
   const spotPrices = useMemo(
@@ -206,7 +206,7 @@ const Sales = () => {
       ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.refunds)
         ? ws.snapshot.refunds.map((r) => normalizeRefund(r))
         : [],
-    [ws?.hasWorkspaceData, ws?.snapshot?.refunds]
+    [ws]
   );
 
   const ledgerSyncKey = ledgerNonce + (ws?.refreshEpoch ?? 0);

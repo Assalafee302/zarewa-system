@@ -454,7 +454,7 @@ const CuttingListModal = ({
       computedSheets,
       linesByCat,
       quoteReceipts,
-      ws?.snapshot?.treasuryMovements,
+      ws,
     ]
   );
 

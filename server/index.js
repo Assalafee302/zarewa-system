@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import os from 'node:os';
 import { readAiAssistConfig } from './aiAssist.js';
 import { createDatabase } from './db.js';

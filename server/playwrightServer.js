@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { openSchemaOnlyDatabase, resetDatabaseDataForTests } from './db.js';
 import { createApp } from './app.js';
 

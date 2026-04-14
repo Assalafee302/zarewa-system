@@ -4,16 +4,15 @@ import { backfillAccountsPayableFromPurchaseOrders } from './writeOps.js';
 import { ensureLegacyDemoPack } from './ensureLegacyDemoPack.js';
 import { isEmptySeedMode } from './emptySeed.js';
 import { PgSyncDatabase, blockOn } from './pg/pgSyncDb.js';
+import { hasPostgresEnv } from './pg/pgPool.js';
 import { ensurePostgresSchema } from './pg/pgMigrate.js';
 import { truncatePublicApplicationTables } from './pg/pgTruncate.js';
 
 function requireDatabaseUrl() {
-  const url = process.env.DATABASE_URL;
-  if (!url || !String(url).trim()) {
-    throw new Error(
-      'DATABASE_URL is required. Zarewa uses PostgreSQL only. Example: postgres://user:pass@127.0.0.1:5432/zarewa'
-    );
-  }
+  if (hasPostgresEnv()) return;
+  throw new Error(
+    'DATABASE_URL (or PGHOST + PGUSER + PGPASSWORD + PGDATABASE) is required. Zarewa uses PostgreSQL only. Example: postgres://user:pass@127.0.0.1:5432/zarewa'
+  );
 }
 
 function blockUntilSchema(db) {

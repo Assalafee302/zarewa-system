@@ -248,7 +248,6 @@ export default function GmailStyleWorkspace({
   ) : selectedWorkItem ? (
     (() => {
       const dt = String(selectedWorkItem.documentType || '').trim().toLowerCase();
-      const sk = String(selectedWorkItem.sourceKind || '').trim().toLowerCase();
       const onDone = () => void ws.refresh?.();
       if (dt === 'edit_approval') {
         return <WorkspaceEditApprovalPanel item={selectedWorkItem} onDone={onDone} />;

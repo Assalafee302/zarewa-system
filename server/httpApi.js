@@ -114,12 +114,10 @@ import {
   appendWorkItemDecision,
   createMaterialRequest,
   createWorkItem,
-  findPersistedWorkItemBySource,
   officeKeyForUser,
   upsertWorkItemBySource,
   ensureWorkItemsForVisibleOfficeThreads,
   ensureWorkItemForOfficeThread,
-  getPersistedWorkItem,
   getUnifiedWorkItem,
   syncDerivedWorkItems,
   linkWorkItemToOfficeThread,
@@ -1826,7 +1824,9 @@ export function registerHttpApi(app, db) {
           return res.status(500).json({ ok: false, error: 'Invalid attachment encoding.' });
         }
         const mime = String(hit.mimeType || 'application/octet-stream').split(';')[0].trim();
-        const name = String(hit.fileName || 'agreement').replace(/[^\w.\- ()\[\]]+/g, '_').slice(0, 200);
+        const name = String(hit.fileName || 'agreement')
+          .replace(/[^\w.\- ()\u005b\u005d]+/g, '_')
+          .slice(0, 200);
         res.setHeader('Content-Type', mime);
         res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
         res.send(buf);

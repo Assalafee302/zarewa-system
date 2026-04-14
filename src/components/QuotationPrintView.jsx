@@ -148,7 +148,6 @@ export default function QuotationPrintView({
   linkedQuotationId = '',
   dateStr,
   customerName = '—',
-  customerPhone = '—',
   projectName = '—',
   terms = '100%',
   gauge = '—',

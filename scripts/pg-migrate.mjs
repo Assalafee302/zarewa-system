@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { createPoolFromEnv } from '../server/pg/pgPool.js';
 import { ensurePostgresSchema } from '../server/pg/pgMigrate.js';
 
@@ -27,6 +28,22 @@ const pool = createPoolFromEnv();
 try {
   await withRetries(() => ensurePostgresSchema(pool));
   console.log('[pg-migrate] OK');
+} catch (e) {
+  if (e?.code === '28P01') {
+    const u = pool.options?.user ?? '(unknown)';
+    const h = pool.options?.host ?? '';
+    console.error(`[pg-migrate] Password rejected by Postgres (client user: "${u}", host: "${h}").`);
+    console.error(
+      '  Use the database password from Supabase → Settings → Database (not anon/service_role keys). Prefer pasting the full "Transaction pooler" URI (port 6543, user postgres.<project-ref>).'
+    );
+    console.error(
+      '  URL-encode characters in the password that are special in URLs (@ as %40, # as %23, etc.). A leading %40 in the password segment means the password starts with @.'
+    );
+    console.error(
+      '  Alternative: Remove DATABASE_URL, then set PGHOST, PGPORT, PGUSER, PGDATABASE, and PGPASSWORD (raw password, no URL encoding). In PowerShell use single quotes for PGPASSWORD if it contains @ or $.'
+    );
+  }
+  throw e;
 } finally {
   await pool.end();
 }

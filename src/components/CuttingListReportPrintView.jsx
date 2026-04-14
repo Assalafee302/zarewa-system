@@ -197,8 +197,18 @@ function WaybillBranchesBlock({ branches, compact }) {
 }
 
 function WaybillCutConfirmBlock({ grouped, cutStartIndex, fullRightColumn }) {
-  let idx = cutStartIndex;
   const anyLines = PRINT_CUT_LINE_CATEGORIES.some(({ type }) => (grouped[type] ?? []).length > 0);
+  const { blocks } = PRINT_CUT_LINE_CATEGORIES.reduce(
+    (acc, { type, title }) => {
+      const slice = grouped[type];
+      if (!slice?.length) return acc;
+      const block = <CuttingCategoryTable title={title} lines={slice} startIndex={acc.idx} />;
+      acc.blocks.push(<div key={type}>{block}</div>);
+      acc.idx += slice.length;
+      return acc;
+    },
+    { idx: cutStartIndex, blocks: [] }
+  );
   return (
     <div
       className={
@@ -208,13 +218,7 @@ function WaybillCutConfirmBlock({ grouped, cutStartIndex, fullRightColumn }) {
       }
     >
       <div className="cl-waybill-cut-tables cl-factory-panel--cut-list">
-        {PRINT_CUT_LINE_CATEGORIES.map(({ type, title }) => {
-          const slice = grouped[type];
-          if (!slice?.length) return null;
-          const block = <CuttingCategoryTable title={title} lines={slice} startIndex={idx} />;
-          idx += slice.length;
-          return <div key={type}>{block}</div>;
-        })}
+        {blocks}
         {!anyLines ? <p className="cl-factory-cut-empty">No cutting lines on this section.</p> : null}
       </div>
     </div>
