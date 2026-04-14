@@ -1,16 +1,4 @@
-import { fileURLToPath } from 'node:url';
-import { createSyncFn } from 'synckit';
-
-/** @type {ReturnType<typeof createSyncFn> | null} */
-let syncPg = null;
-
-function getSyncPg() {
-  if (!process.env.DATABASE_URL) {
-    throw new Error('DATABASE_URL is required for PgSyncDatabase');
-  }
-  syncPg ??= createSyncFn(fileURLToPath(new URL('./pgSynckitWorker.mjs', import.meta.url)));
-  return syncPg;
-}
+import { createPoolFromEnv } from './pgPool.js';
 
 function splitSqlStatements(sql) {
   const out = [];
@@ -32,6 +20,32 @@ function splitSqlStatements(sql) {
   const tail = buf.trim();
   if (tail) out.push(tail);
   return out;
+}
+
+function blockOn(promise) {
+  // WARNING: This blocks the Node event loop.
+  // It is used here only to preserve the existing synchronous better-sqlite3 API shape.
+  const sab = new SharedArrayBuffer(4);
+  const ia = new Int32Array(sab);
+  let result;
+  let error;
+  promise
+    .then((r) => {
+      result = r;
+      Atomics.store(ia, 0, 1);
+      Atomics.notify(ia, 0, 1);
+    })
+    .catch((e) => {
+      error = e;
+      Atomics.store(ia, 0, 1);
+      Atomics.notify(ia, 0, 1);
+    });
+  // Wait until the promise settles.
+  while (Atomics.load(ia, 0) === 0) {
+    Atomics.wait(ia, 0, 0, 10_000);
+  }
+  if (error) throw error;
+  return result;
 }
 
 function replaceQMarksWithParams(sql) {
@@ -59,21 +73,22 @@ function mapRows(result) {
 
 /**
  * A synchronous, better-sqlite3-shaped adapter over `pg`.
- * Queries run in a dedicated worker (synckit) so the main thread event loop is not deadlocked.
+ * Designed to minimize code churn during SQLite->Postgres migration.
  */
 export class PgSyncDatabase {
-  constructor() {
-    /** @type {number | null} */
-    this._txClientId = null;
+  /** @param {import('pg').Pool} pool */
+  constructor(pool) {
+    this.pool = pool;
+    /** @type {import('pg').PoolClient | null} */
+    this._txClient = null;
   }
 
   static fromEnv() {
-    return new PgSyncDatabase();
+    return new PgSyncDatabase(createPoolFromEnv());
   }
 
   close() {
-    if (!syncPg) return;
-    syncPg({ type: 'end' });
+    return blockOn(this.pool.end());
   }
 
   pragma() {
@@ -90,10 +105,8 @@ export class PgSyncDatabase {
 
   _querySync(text, params) {
     const q = replaceQMarksWithParams(text);
-    if (this._txClientId != null) {
-      return getSyncPg()({ type: 'txQuery', clientId: this._txClientId, text: q, params });
-    }
-    return getSyncPg()({ type: 'query', text: q, params });
+    const runner = this._txClient ? this._txClient : this.pool;
+    return blockOn(runner.query(q, params));
   }
 
   prepare(sql) {
@@ -118,27 +131,29 @@ export class PgSyncDatabase {
   transaction(fn) {
     const outer = this;
     return (...args) => {
-      if (outer._txClientId != null) {
+      if (outer._txClient) {
+        // Nested transaction: just run inside the existing one.
         return fn(...args);
       }
-      const { clientId } = getSyncPg()({ type: 'connect' });
-      outer._txClientId = clientId;
+      const client = blockOn(outer.pool.connect());
+      outer._txClient = client;
       try {
-        getSyncPg()({ type: 'txQuery', clientId, text: 'BEGIN', params: [] });
+        blockOn(client.query('BEGIN'));
         const result = fn(...args);
-        getSyncPg()({ type: 'txQuery', clientId, text: 'COMMIT', params: [] });
+        blockOn(client.query('COMMIT'));
         return result;
       } catch (e) {
         try {
-          getSyncPg()({ type: 'txQuery', clientId, text: 'ROLLBACK', params: [] });
+          blockOn(client.query('ROLLBACK'));
         } catch {
-          /* ignore rollback failures */
+          // ignore rollback failures
         }
         throw e;
       } finally {
-        getSyncPg()({ type: 'release', clientId });
-        outer._txClientId = null;
+        outer._txClient = null;
+        client.release();
       }
     };
   }
 }
+

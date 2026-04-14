@@ -13,7 +13,7 @@
  */
 import fs from 'node:fs';
 import XLSX from 'xlsx';
-import { createDatabaseAsync, defaultDbPath } from './db.js';
+import { createDatabase, defaultDbPath } from './db.js';
 import { upsertHrStaffProfile, registerNewStaffWithProfile } from './hrOps.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
 
@@ -138,7 +138,7 @@ function pickActorUserId(db, explicit) {
   return r?.id || null;
 }
 
-async function main() {
+function main() {
   const argv = process.argv.slice(2);
   const dry = argv.includes('--dry-run');
   const annual = argv.includes('--annual');
@@ -160,7 +160,7 @@ async function main() {
   }
 
   const dbPath = process.env.ZAREWA_DB_PATH || defaultDbPath();
-  const db = await createDatabaseAsync(dbPath);
+  const db = createDatabase(dbPath);
   const actorUserId = pickActorUserId(db, actorArg);
   if (!actorUserId) {
     console.error('No actor user id (need at least one app user).');
@@ -412,7 +412,4 @@ async function main() {
   db.close();
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+main();
