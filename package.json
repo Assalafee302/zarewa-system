@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite",
     "dev:stack": "node scripts/dev-stack.mjs",
@@ -10,8 +13,7 @@
     "start": "node server/index.js",
     "db:migrate": "node scripts/db-migrate.mjs",
     "pg:migrate": "node scripts/pg-migrate.mjs",
-    "pg:import:sqlite": "node scripts/sqlite-to-postgres.mjs --truncate",
-    "db:wipe": "node scripts/wipe-local-sqlite.mjs",
+    "db:wipe": "node scripts/wipe-playwright-e2e.mjs",
     "wipe:e2e-db": "node scripts/wipe-playwright-e2e.mjs",
     "db:wipe-empty-client": "node scripts/wipe-empty-client.mjs",
     "db:legacy-demo": "node server/applyLegacyDemoPackCli.js",
@@ -64,7 +66,6 @@
     "@supabase/supabase-js": "^2.103.0",
     "@tailwindcss/vite": "^4.2.2",
     "@vitejs/plugin-react": "^6.0.1",
-    "better-sqlite3": "^12.8.0",
     "clsx": "^2.1.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",

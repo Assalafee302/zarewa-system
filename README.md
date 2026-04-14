@@ -1,15 +1,18 @@
 # Zarewa System
 
-Internal operations app: sales, production, HR, treasury, and role-based access. The UI is **React + Vite**; the API and persistence live under `server/` (SQLite via better-sqlite3).
+Internal operations app: sales, production, HR, treasury, and role-based access. The UI is **React + Vite**; the API and persistence live under `server/` (**PostgreSQL** via `DATABASE_URL`).
 
 ## Quick start
 
 ```bash
 npm ci
-npm run dev          # Vite (frontend)
+cp .env.example .env   # then set DATABASE_URL to a Postgres instance (e.g. local or Supabase)
+npm run dev            # Vite (frontend); proxies /api to the API port below
 # In another terminal:
-npm run server       # API on the port in your env (see docs)
+npm run server         # API (default PORT=8787 unless set in .env)
 ```
+
+Or run both together: `npm run dev:stack`.
 
 Apply schema changes when pulling updates:
 
@@ -19,8 +22,9 @@ npm run db:migrate
 
 ## Documentation
 
+- [Supabase + Render + Vercel](docs/DEPLOY_SUPABASE_VERCEL.md) — recommended hosted layout and checklist  
 - [Access control & APIs](docs/ACCESS_CONTROL.md) — permissions, approvals, sensitive routes  
-- [Environment variables](docs/ENVIRONMENT.md) — ports, DB path, cookies, Playwright  
+- [Environment variables](docs/ENVIRONMENT.md) — `DATABASE_URL`, ports, cookies, Playwright  
 - [Staff approvals (who does what)](docs/STAFF_APPROVALS.md)  
 - [Customer refunds — operations & UAT](docs/REFUND_OPERATIONS.md)  
 - [Production / cutover checklist](docs/DEPLOYMENT.md)

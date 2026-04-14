@@ -2,10 +2,12 @@
 
 Use this as a cutover guide; adjust host names, secrets, and backup strategy to your environment.
 
+**Hosted stack (recommended for this repo):** **Supabase (Postgres) + Render (API) + Vercel (UI + `/api` proxy)** — step-by-step: [DEPLOY_SUPABASE_VERCEL.md](./DEPLOY_SUPABASE_VERCEL.md).
+
 ## Before go-live
 
-1. **Node** — Use the same major Node version as CI (see `.github/workflows/ci.yml`) to avoid subtle build/runtime differences.
-2. **Environment** — Set variables documented in [ENVIRONMENT.md](./ENVIRONMENT.md): database path, `CORS_ORIGIN` for your public URL, cookie flags for HTTPS, and any branch/workspace defaults.
+1. **Node** — Use the same major Node version as CI (see `.github/workflows/ci.yml`; **Node 20+**) to avoid subtle build/runtime differences.
+2. **Environment** — Set variables documented in [ENVIRONMENT.md](./ENVIRONMENT.md): **`DATABASE_URL`**, `CORS_ORIGIN` for your public URL(s), cookie flags for HTTPS, and any branch/workspace defaults.
 3. **Database** — Run migrations on the production DB (`npm run db:migrate` or your orchestration equivalent). Take a **backup** before migrating live data.
 4. **Build** — `npm ci` and `npm run build`; run `node server/index.js` (or your process manager). If `dist/index.html` exists, the server serves the SPA and `/api` on the **same origin**; you can still put nginx/Caddy in front for TLS only.
 5. **HTTPS** — Session cookies should be `Secure` in production; align `SameSite` with how the UI and API share a domain.
@@ -14,8 +16,8 @@ Use this as a cutover guide; adjust host names, secrets, and backup strategy to 
 
 ## After go-live
 
-- Monitor API logs and disk use (SQLite file growth, WAL if enabled).
-- Schedule backups of the SQLite file (and WAL/shm if present) on a cadence that matches your RPO.
+- Monitor API logs and database size / connection usage (Postgres on Supabase or your host).
+- Schedule backups (provider snapshots, `pg_dump`, or equivalent) on a cadence that matches your RPO.
 
 ## Release verification (local or staging)
 
@@ -29,9 +31,11 @@ This runs a production build, the full Vitest suite, and all Playwright specs un
 
 ## Ubuntu VM (trial or production)
 
+The app expects **PostgreSQL** (`DATABASE_URL`). Install Postgres on the VM or use a managed instance.
+
 **Automated path (recommended):** on the server, clone the repo and run `sudo -E bash scripts/deploy/setup-ubuntu.sh` with `ZAREWA_PUBLIC_URL` set — see [scripts/deploy/README.md](../scripts/deploy/README.md).
 
-Prerequisites: **Node 20** (match CI), `build-essential` if `better-sqlite3` must compile on your arch, outbound HTTPS for `npm ci`.
+Prerequisites: **Node 20** (match CI), outbound HTTPS for `npm ci`, and a reachable Postgres for `DATABASE_URL`.
 
 ### 1. Deploy user and app directory
 
@@ -50,15 +54,14 @@ sudo -u zarewa -H bash -c '
 ### 2. Database and migrations
 
 ```bash
-sudo install -d -o zarewa -g zarewa /var/lib/zarewa
 sudo -u zarewa -H bash -c '
   cd /opt/zarewa/app
-  export ZAREWA_DB=/var/lib/zarewa/zarewa.sqlite
+  export DATABASE_URL=postgres://USER:PASSWORD@HOST:5432/DBNAME
   npm run db:migrate
 '
 ```
 
-Copy an existing SQLite file into `/var/lib/zarewa/` if you are restoring a backup instead of a fresh DB.
+Restore from backup with `pg_restore` / SQL import as appropriate before or after migrations, depending on your backup format.
 
 ### 3. Environment file (not committed)
 
@@ -67,7 +70,7 @@ Create `/opt/zarewa/app/.env` owned by `zarewa` (mode `600`):
 ```bash
 NODE_ENV=production
 PORT=8787
-ZAREWA_DB=/var/lib/zarewa/zarewa.sqlite
+DATABASE_URL=postgres://USER:PASSWORD@HOST:5432/DBNAME
 # Public URL users type in the browser (no trailing slash). Required for CORS when using TLS + hostname.
 CORS_ORIGIN=https://zarewa.example.com
 COOKIE_SECURE=1
@@ -149,4 +152,4 @@ sudo systemctl start zarewa
 
 ### 7. Trial hygiene
 
-Rotate seeded passwords, restrict SSH and firewall to admin IPs if possible, and back up `/var/lib/zarewa/zarewa.sqlite` (and any `-wal` / `-shm` files if present) on a schedule appropriate for the trial.
+Rotate seeded passwords, restrict SSH and firewall to admin IPs if possible, and back up Postgres (`pg_dump`, provider snapshots, or Supabase backups) on a schedule appropriate for the trial.

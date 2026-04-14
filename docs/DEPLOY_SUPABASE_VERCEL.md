@@ -1,78 +1,66 @@
-# Deploy: Supabase Postgres + Vercel (same-origin)
+# Deploy: Supabase + Render + Vercel
 
-This repo currently runs the API on Node/Express and the frontend as a Vite SPA.
-The frontend uses **cookie sessions** (`SameSite=Strict`) and **CSRF** cookies, so production must keep `/api/*` calls on the **same origin** as the SPA.
+The app is **PostgreSQL-only** (`DATABASE_URL` required). The UI is a **Vite SPA**; the API is **Express** on Node.
 
-## 1) Create Supabase project
-- Create a Supabase project (prod).
-- Copy the Postgres connection string as `DATABASE_URL` (server secret).
+**Why three services:** the SPA benefits from **Vercel**; the API needs an **always-on Node** process (**Render**); the database is **Supabase Postgres**. The browser should call **`/api/*` on the same origin as the SPA** (Vercel rewrite → Render) so **cookie sessions** (`SameSite=Strict`) and **CSRF** behave correctly.
 
-## 2) Create schema on Supabase
-Run from your local machine:
+## Implementation checklist (order)
 
-```bash
-set DATABASE_URL=postgres://...
-npm run pg:migrate
+1. **Supabase** — Create a project, choose a region, note the **connection string** (prefer the **pooler** host/port Supabase documents for server apps).
+2. **Schema** — From a trusted machine with Node 20+:
+   - Set `DATABASE_URL` to the Supabase URI.
+   - Run `npm ci` then `npm run db:migrate` (applies Postgres schema via `scripts/pg-migrate.mjs`).
+3. **Data** — Load production data using your chosen path (`pg_restore`, SQL import, Supabase tooling, or a one-off migration). There is no committed SQLite→Postgres importer in this repo; plan this step explicitly.
+4. **Render** — Create a **Web Service** from this Git repo (see `render.yaml`). Set **secrets** in the Render dashboard (at minimum `DATABASE_URL`). Confirm `ZAREWA_LISTEN_HOST=0.0.0.0` and `NODE_ENV=production`.
+5. **Vercel** — Import the same repo. **Do not set** `VITE_API_BASE` in production so the UI uses relative `/api/...` URLs.
+6. **Same-origin API** — In `vercel.json`, set the rewrite destination to your real Render service URL, e.g. `https://<your-service>.onrender.com/api/:path*`. Commit or manage via your deployment process so preview deployments can point at a **staging** API when needed.
+7. **Smoke test** — Open the Vercel URL, log in, hit a mutating action, confirm `/api/health` and logs on Render.
+
+## Environment variables (Render API)
+
+| Variable | Required | Notes |
+|----------|----------|--------|
+| `DATABASE_URL` | Yes | Supabase Postgres (pooler URI when applicable). |
+| `NODE_ENV` | Yes | `production`. |
+| `ZAREWA_LISTEN_HOST` | Yes on PaaS | `0.0.0.0` so Render can route traffic in. |
+| `COOKIE_SECURE` | Recommended | `1` when users only use **HTTPS** (Vercel + TLS). |
+| `CORS_ORIGIN` | Recommended | Comma-separated list of **Vercel** origins (`https://your-app.vercel.app`, custom domain, preview URLs if you test the API directly from the browser). Same-origin requests through the Vercel rewrite are usually fine; this helps previews and direct Render debugging. |
+| `PORT` | Auto | Render sets `PORT`; do not override unless you know the platform. |
+
+Copy from [`.env.example`](../.env.example) when running locally. Full variable list: [ENVIRONMENT.md](./ENVIRONMENT.md).
+
+## Vercel `vercel.json`
+
+This repo ships a default rewrite (adjust the host to match your Render service name):
+
+```json
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://zarewa-api.onrender.com/api/:path*"
+    }
+  ]
+}
 ```
 
-This applies a Postgres-compatible baseline derived from `server/schemaSql.js` (with minimal compatibility transforms).
+`vercel.json` cannot read Render URLs from environment variables; update the `destination` when your API URL changes.
 
-## 3) Import existing SQLite data
-If you have an existing SQLite file (default `data/zarewa.sqlite`):
+## Runtime note (Postgres adapter)
 
-```bash
-set DATABASE_URL=postgres://...
-npm run pg:import:sqlite
-```
+With `DATABASE_URL` set, the API uses a **synchronous-style** adapter over `pg` (see `server/pg/pgSyncDb.js`). It minimizes rewrite surface during migration but **blocks the Node event loop during queries**. For a small team this is often acceptable; plan a gradual async refactor if concurrency grows.
 
-## 4) Deploy API (Render)
-- Create a Render **Web Service** from this repo.
-- Use `render.yaml` as a starting point.
-- Set env vars:
-  - `DATABASE_URL` (Supabase)
-  - `NODE_ENV=production`
-  - `COOKIE_SECURE=1`
-## 5) Deploy frontend (Vercel) with same-origin `/api`
-- Deploy this repo as a Vercel project.
-- Keep `VITE_API_BASE` **unset** (frontend will call `/api/...`).
-- Ensure Vercel rewrites `/api/*` to your Render API.
-  - This repo includes `vercel.json` defaulting to `https://zarewa-api.onrender.com`.
-  - If your Render URL differs, update `vercel.json`.
-## Notes
-- The Postgres migration tools are in `scripts/pg-migrate.mjs` and `scripts/sqlite-to-postgres.mjs`.
-- A full runtime switch of the API from SQLite to Postgres requires updating the API DB adapter (queries/transactions) to use Postgres at runtime. Keep SQLite for local development until that switchover is completed.
+## Staging then production
 
-## Staging rehearsal + production cutover (recommended)
+- Use a **separate** Supabase project (or separate DB) for staging; run `npm run db:migrate` and import test data; deploy a **staging** Render service; point a **Vercel preview** project’s rewrite at staging.
+- For production cutover: take a **backup**, apply schema if needed, import or switch `DATABASE_URL`, redeploy API, verify, then switch traffic.
 
-### Staging/UAT rehearsal
-- First: set up a Supabase staging project and import data.
-- Then: deploy the API to staging with `DATABASE_URL` set.
-- Only after that: test and confirm all core workflows.
+## Backups
 
-### Important: runtime Postgres mode
-When `DATABASE_URL` is set, the API uses Postgres via a compatibility DB adapter that keeps the existing synchronous query style.\n+This is the fastest way to migrate without rewriting the entire backend, but it **blocks the Node event loop during DB calls**.\n+For ~15 users this can be acceptable in phase 1; later you should plan an async refactor for better concurrency.
-- Create a separate Supabase project for staging.
-- Run `npm run pg:migrate` against staging.
-- Import a copy of your SQLite DB.
-- Deploy a staging Render service pointed at staging `DATABASE_URL`.
-- On Vercel, use a preview/development project (or branch deploy) that rewrites `/api/*` to the staging Render URL.
-- Smoke test:
-  - login
-  - bootstrap/dashboard
-  - create/update one record
-  - refund/receipt flows
+- Enable **Supabase** backups / PITR for the tier you use.
+- Keep an off-site export policy (e.g. periodic `pg_dump`) that matches your RPO/RTO.
 
-### Production cutover (short downtime)
-- Schedule a short window.
-- Stop writes (maintenance mode / stop the API temporarily).
-- Take a final SQLite copy.
-- Run `npm run pg:migrate` against production Supabase.
-- Run `npm run pg:import:sqlite` against production Supabase.
-- Start the API again.
-- Verify core flows.
+## Related docs
 
-### Backups (minimum)
-- Keep a dated SQLite backup file before cutover.
-- Enable Supabase automated backups (if on a plan that supports it).
-- Periodically export a SQL dump or use Supabase backup/export tooling.
-
+- [ENVIRONMENT.md](./ENVIRONMENT.md) — all env vars.
+- [DEPLOYMENT.md](./DEPLOYMENT.md) — general go-live checklist (VM path is optional; prefer this doc for Supabase + Render + Vercel).

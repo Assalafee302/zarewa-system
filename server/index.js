@@ -1,17 +1,16 @@
 import os from 'node:os';
 import { readAiAssistConfig } from './aiAssist.js';
-import { createDatabase, defaultDbPath } from './db.js';
+import { createDatabase } from './db.js';
 import { createApp } from './app.js';
 
-const dbPath = process.env.ZAREWA_DB || defaultDbPath();
-const db = createDatabase(dbPath);
+const db = createDatabase();
 const app = createApp(db);
 
 const port = Number(process.env.PORT || 8787);
 const listenHost = String(process.env.ZAREWA_LISTEN_HOST || '').trim() || undefined;
 
 function onListen() {
-  console.log(`Zarewa listening on http://127.0.0.1:${port} (db: ${dbPath})`);
+  console.log(`Zarewa listening on http://127.0.0.1:${port} (PostgreSQL)`);
   if (listenHost === '0.0.0.0' || listenHost === '::') {
     for (const nets of Object.values(os.networkInterfaces())) {
       for (const net of nets || []) {
