@@ -1,8 +1,15 @@
 import 'dotenv/config';
+import { spawn } from 'node:child_process';
 import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { readAiAssistConfig } from './aiAssist.js';
-import { openDatabasePoolOnly, blockUntilSchema, bootstrapDataLayer } from './db.js';
+import { openDatabasePoolOnly } from './db.js';
 import { createApp } from './app.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = path.join(__dirname, '..');
+const bootstrapScript = path.join(projectRoot, 'scripts', 'bootstrap-bg.mjs');
 
 // Bind HTTP before schema + seeding so PaaS (e.g. Render) port probes see PORT open quickly.
 const db = openDatabasePoolOnly();
@@ -37,24 +44,33 @@ function onListen() {
       }
     }
   }
-  // Defer schema + seed so the event loop can accept HTTP (e.g. /api/bootstrap) while work runs.
+  // Schema + seed can take minutes of synchronous CPU/DB work; run in a child process
+  // so this process's event loop stays free (Render health checks, /api/health, 503 gate).
   setImmediate(() => {
-    try {
-      blockUntilSchema(db);
-      bootstrapDataLayer(db);
-    } catch (err) {
-      console.error('[zarewa] Schema or data bootstrap failed:', err);
+    const child = spawn(process.execPath, [bootstrapScript], {
+      cwd: projectRoot,
+      env: process.env,
+      stdio: 'inherit',
+    });
+    child.on('error', (err) => {
+      console.error('[zarewa] Failed to spawn bootstrap subprocess:', err);
       process.exit(1);
-    }
-    bootState.apiReady = true;
-    const ai = readAiAssistConfig();
-    if (!ai.enabled) {
-      console.log(
-        '[zarewa] AI assistant off — set ZAREWA_AI_API_KEY (or OPENAI_API_KEY). Local Ollama: ZAREWA_AI_BASE_URL=http://127.0.0.1:11434/v1 ZAREWA_AI_API_KEY=ollama ZAREWA_AI_MODEL=llama3.2'
-      );
-    } else {
-      console.log(`[zarewa] AI assistant on (model: ${ai.model}).`);
-    }
+    });
+    child.on('exit', (code, signal) => {
+      if (code !== 0) {
+        console.error('[zarewa] Bootstrap subprocess failed', { code, signal });
+        process.exit(code ?? 1);
+      }
+      bootState.apiReady = true;
+      const ai = readAiAssistConfig();
+      if (!ai.enabled) {
+        console.log(
+          '[zarewa] AI assistant off — set ZAREWA_AI_API_KEY (or OPENAI_API_KEY). Local Ollama: ZAREWA_AI_BASE_URL=http://127.0.0.1:11434/v1 ZAREWA_AI_API_KEY=ollama ZAREWA_AI_MODEL=llama3.2'
+        );
+      } else {
+        console.log(`[zarewa] AI assistant on (model: ${ai.model}).`);
+      }
+    });
   });
 }
 
