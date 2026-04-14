@@ -38,7 +38,7 @@ This repo ships a default rewrite (adjust the host to match your Render service 
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://zarewa-api.onrender.com/api/:path*"
+      "destination": "https://zarewa-system.onrender.com/api/:path*"
     }
   ]
 }

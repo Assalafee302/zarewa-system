@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://zarewa-api.onrender.com/api/:path*"
+      "destination": "https://zarewa-system.onrender.com/api/:path*"
     }
   ]
 }
