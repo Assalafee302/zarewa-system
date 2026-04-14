@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { createDatabase, defaultDbPath } from './db.js';
+import { createDatabaseAsync, defaultDbPath } from './db.js';
 import { createApp } from './app.js';
 
 const dbPath = process.env.ZAREWA_DB || defaultDbPath();
@@ -50,10 +50,15 @@ if (dbPath !== ':memory:') {
   wipePlaywrightSqliteBundle(dbPath);
 }
 
-const db = createDatabase(dbPath);
-const app = createApp(db);
 const port = Number(process.env.PORT || 8787);
 
-app.listen(port, () => {
-  console.log(`Zarewa Playwright API listening on http://127.0.0.1:${port} (db: ${dbPath})`);
+(async () => {
+  const db = await createDatabaseAsync(dbPath);
+  const app = createApp(db);
+  app.listen(port, () => {
+    console.log(`Zarewa Playwright API listening on http://127.0.0.1:${port} (db: ${dbPath})`);
+  });
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
 });
