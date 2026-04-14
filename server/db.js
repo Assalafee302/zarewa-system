@@ -15,7 +15,7 @@ function requireDatabaseUrl() {
   );
 }
 
-function blockUntilSchema(db) {
+export function blockUntilSchema(db) {
   db.exec(`SELECT 1`);
   (function () {
     const sab = new SharedArrayBuffer(4);
@@ -32,6 +32,15 @@ function blockUntilSchema(db) {
     while (Atomics.load(ia, 0) === 0) Atomics.wait(ia, 0, 0, 10_000);
     if (err) throw err;
   })();
+}
+
+/**
+ * Open the Postgres pool only (no schema queries yet).
+ * Lets HTTP bind first on PaaS so port probes succeed before {@link blockUntilSchema}.
+ */
+export function openDatabasePoolOnly() {
+  requireDatabaseUrl();
+  return PgSyncDatabase.fromEnv();
 }
 
 export function bootstrapDataLayer(db) {
@@ -64,8 +73,7 @@ export function resetDatabaseDataForTests(db) {
  * @returns {PgSyncDatabase}
  */
 export function openSchemaOnlyDatabase() {
-  requireDatabaseUrl();
-  const db = PgSyncDatabase.fromEnv();
+  const db = openDatabasePoolOnly();
   blockUntilSchema(db);
   return db;
 }

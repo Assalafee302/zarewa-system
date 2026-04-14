@@ -1,11 +1,11 @@
 import 'dotenv/config';
 import os from 'node:os';
 import { readAiAssistConfig } from './aiAssist.js';
-import { openSchemaOnlyDatabase, bootstrapDataLayer } from './db.js';
+import { openDatabasePoolOnly, blockUntilSchema, bootstrapDataLayer } from './db.js';
 import { createApp } from './app.js';
 
-// Bind HTTP before heavy synchronous seeding so PaaS (e.g. Render) port probes succeed.
-const db = openSchemaOnlyDatabase();
+// Bind HTTP before schema + seeding so PaaS (e.g. Render) port probes see PORT open quickly.
+const db = openDatabasePoolOnly();
 const app = createApp(db);
 
 const port = Number(process.env.PORT || 8787);
@@ -23,9 +23,10 @@ function onListen() {
     }
   }
   try {
+    blockUntilSchema(db);
     bootstrapDataLayer(db);
   } catch (err) {
-    console.error('[zarewa] Data bootstrap failed:', err);
+    console.error('[zarewa] Schema or data bootstrap failed:', err);
     process.exit(1);
   }
   const ai = readAiAssistConfig();
