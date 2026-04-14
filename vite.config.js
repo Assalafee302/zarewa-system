@@ -5,7 +5,9 @@ import tailwindcss from '@tailwindcss/vite';
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   build: {
-    chunkSizeWarningLimit: 2400,
+    // The main bundle is intentionally large right now; keep CI/Render logs clean.
+    // Prefer real code-splitting later instead of raising this further.
+    chunkSizeWarningLimit: 5000,
   },
   server: {
     // Listen on all interfaces so phones/tablets on the same LAN can reach the dev server.
