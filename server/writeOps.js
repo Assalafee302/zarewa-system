@@ -11,14 +11,17 @@ import { deriveProcurementKindFromProductIds } from './procurementPoKind.js';
 import { normalizeCustomerEmailKey, normalizeCustomerPhoneKey } from '../shared/customerPhoneKey.js';
 import { actorId, actorName, userHasPermission } from './auth.js';
 import { DEFAULT_BRANCH_ID } from './branches.js';
+import { mergeSupplierProfilePatch, validateAndNormalizeSupplierProfile } from './supplierProfile.js';
 import {
   enrichSalesReceiptRowsWithCashFromLedger,
   listLedgerEntries,
   listSalesReceipts,
 } from './readModel.js';
 import { appendAuditLog, assertPeriodOpen, insertPaymentRequest } from './controlOps.js';
+import { appendPaymentRequestTimelineToOfficeThreads } from './officePaymentRequestTimeline.js';
 import {
   nextBankReconLineHumanId,
+  nextCoilControlEventHumanId,
   nextCoilRequestHumanId,
   nextCrmInteractionHumanId,
   nextCustomerHumanId,
@@ -232,6 +235,55 @@ function appendMovementTx(db, entry) {
     entry.valueNgn ?? null
   );
   return { id, atISO, ...entry };
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {Record<string, unknown>} row
+ */
+function insertCoilControlEventTx(db, row) {
+  const branchId = String(row.branchId || DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID;
+  const id = nextCoilControlEventHumanId(db, branchId);
+  const createdAtIso = String(row.createdAtIso || new Date().toISOString().slice(0, 19));
+  const dateIso = String(row.dateIso || createdAtIso.slice(0, 10)).trim();
+  db.prepare(
+    `INSERT INTO coil_control_events (
+      id, branch_id, event_kind, coil_no, product_id, gauge_label, colour,
+      meters, kg_coil_delta, kg_book, book_ref, cutting_list_ref, quotation_ref, customer_label,
+      supplier_id, defect_m_from, defect_m_to, supplier_resolution, outbound_destination,
+      credit_scrap_inventory, scrap_product_id, scrap_reason, note,
+      date_iso, created_at_iso, actor_user_id, actor_display
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).run(
+    id,
+    branchId,
+    String(row.eventKind || '').trim(),
+    row.coilNo != null ? String(row.coilNo).trim() || null : null,
+    row.productId != null ? String(row.productId).trim() || null : null,
+    row.gaugeLabel != null ? String(row.gaugeLabel).trim() || null : null,
+    row.colour != null ? String(row.colour).trim() || null : null,
+    row.meters != null && Number.isFinite(Number(row.meters)) ? Number(row.meters) : null,
+    Number.isFinite(Number(row.kgCoilDelta)) ? Number(row.kgCoilDelta) : 0,
+    row.kgBook != null && Number.isFinite(Number(row.kgBook)) ? Number(row.kgBook) : null,
+    row.bookRef != null ? String(row.bookRef).trim() || null : null,
+    row.cuttingListRef != null ? String(row.cuttingListRef).trim() || null : null,
+    row.quotationRef != null ? String(row.quotationRef).trim() || null : null,
+    row.customerLabel != null ? String(row.customerLabel).trim() || null : null,
+    row.supplierId != null ? String(row.supplierId).trim() || null : null,
+    row.defectMFrom != null && Number.isFinite(Number(row.defectMFrom)) ? Number(row.defectMFrom) : null,
+    row.defectMTo != null && Number.isFinite(Number(row.defectMTo)) ? Number(row.defectMTo) : null,
+    row.supplierResolution != null ? String(row.supplierResolution).trim() || null : null,
+    row.outboundDestination != null ? String(row.outboundDestination).trim() || null : null,
+    row.creditScrapInventory ? 1 : 0,
+    row.scrapProductId != null ? String(row.scrapProductId).trim() || null : null,
+    row.scrapReason != null ? String(row.scrapReason).trim() || null : null,
+    row.note != null ? String(row.note).trim() || null : null,
+    dateIso,
+    createdAtIso,
+    row.actorUserId != null ? String(row.actorUserId).trim() || null : null,
+    row.actorDisplay != null ? String(row.actorDisplay).trim() || null : null
+  );
+  return id;
 }
 
 function treasuryAccountRow(db, treasuryAccountId) {
@@ -940,52 +992,108 @@ export function backfillAccountsPayableFromPurchaseOrders(db) {
   }
 }
 
-/** @param {import('better-sqlite3').Database} db */
-export function linkTransport(db, poID, transportAgentId, transportAgentName, opts = {}) {
-  const u = db.prepare(
-    `UPDATE purchase_orders
-     SET transport_agent_id = ?, transport_agent_name = ?, transport_reference = ?, transport_note = ?, status = 'On loading'
-     WHERE po_id = ? AND status IN ('Approved', 'On loading')`
-  );
-  const transportReference = String(opts.transportReference ?? '').trim();
-  const transportNote = String(opts.transportNote ?? '').trim();
-  const r = u.run(transportAgentId, transportAgentName, transportReference || null, transportNote || null, poID);
-  if (r.changes === 0) return { ok: false, error: 'PO not found or not ready for transit linking.' };
-  appendMovementTx(db, {
-    type: 'PO_TRANSPORT_LINK',
-    ref: poID,
-    detail: `${transportAgentName}${transportReference ? ` · ${transportReference}` : ''}`,
-  });
-  return { ok: true };
+export function sumTransportPaymentsForPo(db, poID) {
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(CASE WHEN amount_ngn < 0 THEN -amount_ngn ELSE amount_ngn END), 0) AS paid
+       FROM treasury_movements
+       WHERE type = 'TRANSPORT_PAYMENT'
+         AND source_kind = 'PURCHASE_ORDER'
+         AND source_id = ?
+         AND reverses_movement_id IS NULL`
+    )
+    .get(poID);
+  return roundMoney(row?.paid);
 }
 
 /**
- * Move PO to In Transit. Optionally posts a treasury outflow linked to this PO (source PURCHASE_ORDER).
+ * Derives PO status, transport_paid, transport_paid_ngn from cumulative TRANSPORT_PAYMENT movements.
+ * Advance threshold (transport_advance_ngn, defaulting to full quoted fee) moves the PO to In Transit.
+ * When cumulative payments reach the full quoted fee, transport is marked settled.
  * @param {import('better-sqlite3').Database} db
  */
-export function postPurchaseOrderTransport(db, poID, opts = {}) {
+export function syncPurchaseOrderTransportPaymentState(db, poID, actor = null) {
   const row = db.prepare(`SELECT * FROM purchase_orders WHERE po_id = ?`).get(poID);
   if (!row) return { ok: false, error: 'PO not found.' };
-  if (row.status !== 'On loading') {
-    return { ok: false, error: 'PO must be On loading (transport assigned) before posting to in transit.' };
+  if (!String(row.transport_agent_id ?? '').trim()) return { ok: true, skipped: true };
+
+  const total = roundMoney(row.transport_amount_ngn) || 0;
+  const paid = sumTransportPaymentsForPo(db, poID);
+  let adv = roundMoney(row.transport_advance_ngn) || 0;
+  if (total > 0 && adv <= 0) adv = total;
+
+  const transportPaidNgn = paid;
+  const fullyPaid = total > 0 && paid >= total;
+  const advanceMet = total > 0 && paid >= adv;
+
+  const prevStatus = row.status;
+  let nextStatus = prevStatus;
+
+  if (total <= 0) {
+    if (prevStatus === 'Approved' || prevStatus === 'On loading') nextStatus = 'In Transit';
+  } else if (advanceMet && (prevStatus === 'Approved' || prevStatus === 'On loading')) {
+    nextStatus = 'In Transit';
   }
-  if (!String(row.transport_agent_id ?? '').trim()) {
-    return { ok: false, error: 'Assign a transport agent first.' };
-  }
+
+  const transportPaid = fullyPaid ? 1 : 0;
+  const paidAt = fullyPaid ? row.transport_paid_at_iso || new Date().toISOString() : null;
+
+  const latestMv = db
+    .prepare(
+      `SELECT id FROM treasury_movements
+       WHERE type = 'TRANSPORT_PAYMENT' AND source_kind = 'PURCHASE_ORDER' AND source_id = ?
+       ORDER BY posted_at_iso DESC, id DESC LIMIT 1`
+    )
+    .get(poID);
+  const movementId = latestMv?.id ? String(latestMv.id) : null;
+
+  db.prepare(
+    `UPDATE purchase_orders SET
+       transport_paid_ngn = ?,
+       transport_paid = ?,
+       transport_paid_at_iso = ?,
+       transport_treasury_movement_id = ?,
+       status = ?
+     WHERE po_id = ?`
+  ).run(transportPaidNgn, transportPaid, paidAt, movementId, nextStatus, poID);
+
+  void actor;
+  return { ok: true, prevStatus, nextStatus, paid, total, fullyPaid };
+}
+
+/**
+ * Link haulier to PO. Optional immediate treasury payment (legacy / API). Otherwise stores fee + advance split for Finance.
+ * In transit and settlement follow cumulative treasury payments via syncPurchaseOrderTransportPaymentState.
+ * @param {import('better-sqlite3').Database} db
+ */
+export function linkTransport(db, poID, transportAgentId, transportAgentName, opts = {}) {
+  const transportReference = String(opts.transportReference ?? '').trim();
+  const transportNote = String(opts.transportNote ?? '').trim();
+  const transportFinanceAdvice = String(opts.transportFinanceAdvice ?? '').trim();
+  const amountNgn = roundMoney(opts.transportAmountNgn);
   const treasuryAccountId = Number(opts.treasuryAccountId);
-  const amountNgn = roundMoney(opts.amountNgn);
-  const hasTreasury = treasuryAccountId > 0 && amountNgn > 0;
   const dateISO = String(opts.dateISO || '').trim() || new Date().toISOString().slice(0, 10);
-  const reference = String(opts.reference ?? row.transport_reference ?? poID).trim() || poID;
-  const note = String(opts.note ?? '').trim() || 'PO transport / haulage';
+  const wantsTreasury = treasuryAccountId > 0 && amountNgn > 0;
+  const amtFromPayload =
+    opts.transportAmountNgn != null && opts.transportAmountNgn !== '' ? roundMoney(opts.transportAmountNgn) : null;
+  let advanceNgn = roundMoney(opts.transportAdvanceNgn);
+
+  const row = db.prepare(`SELECT * FROM purchase_orders WHERE po_id = ?`).get(poID);
+  if (!row) return { ok: false, error: 'PO not found.' };
+  if (!['Approved', 'On loading'].includes(row.status)) {
+    return { ok: false, error: 'PO not found or not ready for transit linking.' };
+  }
+
   try {
     db.transaction(() => {
-      let movementId = row.transport_treasury_movement_id || null;
-      let paidFlag = Number(row.transport_paid) || 0;
-      let paidAt = row.transport_paid_at_iso || '';
+      let movementId = null;
       let recordedAmount = Number(row.transport_amount_ngn) || 0;
-      if (hasTreasury) {
+
+      if (wantsTreasury) {
         assertPeriodOpen(db, dateISO, 'Transport payment date');
+        const reference = String(opts.reference ?? transportReference ?? poID).trim() || poID;
+        const noteBase = String(opts.note ?? '').trim() || 'PO transport / haulage';
+        const noteMerged = [noteBase, transportFinanceAdvice].filter(Boolean).join(' · ') || noteBase;
         const m = insertTreasuryMovementTx(db, {
           type: 'TRANSPORT_PAYMENT',
           treasuryAccountId,
@@ -993,40 +1101,142 @@ export function postPurchaseOrderTransport(db, poID, opts = {}) {
           postedAtISO: opts.postedAtISO || new Date().toISOString(),
           reference,
           counterpartyKind: 'TRANSPORT_AGENT',
-          counterpartyId: String(row.transport_agent_id ?? '').trim() || null,
-          counterpartyName: String(row.transport_agent_name ?? '').trim() || null,
+          counterpartyId: String(transportAgentId ?? '').trim() || null,
+          counterpartyName: String(transportAgentName ?? '').trim() || null,
           sourceKind: 'PURCHASE_ORDER',
           sourceId: poID,
-          note,
+          note: noteMerged,
           createdBy: opts.createdBy ?? 'Procurement',
         });
         movementId = m.id;
-        paidFlag = 1;
-        paidAt = new Date().toISOString();
         recordedAmount = amountNgn;
+      } else if (amtFromPayload != null) {
+        recordedAmount = amtFromPayload;
       }
-      db.prepare(
+
+      if (advanceNgn <= 0 && recordedAmount > 0) advanceNgn = recordedAmount;
+
+      let nextStatus = 'On loading';
+      if (!wantsTreasury && recordedAmount <= 0) nextStatus = 'In Transit';
+
+      const u = db.prepare(
         `UPDATE purchase_orders SET
-          status = 'In Transit',
-          transport_treasury_movement_id = ?,
+          transport_agent_id = ?,
+          transport_agent_name = ?,
+          transport_reference = ?,
+          transport_note = ?,
+          transport_finance_advice = ?,
           transport_amount_ngn = ?,
-          transport_paid = ?,
-          transport_paid_at_iso = ?
-         WHERE po_id = ? AND status = 'On loading'`
-      ).run(movementId, recordedAmount, paidFlag, paidAt || null, poID);
+          transport_advance_ngn = ?,
+          transport_treasury_movement_id = ?,
+          transport_paid = 0,
+          transport_paid_at_iso = NULL,
+          transport_paid_ngn = 0,
+          status = CASE WHEN ? = 1 THEN status ELSE ? END
+         WHERE po_id = ? AND status IN ('Approved', 'On loading')`
+      );
+      const r = u.run(
+        transportAgentId,
+        transportAgentName,
+        transportReference || null,
+        transportNote || null,
+        transportFinanceAdvice || null,
+        recordedAmount,
+        advanceNgn,
+        movementId,
+        wantsTreasury ? 1 : 0,
+        nextStatus,
+        poID
+      );
+      if (r.changes === 0) throw new Error('PO not found or not ready for transit linking.');
+
+      appendMovementTx(db, {
+        type: 'PO_TRANSPORT_LINK',
+        ref: poID,
+        detail: `${transportAgentName}${transportReference ? ` · ${transportReference}` : ''}${
+          wantsTreasury ? ' · treasury' : ''
+        }`,
+      });
+      if (wantsTreasury) {
+        appendAuditLog(db, {
+          actor: opts.actor,
+          action: 'purchase_order.link_transport',
+          entityKind: 'purchase_order',
+          entityId: poID,
+          note: 'Transport linked with haulage payment',
+          details: { treasuryMovementId: movementId, amountNgn, inTransit: true },
+        });
+      }
+
+      syncPurchaseOrderTransportPaymentState(db, poID, opts.actor);
+    })();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+}
+
+/**
+ * Records a treasury transport payment for a PO. In transit / settled state is derived via
+ * syncPurchaseOrderTransportPaymentState (advance vs full fee).
+ * @param {import('better-sqlite3').Database} db
+ */
+export function postPurchaseOrderTransport(db, poID, opts = {}) {
+  const row = db.prepare(`SELECT * FROM purchase_orders WHERE po_id = ?`).get(poID);
+  if (!row) return { ok: false, error: 'PO not found.' };
+  if (!['Approved', 'On loading', 'In Transit'].includes(row.status)) {
+    return {
+      ok: false,
+      error: 'PO must be Approved, On loading, or In transit with transport assigned.',
+    };
+  }
+  if (!String(row.transport_agent_id ?? '').trim()) {
+    return { ok: false, error: 'Assign a transport agent first.' };
+  }
+  const treasuryAccountId = Number(opts.treasuryAccountId);
+  const amountNgn = roundMoney(opts.amountNgn);
+  const hasTreasury = treasuryAccountId > 0 && amountNgn > 0;
+  if (!hasTreasury) {
+    return {
+      ok: false,
+      error:
+        'Treasury payment is required. In transit and transport settlement follow Finance payments against this PO.',
+    };
+  }
+  const dateISO = String(opts.dateISO || '').trim() || new Date().toISOString().slice(0, 10);
+  const reference = String(opts.reference ?? row.transport_reference ?? poID).trim() || poID;
+  const note = String(opts.note ?? '').trim() || 'PO transport / haulage';
+  try {
+    db.transaction(() => {
+      assertPeriodOpen(db, dateISO, 'Transport payment date');
+      const m = insertTreasuryMovementTx(db, {
+        type: 'TRANSPORT_PAYMENT',
+        treasuryAccountId,
+        amountNgn: -amountNgn,
+        postedAtISO: opts.postedAtISO || new Date().toISOString(),
+        reference,
+        counterpartyKind: 'TRANSPORT_AGENT',
+        counterpartyId: String(row.transport_agent_id ?? '').trim() || null,
+        counterpartyName: String(row.transport_agent_name ?? '').trim() || null,
+        sourceKind: 'PURCHASE_ORDER',
+        sourceId: poID,
+        note,
+        createdBy: opts.createdBy ?? 'Finance',
+      });
       appendMovementTx(db, {
         type: 'PO_TRANSPORT_POSTED',
         ref: poID,
-        detail: hasTreasury ? `${reference} · treasury` : `${reference} · in transit`,
+        detail: `${reference} · treasury`,
       });
       appendAuditLog(db, {
         actor: opts.actor,
         action: 'purchase_order.post_transport',
         entityKind: 'purchase_order',
         entityId: poID,
-        note: hasTreasury ? 'Transport posted with treasury movement' : 'Marked in transit (no treasury line)',
-        details: { treasuryMovementId: movementId, amountNgn: hasTreasury ? amountNgn : 0 },
+        note: 'Transport treasury payment posted',
+        details: { treasuryMovementId: m.id, amountNgn },
       });
+      syncPurchaseOrderTransportPaymentState(db, poID, opts.actor);
     })();
     return { ok: true };
   } catch (e) {
@@ -1035,14 +1245,12 @@ export function postPurchaseOrderTransport(db, poID, opts = {}) {
 }
 
 export function markTransportPaid(db, poID) {
-  const u = db.prepare(
-    `UPDATE purchase_orders SET transport_paid = 1, transport_paid_at_iso = ?
-     WHERE po_id = ? AND status = 'In Transit' AND COALESCE(transport_paid, 0) = 0`
-  );
-  const r = u.run(new Date().toISOString(), poID);
-  if (r.changes === 0) return { ok: false, error: 'PO not in transit or haulage already marked paid.' };
-  appendMovementTx(db, { type: 'PO_TRANSPORT_PAID', ref: poID, detail: 'Haulage settled (no treasury line)' });
-  return { ok: true };
+  void poID;
+  return {
+    ok: false,
+    error:
+      'Transport settlement is recorded automatically when cumulative treasury payments reach the quoted transport fee.',
+  };
 }
 
 export function recordSupplierPayment(db, poID, amountNgn, note, opts = {}) {
@@ -1237,8 +1445,7 @@ export function confirmGrn(
     if (Number.isNaN(qty) || qty <= 0) return { ok: false, error: 'Enter a valid quantity received.' };
     const line = findPoLine(lines, e);
     if (!line) return { ok: false, error: 'Line not on this PO.' };
-    const remaining = line.qty_ordered - line.qty_received;
-    if (qty > remaining) return { ok: false, error: `Qty exceeds remaining for line ${line.line_key}.` };
+    /* Allow qty above open PO balance (over-delivery / weighbridge vs paperwork). */
   }
 
   const allowConvSkip = Boolean(opts.allowConversionMismatch);
@@ -1278,7 +1485,8 @@ export function confirmGrn(
           : line.meters_offered != null
             ? Number(line.meters_offered)
             : null;
-      const w = e.weightKg != null && e.weightKg !== '' ? Number(e.weightKg) : null;
+      const wRaw = e.weightKg != null && e.weightKg !== '' ? Number(e.weightKg) : null;
+      const w = wRaw != null && Number.isFinite(wRaw) && wRaw > 0 ? wRaw : null;
       const conv = ec != null && Number.isFinite(ec) && ec > 0 ? ec : lc;
       if (
         sm != null &&
@@ -1401,8 +1609,9 @@ export function confirmGrn(
       const coilNo =
         e.coilNo?.trim() || `CL-${coilYy}-${String(seq).padStart(4, '0')}`;
       coilNumbers.push(coilNo);
-      const w = e.weightKg != null && e.weightKg !== '' ? Number(e.weightKg) : null;
-      const effectiveWeightKg = w != null && !Number.isNaN(w) ? w : qty;
+      const wRawLot = e.weightKg != null && e.weightKg !== '' ? Number(e.weightKg) : null;
+      const w = wRawLot != null && Number.isFinite(wRawLot) && wRawLot > 0 ? wRawLot : null;
+      const effectiveWeightKg = w != null ? w : qty;
       const supplierExpectedMeters =
         e.supplierExpectedMeters != null && e.supplierExpectedMeters !== ''
           ? Number(e.supplierExpectedMeters)
@@ -1934,36 +2143,54 @@ export function receiveFinishedGoods(
   productionOrderId,
   dateISO,
   wipRelease,
-  extras
+  extras = {},
+  opts = {}
 ) {
   const q = Number(qty);
   if (Number.isNaN(q) || q <= 0) return { ok: false, error: 'Invalid quantity.' };
 
-  const src = wipRelease?.wipSourceProductID?.trim?.() ?? '';
-  const wqRaw = wipRelease?.wipQtyReleased;
+  const markFinish = Boolean(extras?.markSourceCoilFinished);
+  const coilNo = markFinish
+    ? String(extras?.sourceCoilNo ?? productionOrderId ?? '').trim()
+    : '';
+  const workspaceBranchId = opts?.workspaceBranchId;
 
-  if (src) {
-    const wq = Number(wqRaw);
-    const srcProd = db.prepare(`SELECT branch_id FROM products WHERE product_id = ?`).get(src);
-    const wipBranch = String(srcProd?.branch_id ?? '').trim();
-    const wrow = db.prepare(`SELECT qty FROM wip_balances WHERE product_id = ? AND branch_id = ?`).get(src, wipBranch);
-    const cur = wrow?.qty || 0;
-    if (Number.isNaN(wq) || wq <= 0) {
-      return { ok: false, error: 'Enter WIP consumed for the selected source.' };
+  let coilRow = null;
+  if (markFinish) {
+    if (!coilNo) return { ok: false, error: 'Source coil number is required for manual coil finish.' };
+    coilRow = db.prepare(`SELECT * FROM coil_lots WHERE coil_no = ?`).get(coilNo);
+    if (!coilRow) return { ok: false, error: 'Source coil not found for manual finish.' };
+    const br = assertCoilInWorkspaceBranch(coilRow, workspaceBranchId);
+    if (!br.ok) return br;
+
+    const qtyRes = Math.max(0, Number(coilRow.qty_reserved) || 0);
+    if (qtyRes > 1e-6) {
+      return {
+        ok: false,
+        error: 'Release shop-floor reservations on this coil before manual finish.',
+      };
     }
-    if (wq > cur) return { ok: false, error: `Insufficient WIP on ${src}.` };
-    db.prepare(`UPDATE wip_balances SET qty = qty - ? WHERE product_id = ? AND branch_id = ?`).run(wq, src, wipBranch);
-    appendMovementTx(db, {
-      type: 'WIP_CONSUMED',
-      productID: src,
-      qty: -wq,
-      ref: productionOrderId,
-      detail: `Released to FG ${productID}`,
-      dateISO: dateISO || new Date().toISOString().slice(0, 10),
-    });
+    let qtyRem = Number(coilRow.qty_remaining);
+    if (!Number.isFinite(qtyRem) || qtyRem < 0) {
+      qtyRem = Math.max(0, Number(coilRow.current_weight_kg) || 0);
+    }
+    if (!Number.isFinite(qtyRem) || qtyRem < 0) qtyRem = 0;
+    if (qtyRem >= 100) {
+      return { ok: false, error: 'Only near-finished coils below 100kg can be closed manually.' };
+    }
+
+    try {
+      assertPeriodOpen(db, dateISO || new Date().toISOString().slice(0, 10), 'Manual coil finish date');
+    } catch (e) {
+      return { ok: false, error: String(e.message || e) };
+    }
   }
 
-  db.prepare(`UPDATE products SET stock_level = stock_level + ? WHERE product_id = ?`).run(q, productID);
+  const src = wipRelease?.wipSourceProductID?.trim?.() ?? '';
+  const wqRaw = wipRelease?.wipQtyReleased;
+  const coilProductId = coilRow ? String(coilRow.product_id ?? '').trim() : '';
+  const pid = String(productID ?? '').trim();
+  const skipProductBump = Boolean(markFinish && coilRow && coilProductId && pid === coilProductId);
 
   const spool =
     extras?.spoolKg != null && String(extras.spoolKg).trim() !== ''
@@ -1971,16 +2198,75 @@ export function receiveFinishedGoods(
       : null;
   const spoolPart =
     spool != null && !Number.isNaN(spool) && spool >= 0 ? `Spool ${spool} kg` : null;
+  const finishNote = markFinish && coilNo ? `Manual coil finish ${coilNo}` : null;
+  const movementDetail = [spoolPart, finishNote].filter(Boolean).join(' · ') || undefined;
 
-  appendMovementTx(db, {
-    type: 'FINISHED_GOODS',
-    productID,
-    qty: q,
-    unitPriceNgn: Number(unitPriceNgn) || 0,
-    ref: productionOrderId,
-    dateISO: dateISO || new Date().toISOString().slice(0, 10),
-    detail: spoolPart || undefined,
-  });
+  try {
+    db.transaction(() => {
+      if (src) {
+        const wq = Number(wqRaw);
+        const srcProd = db.prepare(`SELECT branch_id FROM products WHERE product_id = ?`).get(src);
+        const wipBranch = String(srcProd?.branch_id ?? '').trim();
+        const wrow = db.prepare(`SELECT qty FROM wip_balances WHERE product_id = ? AND branch_id = ?`).get(
+          src,
+          wipBranch
+        );
+        const cur = wrow?.qty || 0;
+        if (Number.isNaN(wq) || wq <= 0) {
+          throw new Error('Enter WIP consumed for the selected source.');
+        }
+        if (wq > cur) throw new Error(`Insufficient WIP on ${src}.`);
+        db.prepare(`UPDATE wip_balances SET qty = qty - ? WHERE product_id = ? AND branch_id = ?`).run(
+          wq,
+          src,
+          wipBranch
+        );
+        appendMovementTx(db, {
+          type: 'WIP_CONSUMED',
+          productID: src,
+          qty: -wq,
+          ref: productionOrderId,
+          detail: `Released to FG ${productID}`,
+          dateISO: dateISO || new Date().toISOString().slice(0, 10),
+        });
+      }
+
+      if (!skipProductBump) {
+        db.prepare(`UPDATE products SET stock_level = stock_level + ? WHERE product_id = ?`).run(q, productID);
+      }
+
+      appendMovementTx(db, {
+        type: 'FINISHED_GOODS',
+        productID,
+        qty: q,
+        unitPriceNgn: Number(unitPriceNgn) || 0,
+        ref: productionOrderId,
+        dateISO: dateISO || new Date().toISOString().slice(0, 10),
+        detail: movementDetail,
+      });
+
+      if (coilRow) {
+        db.prepare(
+          `UPDATE coil_lots SET qty_remaining = 0, qty_reserved = 0, current_weight_kg = 0 WHERE coil_no = ?`
+        ).run(coilNo);
+        finalizeCoilLotStateTx(db, coilNo);
+        const bid = String(coilRow.branch_id ?? workspaceBranchId ?? DEFAULT_BRANCH_ID).trim();
+        reconcileCoilProductStockFromLots(db, coilProductId, bid);
+        appendAuditLog(db, {
+          actor: opts.actor || null,
+          action: 'coil.manual_finish',
+          entityKind: 'coil_lot',
+          entityId: coilNo,
+          status: 'success',
+          note: `${q} m FG movement · coil closed`,
+          details: { coilNo, productID, qtyMeters: q, skipProductBump },
+        });
+      }
+    })();
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+
   return { ok: true };
 }
 
@@ -2139,6 +2425,31 @@ export function splitCoilLot(db, payload = {}, opts = {}) {
 }
 
 /**
+ * Update storage location label for a coil lot (physical move / bay change).
+ */
+export function setCoilLotLocation(db, coilNo, location, opts = {}) {
+  const cn = String(coilNo || '').trim();
+  const loc = location == null ? null : String(location).trim() || null;
+  if (!cn) return { ok: false, error: 'Coil number is required.' };
+  const row = db.prepare(`SELECT * FROM coil_lots WHERE coil_no = ?`).get(cn);
+  if (!row) return { ok: false, error: 'Coil not found.' };
+  const br = assertCoilInWorkspaceBranch(row, opts.workspaceBranchId);
+  if (!br.ok) return br;
+  const prev = String(row.location ?? '').trim() || null;
+  db.prepare(`UPDATE coil_lots SET location = ? WHERE coil_no = ?`).run(loc, cn);
+  appendAuditLog(db, {
+    actor: opts.actor,
+    action: 'coil.location',
+    entityKind: 'coil_lot',
+    entityId: cn,
+    status: 'success',
+    note: loc ? `Location → ${loc}` : 'Location cleared',
+    details: { previous: prev, next: loc },
+  });
+  return { ok: true, coilNo: cn, location: loc };
+}
+
+/**
  * Remove kg from a coil (physical scrap, damage, trim). Reduces raw product stock; optionally credits SCRAP-COIL (or other) SKU.
  */
 export function postCoilScrap(db, payload = {}, opts = {}) {
@@ -2226,6 +2537,35 @@ export function postCoilScrap(db, payload = {}, opts = {}) {
         note: `${kg} kg · ${reason}`,
         details: { coilNo, kg, reason, scrapProductID: creditScrapInventory ? scrapProductID : null },
       });
+
+      const metersLog = Number(payload.meters);
+      const dmf = Number(payload.defectMFrom);
+      const dmt = Number(payload.defectMTo);
+      insertCoilControlEventTx(db, {
+        branchId: String(row.branch_id || workspaceBranchId || DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID,
+        eventKind: String(payload.controlEventKind || 'scrap_offcut').trim() || 'scrap_offcut',
+        coilNo,
+        productId: productID,
+        gaugeLabel: row.gauge_label,
+        colour: row.colour,
+        meters: Number.isFinite(metersLog) ? metersLog : null,
+        kgCoilDelta: -kg,
+        bookRef: payload.bookRef,
+        cuttingListRef: payload.cuttingListRef,
+        quotationRef: payload.quotationRef,
+        supplierId: payload.supplierID,
+        defectMFrom: Number.isFinite(dmf) ? dmf : null,
+        defectMTo: Number.isFinite(dmt) ? dmt : null,
+        supplierResolution: payload.supplierResolution,
+        outboundDestination: payload.outboundDestination,
+        creditScrapInventory: Boolean(creditScrapInventory && scrapProductID),
+        scrapProductId: creditScrapInventory ? scrapProductID : null,
+        scrapReason: reason,
+        note: note || null,
+        dateISO,
+        actorUserId: actorId(actor),
+        actorDisplay: actorName(actor),
+      });
     })();
   } catch (e) {
     return { ok: false, error: String(e.message || e) };
@@ -2293,6 +2633,25 @@ export function returnCoilMaterialToStock(db, payload = {}, opts = {}) {
         note: `${kg} kg onto ${coilNo}`,
         details: { coilNo, kg, reason },
       });
+
+      insertCoilControlEventTx(db, {
+        branchId: String(row.branch_id || workspaceBranchId || DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID,
+        eventKind: String(payload.controlEventKind || 'adjust_add_kg').trim() || 'adjust_add_kg',
+        coilNo,
+        productId: productID,
+        gaugeLabel: row.gauge_label,
+        colour: row.colour,
+        meters: null,
+        kgCoilDelta: kg,
+        bookRef: payload.bookRef,
+        cuttingListRef: payload.cuttingListRef,
+        quotationRef: payload.quotationRef,
+        scrapReason: reason,
+        note: note || null,
+        dateISO,
+        actorUserId: actorId(actor),
+        actorDisplay: actorName(actor),
+      });
     })();
   } catch (e) {
     return { ok: false, error: String(e.message || e) };
@@ -2301,22 +2660,300 @@ export function returnCoilMaterialToStock(db, payload = {}, opts = {}) {
   return { ok: true, coilNo, kg, reason };
 }
 
+/**
+ * Customer / production return into the dimensional offcut pool (no kg added back onto a live coil).
+ */
+export function postOffcutPoolReturnInward(db, payload = {}, opts = {}) {
+  const workspaceBranchId = opts.workspaceBranchId;
+  const actor = opts.actor;
+  const dateISO = String(payload.dateISO ?? new Date().toISOString().slice(0, 10)).trim();
+  const productId = String(payload.productID ?? '').trim();
+  const gaugeLabel = String(payload.gaugeLabel ?? '').trim();
+  const colour = String(payload.colour ?? '').trim();
+  const meters = Number(payload.meters);
+  const kgBook = payload.kgBook != null && payload.kgBook !== '' ? Number(payload.kgBook) : null;
+  const bookRef = String(payload.bookRef ?? '').trim();
+  const cuttingListRef = String(payload.cuttingListRef ?? '').trim();
+  const quotationRef = String(payload.quotationRef ?? '').trim();
+  const customerLabel = String(payload.customerLabel ?? '').trim();
+  const coilNo = String(payload.coilNo ?? '').trim() || null;
+  const note = String(payload.note ?? '').trim();
+  const branchId = String(workspaceBranchId || DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID;
+
+  if (!productId) return { ok: false, error: 'Product / SKU is required.' };
+  if (!gaugeLabel || !colour) return { ok: false, error: 'Gauge and colour are required for the offcut register.' };
+  if (!Number.isFinite(meters) || meters <= 0) return { ok: false, error: 'Meters must be a positive number.' };
+  if (!bookRef) return { ok: false, error: 'Book / transaction reference is required.' };
+
+  try {
+    assertPeriodOpen(db, dateISO, 'Return inward date');
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+
+  if (coilNo) {
+    const crow = db.prepare(`SELECT * FROM coil_lots WHERE coil_no = ?`).get(coilNo);
+    if (!crow) return { ok: false, error: 'Source coil not found.' };
+    const br = assertCoilInWorkspaceBranch(crow, workspaceBranchId);
+    if (!br.ok) return br;
+  }
+
+  let eventId = '';
+  try {
+    db.transaction(() => {
+      eventId = insertCoilControlEventTx(db, {
+        branchId,
+        eventKind: 'return_inward_pool',
+        coilNo,
+        productId,
+        gaugeLabel,
+        colour,
+        meters,
+        kgCoilDelta: 0,
+        kgBook: Number.isFinite(kgBook) ? kgBook : null,
+        bookRef,
+        cuttingListRef: cuttingListRef || null,
+        quotationRef: quotationRef || null,
+        customerLabel: customerLabel || null,
+        note: note || null,
+        dateISO,
+        actorUserId: actorId(actor),
+        actorDisplay: actorName(actor),
+      });
+      appendAuditLog(db, {
+        actor,
+        action: 'coil.offcut_return_inward',
+        entityKind: 'coil_control_event',
+        entityId: eventId,
+        status: 'success',
+        note: `${meters} m · ${bookRef}`,
+        details: { meters, bookRef, productId, gaugeLabel, colour, coilNo },
+      });
+    })();
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+
+  return { ok: true, id: eventId, meters, bookRef };
+}
+
+/**
+ * Remove kg from a coil when material leaves the branch (supplier return, disposal) without crediting scrap SKU.
+ */
+export function postCoilReturnOutward(db, payload = {}, opts = {}) {
+  const kg = Number(payload.kg);
+  const outboundDestination = String(payload.outboundDestination ?? 'disposal').trim() || 'disposal';
+  const supplierId = String(payload.supplierID ?? '').trim() || null;
+  const note = String(payload.note ?? '').trim();
+  const bookRef = String(payload.bookRef ?? '').trim() || null;
+  const meters = Number(payload.meters);
+  return postCoilScrap(
+    db,
+    {
+      ...payload,
+      kg,
+      reason: 'Return outward',
+      note: [note, supplierId ? `supplier ${supplierId}` : '', outboundDestination].filter(Boolean).join(' · '),
+      creditScrapInventory: false,
+      controlEventKind: 'return_outward',
+      outboundDestination,
+      bookRef,
+      meters: Number.isFinite(meters) ? meters : undefined,
+    },
+    opts
+  );
+}
+
+/** Record coil head trim when opening a new roll (production register). */
+export function postCoilOpenHeadTrim(db, payload = {}, opts = {}) {
+  const meters = Number(payload.meters);
+  const kg = Number(payload.kg);
+  if (!Number.isFinite(meters) || meters <= 0) return { ok: false, error: 'Head trim meters must be positive.' };
+  if (!Number.isFinite(kg) || kg <= 0) return { ok: false, error: 'Head trim kg removed from the coil is required.' };
+  return postCoilScrap(
+    db,
+    {
+      ...payload,
+      kg,
+      reason: 'Coil open — head trim',
+      creditScrapInventory: payload.creditScrapInventory !== false,
+      controlEventKind: 'coil_open_trim',
+      meters,
+      bookRef: payload.bookRef,
+      cuttingListRef: payload.cuttingListRef,
+      quotationRef: payload.quotationRef,
+    },
+    opts
+  );
+}
+
+/**
+ * Log supplier quality on a received coil (stains, mid-coil rust span, negotiation). Optional kg removes weight from the coil like scrap without scrap credit.
+ */
+export function postSupplierCoilDefect(db, payload = {}, opts = {}) {
+  const coilNo = String(payload.coilNo ?? '').trim();
+  const workspaceBranchId = opts.workspaceBranchId;
+  const actor = opts.actor;
+  const dateISO = String(payload.dateISO ?? new Date().toISOString().slice(0, 10)).trim();
+  const supplierResolution = String(payload.supplierResolution ?? '').trim();
+  const defectMFrom = Number(payload.defectMFrom);
+  const defectMTo = Number(payload.defectMTo);
+  const kgRemove = Number(payload.kgRemove);
+  const note = String(payload.note ?? '').trim();
+  const supplierId = String(payload.supplierID ?? '').trim() || null;
+  const bookRef = String(payload.bookRef ?? '').trim() || null;
+
+  if (!coilNo) return { ok: false, error: 'Coil number is required.' };
+  if (!supplierResolution) return { ok: false, error: 'Supplier resolution (credit, discount, return, logged, etc.) is required.' };
+
+  const row = db.prepare(`SELECT * FROM coil_lots WHERE coil_no = ?`).get(coilNo);
+  if (!row) return { ok: false, error: 'Coil not found.' };
+  const br = assertCoilInWorkspaceBranch(row, workspaceBranchId);
+  if (!br.ok) return br;
+
+  try {
+    assertPeriodOpen(db, dateISO, 'Supplier defect date');
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+
+  if (Number.isFinite(kgRemove) && kgRemove > 0) {
+    const scr = postCoilScrap(
+      db,
+      {
+        coilNo,
+        kg: kgRemove,
+        reason: 'Supplier defect — weight removed',
+        note,
+        dateISO,
+        creditScrapInventory: false,
+        controlEventKind: 'supplier_defect',
+        bookRef,
+        supplierID: supplierId,
+        supplierResolution,
+        defectMFrom: Number.isFinite(defectMFrom) ? defectMFrom : undefined,
+        defectMTo: Number.isFinite(defectMTo) ? defectMTo : undefined,
+      },
+      opts
+    );
+    if (!scr.ok) return scr;
+    return { ok: true, coilNo, kgRemoved: kgRemove, supplierResolution, logged: true };
+  }
+
+  let eventId = '';
+  try {
+    db.transaction(() => {
+      eventId = insertCoilControlEventTx(db, {
+        branchId: String(row.branch_id || workspaceBranchId || DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID,
+        eventKind: 'supplier_defect',
+        coilNo,
+        productId: row.product_id,
+        gaugeLabel: row.gauge_label,
+        colour: row.colour,
+        meters:
+          Number.isFinite(defectMFrom) && Number.isFinite(defectMTo) && defectMTo > defectMFrom
+            ? defectMTo - defectMFrom
+            : null,
+        kgCoilDelta: 0,
+        bookRef,
+        supplierId,
+        defectMFrom: Number.isFinite(defectMFrom) ? defectMFrom : null,
+        defectMTo: Number.isFinite(defectMTo) ? defectMTo : null,
+        supplierResolution,
+        note: note || null,
+        dateISO,
+        actorUserId: actorId(actor),
+        actorDisplay: actorName(actor),
+      });
+      appendAuditLog(db, {
+        actor,
+        action: 'coil.supplier_defect',
+        entityKind: 'coil_control_event',
+        entityId: eventId,
+        status: 'success',
+        note: supplierResolution,
+        details: { coilNo, supplierId, defectMFrom, defectMTo },
+      });
+    })();
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+
+  return { ok: true, id: eventId, coilNo, supplierResolution };
+}
+
+/** Signed kg adjustment on a coil (+ adds to roll and raw SKU, − removes like scrap without scrap credit). */
+export function postCoilLedgerKgAdjustment(db, payload = {}, opts = {}) {
+  const delta = Number(payload.kgDelta);
+  if (!Number.isFinite(delta) || delta === 0) return { ok: false, error: 'kgDelta must be a non-zero number.' };
+  if (delta > 0) {
+    return returnCoilMaterialToStock(
+      db,
+      {
+        coilNo: payload.coilNo,
+        kg: delta,
+        reason: String(payload.reason ?? 'Coil ledger adjustment (+)').trim() || 'Coil ledger adjustment (+)',
+        note: String(payload.note ?? '').trim(),
+        dateISO: payload.dateISO,
+        bookRef: payload.bookRef,
+        cuttingListRef: payload.cuttingListRef,
+        quotationRef: payload.quotationRef,
+        controlEventKind: 'adjust_add_kg',
+      },
+      opts
+    );
+  }
+  return postCoilScrap(
+    db,
+    {
+      coilNo: payload.coilNo,
+      kg: -delta,
+      reason: String(payload.reason ?? 'Coil ledger adjustment (−)').trim() || 'Coil ledger adjustment (−)',
+      note: String(payload.note ?? '').trim(),
+      dateISO: payload.dateISO,
+      creditScrapInventory: false,
+      bookRef: payload.bookRef,
+      cuttingListRef: payload.cuttingListRef,
+      quotationRef: payload.quotationRef,
+      controlEventKind: 'adjust_remove_kg',
+    },
+    opts
+  );
+}
+
 export function addCoilRequest(db, payload) {
-  const id = nextCoilRequestHumanId(db, DEFAULT_BRANCH_ID);
+  const branchId = String(payload?.branchId || DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID;
+  const id = nextCoilRequestHumanId(db, branchId);
+  const createdAtIso = new Date().toISOString();
   db.prepare(
-    `INSERT INTO coil_requests (id, status, created_at_iso, gauge, colour, material_type, requested_kg, note)
-     VALUES (?,?,?,?,?,?,?,?)`
+    `INSERT INTO coil_requests (
+      id, status, created_at_iso, branch_id, requested_by_user_id, requested_by_display, gauge, colour, material_type, requested_kg, note
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`
   ).run(
     id,
     'pending',
-    new Date().toISOString(),
+    createdAtIso,
+    branchId,
+    String(payload?.requestedByUserId || '').trim() || null,
+    String(payload?.requestedByDisplay || '').trim() || null,
     payload.gauge ?? '',
     payload.colour ?? '',
     payload.materialType ?? '',
     Number(payload.requestedKg) || 0,
     payload.note ?? ''
   );
-  return { ok: true, row: { id, status: 'pending', createdAtISO: new Date().toISOString(), ...payload } };
+  return {
+    ok: true,
+    row: {
+      id,
+      status: 'pending',
+      createdAtISO: createdAtIso,
+      branchId,
+      requestedByUserId: String(payload?.requestedByUserId || '').trim() || '',
+      requestedByDisplay: String(payload?.requestedByDisplay || '').trim() || '',
+      ...payload,
+    },
+  };
 }
 
 export function acknowledgeCoilRequest(db, id) {
@@ -2366,8 +3003,15 @@ export function insertSupplier(db, row, branchId = DEFAULT_BRANCH_ID) {
   const name = String(row.name ?? '').trim();
   if (!name) throw new Error('Supplier name is required.');
   const id = String(row.supplierID ?? '').trim() || nextSupplierIdFromDb(db);
+  let profileJson = null;
+  if (row.supplierProfile != null && typeof row.supplierProfile === 'object') {
+    const merged = mergeSupplierProfilePatch('{}', row.supplierProfile);
+    const v = validateAndNormalizeSupplierProfile(merged);
+    if (!v.ok) throw new Error(v.error);
+    profileJson = JSON.stringify(v.profile);
+  }
   db.prepare(
-    `INSERT INTO suppliers (supplier_id, name, city, payment_terms, quality_score, notes, branch_id) VALUES (?,?,?,?,?,?,?)`
+    `INSERT INTO suppliers (supplier_id, name, city, payment_terms, quality_score, notes, branch_id, supplier_profile_json) VALUES (?,?,?,?,?,?,?,?)`
   ).run(
     id,
     name,
@@ -2375,7 +3019,8 @@ export function insertSupplier(db, row, branchId = DEFAULT_BRANCH_ID) {
     row.paymentTerms ?? 'Credit',
     Number(row.qualityScore) || 80,
     String(row.notes ?? '').trim() || '',
-    String(branchId || DEFAULT_BRANCH_ID).trim()
+    String(branchId || DEFAULT_BRANCH_ID).trim(),
+    profileJson
   );
   return id;
 }
@@ -2383,19 +3028,45 @@ export function insertSupplier(db, row, branchId = DEFAULT_BRANCH_ID) {
 export function updateSupplier(db, supplierID, row, branchId = DEFAULT_BRANCH_ID) {
   const name = String(row.name ?? '').trim();
   if (!name) return { ok: false, error: 'Supplier name is required.' };
-  const r = db
-    .prepare(
-      `UPDATE suppliers SET name = ?, city = ?, payment_terms = ?, quality_score = ?, notes = ? WHERE supplier_id = ? AND branch_id = ?`
-    )
-    .run(
-      name,
-      String(row.city ?? '').trim() || '',
-      row.paymentTerms ?? 'Credit',
-      Number(row.qualityScore) || 80,
-      String(row.notes ?? '').trim() || '',
-      supplierID,
-      String(branchId || DEFAULT_BRANCH_ID).trim()
-    );
+  const bid = String(branchId || DEFAULT_BRANCH_ID).trim();
+  let profileJson = undefined;
+  if (row.supplierProfile != null && typeof row.supplierProfile === 'object') {
+    const cur = db
+      .prepare(`SELECT supplier_profile_json FROM suppliers WHERE supplier_id = ? AND branch_id = ?`)
+      .get(supplierID, bid);
+    const merged = mergeSupplierProfilePatch(cur?.supplier_profile_json, row.supplierProfile);
+    const v = validateAndNormalizeSupplierProfile(merged);
+    if (!v.ok) return { ok: false, error: v.error };
+    profileJson = JSON.stringify(v.profile);
+  }
+  const r = profileJson !== undefined
+    ? db
+        .prepare(
+          `UPDATE suppliers SET name = ?, city = ?, payment_terms = ?, quality_score = ?, notes = ?, supplier_profile_json = ? WHERE supplier_id = ? AND branch_id = ?`
+        )
+        .run(
+          name,
+          String(row.city ?? '').trim() || '',
+          row.paymentTerms ?? 'Credit',
+          Number(row.qualityScore) || 80,
+          String(row.notes ?? '').trim() || '',
+          profileJson,
+          supplierID,
+          bid
+        )
+    : db
+        .prepare(
+          `UPDATE suppliers SET name = ?, city = ?, payment_terms = ?, quality_score = ?, notes = ? WHERE supplier_id = ? AND branch_id = ?`
+        )
+        .run(
+          name,
+          String(row.city ?? '').trim() || '',
+          row.paymentTerms ?? 'Credit',
+          Number(row.qualityScore) || 80,
+          String(row.notes ?? '').trim() || '',
+          supplierID,
+          bid
+        );
   if (r.changes === 0) return { ok: false, error: 'Supplier not found.' };
   db.prepare(`UPDATE purchase_orders SET supplier_name = ? WHERE supplier_id = ?`).run(name, supplierID);
   return { ok: true };
@@ -2426,16 +3097,31 @@ export function nextTransportAgentIdFromDb(db) {
   return `AG-${String(n).padStart(3, '0')}`;
 }
 
+function stringifyTransportAgentProfile(row) {
+  const raw = row.profile ?? row.profileJson;
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'string') return raw.trim() || null;
+  try {
+    return JSON.stringify(raw);
+  } catch {
+    return null;
+  }
+}
+
 export function insertTransportAgent(db, row, branchId = DEFAULT_BRANCH_ID) {
   const name = String(row.name ?? '').trim();
   if (!name) throw new Error('Agent name is required.');
   const id = String(row.id ?? '').trim() || nextTransportAgentIdFromDb(db);
-  db.prepare(`INSERT INTO transport_agents (id, name, region, phone, branch_id) VALUES (?,?,?,?,?)`).run(
+  const profileJson = stringifyTransportAgentProfile(row);
+  db.prepare(
+    `INSERT INTO transport_agents (id, name, region, phone, branch_id, profile_json) VALUES (?,?,?,?,?,?)`
+  ).run(
     id,
     name,
     String(row.region ?? '').trim() || '',
     String(row.phone ?? '').trim() || '',
-    String(branchId || DEFAULT_BRANCH_ID).trim()
+    String(branchId || DEFAULT_BRANCH_ID).trim(),
+    profileJson
   );
   return id;
 }
@@ -2443,15 +3129,31 @@ export function insertTransportAgent(db, row, branchId = DEFAULT_BRANCH_ID) {
 export function updateTransportAgent(db, id, row, branchId = DEFAULT_BRANCH_ID) {
   const name = String(row.name ?? '').trim();
   if (!name) return { ok: false, error: 'Agent name is required.' };
-  const r = db
-    .prepare(`UPDATE transport_agents SET name = ?, region = ?, phone = ? WHERE id = ? AND branch_id = ?`)
-    .run(
-      name,
-      String(row.region ?? '').trim() || '',
-      String(row.phone ?? '').trim() || '',
-      id,
-      String(branchId || DEFAULT_BRANCH_ID).trim()
-    );
+  const bid = String(branchId || DEFAULT_BRANCH_ID).trim();
+  const hasProfileKey =
+    row != null &&
+    (Object.prototype.hasOwnProperty.call(row, 'profile') ||
+      Object.prototype.hasOwnProperty.call(row, 'profileJson'));
+  let r;
+  if (hasProfileKey) {
+    const profileJson = stringifyTransportAgentProfile(row);
+    r = db
+      .prepare(
+        `UPDATE transport_agents SET name = ?, region = ?, phone = ?, profile_json = ? WHERE id = ? AND branch_id = ?`
+      )
+      .run(
+        name,
+        String(row.region ?? '').trim() || '',
+        String(row.phone ?? '').trim() || '',
+        profileJson,
+        id,
+        bid
+      );
+  } else {
+    r = db
+      .prepare(`UPDATE transport_agents SET name = ?, region = ?, phone = ? WHERE id = ? AND branch_id = ?`)
+      .run(name, String(row.region ?? '').trim() || '', String(row.phone ?? '').trim() || '', id, bid);
+  }
   if (r.changes === 0) return { ok: false, error: 'Transport agent not found.' };
   db.prepare(`UPDATE purchase_orders SET transport_agent_name = ? WHERE transport_agent_id = ?`).run(
     name,
@@ -3443,7 +4145,7 @@ function validateQuotationForCuttingList(db, quotationRef, excludeCuttingListId)
   if (!qref) return { ok: false, error: 'Link a quotation.' };
   const qrow = db
     .prepare(
-      `SELECT total_ngn, paid_ngn, manager_production_approved_at_iso FROM quotations WHERE id = ?`
+      `SELECT total_ngn, paid_ngn, manager_production_approved_at_iso, branch_id FROM quotations WHERE id = ?`
     )
     .get(qref);
   if (!qrow) return { ok: false, error: 'Quotation not found.' };
@@ -3451,7 +4153,16 @@ function validateQuotationForCuttingList(db, quotationRef, excludeCuttingListId)
   if (total <= 0) return { ok: false, error: 'Quotation total must be greater than zero.' };
   const managerOk = Boolean(qrow.manager_production_approved_at_iso);
   const bookPaid = Number(qrow.paid_ngn) || 0;
-  const threshold = total * 0.7 - 1e-6;
+  const bid = String(qrow.branch_id || '').trim() || DEFAULT_BRANCH_ID;
+  let minPaidFrac = 0.7;
+  try {
+    const brRow = db.prepare(`SELECT cutting_list_min_paid_fraction FROM branches WHERE id = ?`).get(bid);
+    const f = Number(brRow?.cutting_list_min_paid_fraction);
+    if (Number.isFinite(f) && f >= 0.05 && f <= 1) minPaidFrac = f;
+  } catch {
+    minPaidFrac = 0.7;
+  }
+  const threshold = total * minPaidFrac - 1e-6;
   if (!managerOk && bookPaid < threshold) {
     const receiptRows = listSalesReceipts(db, 'ALL').filter(
       (r) => String(r.quotationRef || '').trim() === qref
@@ -3470,10 +4181,10 @@ function validateQuotationForCuttingList(db, quotationRef, excludeCuttingListId)
     const advanceApplied = Math.round(Number(advRow?.s) || 0);
     const cashPaidTotal = cashFromReceipts + advanceApplied;
     if (cashPaidTotal < threshold) {
+      const pct = Math.round(minPaidFrac * 100);
       return {
         ok: false,
-        error:
-          'At least 70% of the quotation must be paid (recorded receipts / applied advances on file) before creating a cutting list.',
+        error: `At least ${pct}% of the quotation must be paid (recorded receipts / applied advances on file) before creating a cutting list.`,
       };
     }
   }
@@ -3758,6 +4469,12 @@ export function setProductionJobStatus(db, jobID, status) {
   }
   if (nextStatus === 'Completed') {
     return { ok: false, error: 'Use the completion flow with coil readings to finish this job.' };
+  }
+  if (nextStatus === 'Cancelled') {
+    return {
+      ok: false,
+      error: 'Use POST /api/production-jobs/:jobId/cancel with a reason to cancel and release coil reservations.',
+    };
   }
   db.transaction(() => {
     db.prepare(`UPDATE production_jobs SET status = ?, completed_at_iso = ? WHERE job_id = ?`).run(
@@ -4160,11 +4877,19 @@ export function payPaymentRequest(db, requestID, payload) {
       return created;
     })();
 
+    const paidAmountNgn = alreadyPaid + totalPaid;
+    const fullyPaid = paidAmountNgn >= requested;
+    const remain = Math.max(0, requested - paidAmountNgn);
+    const payLine = fullyPaid
+      ? `Accounts: treasury paid ₦${totalPaid.toLocaleString('en-NG')} toward ${requestID} (now fully paid; total ₦${paidAmountNgn.toLocaleString('en-NG')}).`
+      : `Accounts: treasury paid ₦${totalPaid.toLocaleString('en-NG')} toward ${requestID} (partial; ₦${remain.toLocaleString('en-NG')} remaining of ₦${requested.toLocaleString('en-NG')}).`;
+    appendPaymentRequestTimelineToOfficeThreads(db, requestID, payLine);
+
     return {
       ok: true,
       amountPaidNgn: totalPaid,
-      paidAmountNgn: alreadyPaid + totalPaid,
-      fullyPaid: alreadyPaid + totalPaid >= requested,
+      paidAmountNgn,
+      fullyPaid,
       movements,
     };
   } catch (e) {

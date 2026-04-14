@@ -1,9 +1,9 @@
 /**
  * Merge imported/historical receipts with ledger RECEIPT rows for Sales UI and print history.
  */
-import { loadLedgerEntries, amountDueOnQuotation } from './customerLedgerStore';
-import { companionOverpayNgnByReceiptId } from './customerLedgerCore';
-import { formatNgn } from '../Data/mockData';
+import { loadLedgerEntries, amountDueOnQuotation } from './customerLedgerStore.js';
+import { companionOverpayNgnByReceiptId } from './customerLedgerCore.js';
+import { formatNgn } from '../Data/mockData.js';
 
 function reversalTargetId(raw) {
   const m = String(raw ?? '').match(/REVERSAL_OF:([A-Za-z0-9-]+)/);
@@ -24,6 +24,85 @@ export function receiptCashReceivedNgn(r) {
   if (!r) return 0;
   if (r.cashReceivedNgn != null) return Math.round(Number(r.cashReceivedNgn) || 0);
   return Math.round(Number(r.amountNgn ?? r.amount_ngn) || 0);
+}
+
+/** Map typo/graphical dashes to ASCII hyphen (aligned with server bank recon + Word/PDF paste). */
+export function normalizeReceiptMatchDashes(s) {
+  return String(s || '')
+    .replace(/\u2013/g, '-')
+    .replace(/\u2014/g, '-')
+    .replace(/\u2212/g, '-');
+}
+
+/**
+ * First token from bank reconciliation system match (aligned with server `firstSystemMatchToken`).
+ * @param {string} [systemMatch]
+ */
+export function firstBankReconSystemMatchToken(systemMatch) {
+  let raw = String(systemMatch ?? '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim();
+  if (!raw) return '';
+  let chunk = String(raw.split(/\s+/)[0] || '').trim();
+  for (const sep of ['·', '\u2219', '\u2022', '\u2023', '•']) {
+    const i = chunk.indexOf(sep);
+    if (i !== -1) chunk = chunk.slice(0, i).trim();
+  }
+  return chunk.trim();
+}
+
+/**
+ * Find workspace sales receipt row by id or ledger_entry_id token from recon / paste.
+ * @param {object[]} receipts
+ * @param {string} token
+ */
+export function findSalesReceiptByMatchToken(receipts, token) {
+  const t = normalizeReceiptMatchDashes(String(token || '').trim());
+  if (!t) return null;
+  const list = Array.isArray(receipts) ? receipts : [];
+  return (
+    list.find((r) => String(r.id || '') === t) ||
+    list.find((r) => String(r.ledgerEntryId || '') === t) ||
+    list.find((r) => String(r.id || '').toLowerCase() === t.toLowerCase()) ||
+    list.find(
+      (r) =>
+        String(r.ledgerEntryId || '').trim() &&
+        String(r.ledgerEntryId || '').toLowerCase() === t.toLowerCase()
+    ) ||
+    null
+  );
+}
+
+/**
+ * Inflows posted for this receipt — one row per treasury account split (`LEDGER_RECEIPT` movements).
+ * @param {{ id?: string, ledgerEntryId?: string|null }} receiptRow
+ * @param {object[]} treasuryMovements workspace `snapshot.treasuryMovements`
+ */
+export function receiptLedgerReceiptTreasurySplits(receiptRow, treasuryMovements) {
+  if (!receiptRow) return [];
+  const ids = new Set(
+    [receiptRow.id, receiptRow.ledgerEntryId]
+      .map((v) => String(v || '').trim())
+      .filter(Boolean)
+  );
+  const mv = Array.isArray(treasuryMovements) ? treasuryMovements : [];
+  return mv
+    .filter(
+      (m) =>
+        String(m?.sourceKind || '').trim() === 'LEDGER_RECEIPT' &&
+        ids.has(String(m?.sourceId || '').trim()) &&
+        Number(m?.amountNgn) > 0
+    )
+    .slice()
+    .sort((a, b) => String(a?.id || '').localeCompare(String(b?.id || '')))
+    .map((m) => ({
+      movementId: m.id,
+      treasuryAccountId: m.treasuryAccountId,
+      accountLabel: [m.accountType, m.accountName].filter(Boolean).join(' — ') || '—',
+      amountNgn: Math.round(Number(m.amountNgn) || 0),
+      postedAtISO: m.postedAtISO || '',
+      reference: m.reference || '',
+    }));
 }
 
 function quotePaymentHint(quotation) {

@@ -9,6 +9,17 @@ import {
   nextRefundHumanId,
 } from './humanId.js';
 import { isAllowedExpenseCategory } from '../shared/expenseCategories.js';
+import {
+  normalizeRefundReasonCategoriesForApi,
+  REFUND_PREVIEW_VERSION,
+} from '../shared/refundConstants.js';
+import {
+  actorMayApprovePaymentRequestAmount,
+  actorMayApproveRefundAmount,
+} from '../shared/workspaceGovernance.js';
+import { appendPaymentRequestTimelineToOfficeThreads } from './officePaymentRequestTimeline.js';
+import { getOrgGovernanceLimits } from './orgPolicy.js';
+import { backdateWarningForActedDate } from './backdateSignals.js';
 
 function roundMoney(value) {
   return Math.round(Number(value) || 0);
@@ -245,6 +256,64 @@ function listPricePerMeterForProducedProduct(db, productId, branchId) {
   ).trim();
   if (!gauge || !design) return null;
   return listPricePerMeterFromGaugeDesign(db, gauge, design, branchId);
+}
+
+/**
+ * Produced FG differs from quoted roofing but list ₦/m cannot be resolved — fix gauge/colour + price list.
+ * @returns {{ code: string; message: string; jobId?: string; productId?: string }[]}
+ */
+export function refundSubstitutionDataQualityIssues(db, quotationRef) {
+  const ref = String(quotationRef ?? '').trim();
+  if (!ref) return [];
+  let quote;
+  try {
+    quote = db.prepare(`SELECT lines_json, branch_id FROM quotations WHERE id = ?`).get(ref);
+  } catch {
+    return [];
+  }
+  if (!quote) return [];
+  let productionJobs = [];
+  try {
+    productionJobs = db
+      .prepare(
+        `SELECT job_id, product_id, product_name, actual_meters, status FROM production_jobs
+         WHERE quotation_ref = ? AND LOWER(TRIM(COALESCE(status, ''))) IN ('completed', 'cancelled')`
+      )
+      .all(ref);
+  } catch {
+    return [];
+  }
+  const qNames = quotedProductNamesLower(quote?.lines_json ?? '');
+  if (!qNames.length || !productionJobs.length) return [];
+  const branchId = quote?.branch_id != null ? String(quote.branch_id).trim() || null : null;
+  const issues = [];
+  for (const j of productionJobs) {
+    const pn = String(j.product_name ?? '').trim().toLowerCase();
+    if (!pn) continue;
+    const match = qNames.some((qn) => pn.includes(qn) || qn.includes(pn));
+    if (match) continue;
+    const m = Number(j.actual_meters) || 0;
+    if (m <= 0) continue;
+    const ppm = listPricePerMeterForProducedProduct(db, j.product_id, branchId);
+    if (ppm == null || ppm <= 0) {
+      const pid = String(j.product_id ?? '').trim();
+      issues.push({
+        code: 'substitution_list_price',
+        jobId: String(j.job_id ?? '').trim() || undefined,
+        productId: pid || undefined,
+        message: `Substitution credit needs list ₦/m for produced “${String(j.product_name || j.job_id).trim()}”${pid ? ` (FG ${pid})` : ''}. Add gauge and colour (or design) on the FG product and a matching price list row.`,
+      });
+    }
+  }
+  const ppmQuote = quotedAmountPerMeter(quote?.lines_json);
+  if ((!ppmQuote || ppmQuote <= 0) && productionJobs.some((j) => (Number(j.actual_meters) || 0) > 0)) {
+    issues.push({
+      code: 'quoted_blend_rate',
+      message:
+        'Quotation has no product lines with qty × unit price, so blended ₦/m for substitution/unproduced hints may be missing. Add product lines or rely on manual amounts.',
+    });
+  }
+  return issues;
 }
 
 function matchesTransportService(nameLower) {
@@ -560,8 +629,33 @@ export function decidePaymentRequest(db, requestID, payload, actor) {
   if (!['Approved', 'Rejected'].includes(status)) {
     return { ok: false, error: 'Decision status must be Approved or Rejected.' };
   }
+  const expenseRow = row.expense_id
+    ? db.prepare(`SELECT category FROM expenses WHERE expense_id = ?`).get(row.expense_id)
+    : null;
+  const expenseCategory = String(expenseRow?.category ?? '');
+  const amountRequestedNgn = roundMoney(row.amount_requested_ngn ?? 0);
+  const govLimits = getOrgGovernanceLimits(db);
+  if (
+    status === 'Approved' &&
+    !actorMayApprovePaymentRequestAmount(
+      actor,
+      (p) => userHasPermission(actor, p),
+      amountRequestedNgn,
+      expenseCategory,
+      govLimits
+    )
+  ) {
+    const hi = govLimits.expenseExecutiveThresholdNgn;
+    return {
+      ok: false,
+      error: `Non-refund expenses above ₦${hi.toLocaleString('en-NG')} require MD/CEO-level approval (branch manager may approve at or below this threshold).`,
+    };
+  }
   const note = String(payload.note ?? '').trim();
   const actedAtISO = String(payload.actedAtISO ?? '').trim() || nowIso().slice(0, 10);
+  const warnings = [];
+  const bd = backdateWarningForActedDate(actedAtISO, 'Approval date');
+  if (bd) warnings.push(bd);
   try {
     assertPeriodOpen(db, actedAtISO, 'Approval date');
     db.transaction(() => {
@@ -588,7 +682,16 @@ export function decidePaymentRequest(db, requestID, payload, actor) {
         details: { status },
       });
     })();
-    return { ok: true };
+    const actorLabel = actorName(actor);
+    const notePart = note ? ` Note: ${note}` : '';
+    appendPaymentRequestTimelineToOfficeThreads(
+      db,
+      requestID,
+      status === 'Approved'
+        ? `Accounts: payment request ${requestID} was approved by ${actorLabel}.${notePart}`
+        : `Accounts: payment request ${requestID} was rejected by ${actorLabel}.${notePart}`
+    );
+    return { ok: true, warnings };
   } catch (e) {
     return { ok: false, error: String(e.message || e) };
   }
@@ -607,6 +710,10 @@ export function insertRefundRequest(db, payload, actor, branchId = DEFAULT_BRANC
     assertPeriodOpen(db, requestedAtISO, 'Refund request date');
     const quotationRef = String(payload.quotationRef ?? '').trim();
     const product = String(payload.product ?? '').trim() || '—';
+    const requestedCats = normalizeRefundReasonCategoriesForApi(payload.reasonCategory);
+    if (requestedCats.length === 0) {
+      return { ok: false, error: 'Select at least one refund reason category.' };
+    }
 
     if (quotationRef) {
       const existingRefunds = db.prepare(
@@ -614,8 +721,6 @@ export function insertRefundRequest(db, payload, actor, branchId = DEFAULT_BRANC
          WHERE quotation_ref = ? AND status IN ('Pending', 'Approved')`
       ).all(quotationRef);
 
-      const requestedCats = Array.isArray(payload.reasonCategory) ? payload.reasonCategory : [payload.reasonCategory];
-      
       for (const row of existingRefunds) {
         try {
           const cats = JSON.parse(row.reason_category || '[]');
@@ -637,6 +742,15 @@ export function insertRefundRequest(db, payload, actor, branchId = DEFAULT_BRANC
           error: 'Order cancellation is not allowed after material has been delivered for this quotation.',
         };
       }
+
+      const elig = quotationMeetsRefundEligibility(db, quotationRef);
+      if (!elig.ok) return elig;
+      if (amountNgn > elig.remainingNgn) {
+        return {
+          ok: false,
+          error: `Refund amount (₦${amountNgn.toLocaleString('en-NG')}) exceeds remaining refundable balance (₦${elig.remainingNgn.toLocaleString('en-NG')}).`,
+        };
+      }
     }
 
     let quotationCustomerName = '';
@@ -645,17 +759,28 @@ export function insertRefundRequest(db, payload, actor, branchId = DEFAULT_BRANC
       quotationCustomerName = String(qRow?.customer_name ?? '').trim();
     }
 
-    const reasonCategory = Array.isArray(payload.reasonCategory)
-      ? JSON.stringify(payload.reasonCategory)
-      : String(payload.reasonCategory ?? '').trim();
+    const reasonCategory = JSON.stringify(requestedCats);
+
+    let previewSnapshotJson = null;
+    if (payload.previewSnapshot != null && typeof payload.previewSnapshot === 'object') {
+      try {
+        const snap = {
+          ...payload.previewSnapshot,
+          engineVersion: REFUND_PREVIEW_VERSION,
+        };
+        previewSnapshotJson = JSON.stringify(snap).slice(0, 120_000);
+      } catch {
+        previewSnapshotJson = null;
+      }
+    }
 
     db.transaction(() => {
       db.prepare(
         `INSERT INTO customer_refunds (
           refund_id, customer_id, customer_name, quotation_ref, cutting_list_ref, product, reason_category, reason,
-          amount_ngn, calculation_lines_json, suggested_lines_json, calculation_notes, status, requested_by, requested_by_user_id, requested_at_iso,
+          amount_ngn, calculation_lines_json, suggested_lines_json, preview_snapshot_json, calculation_notes, status, requested_by, requested_by_user_id, requested_at_iso,
           approval_date, approved_by, approved_amount_ngn, manager_comments, paid_amount_ngn, paid_at_iso, paid_by, payment_note, branch_id
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       ).run(
         refundID,
         customerID,
@@ -668,6 +793,7 @@ export function insertRefundRequest(db, payload, actor, branchId = DEFAULT_BRANC
         amountNgn,
         JSON.stringify(payload.calculationLines || []),
         JSON.stringify(payload.suggestedLines || payload.calculationLines || []),
+        previewSnapshotJson,
         String(payload.calculationNotes ?? '').trim(),
         'Pending',
         actorName(actor),
@@ -727,6 +853,46 @@ export function decideRefundRequest(db, refundID, payload, actor) {
       : 0;
   if (status === 'Approved' && approvedAmountNgn <= 0) {
     return { ok: false, error: 'Approved refund amount must be positive.' };
+  }
+  const requestedAmountNgn = roundMoney(row.amount_ngn);
+  if (status === 'Approved' && approvedAmountNgn > requestedAmountNgn) {
+    return {
+      ok: false,
+      error: `Approved amount (₦${approvedAmountNgn.toLocaleString('en-NG')}) cannot exceed the requested amount (₦${requestedAmountNgn.toLocaleString('en-NG')}).`,
+    };
+  }
+  const govLimitsR = getOrgGovernanceLimits(db);
+  if (
+    status === 'Approved' &&
+    !actorMayApproveRefundAmount(actor, (p) => userHasPermission(actor, p), approvedAmountNgn, govLimitsR)
+  ) {
+    const hi = govLimitsR.refundExecutiveThresholdNgn;
+    return {
+      ok: false,
+      error: `Refunds above ₦${hi.toLocaleString('en-NG')} require MD/CEO-level approval (or administrator).`,
+    };
+  }
+  const refundWarnings = [];
+  const bdR = backdateWarningForActedDate(actedAtISO, 'Refund approval date');
+  if (bdR) refundWarnings.push(bdR);
+  const qref = String(row.quotation_ref ?? '').trim();
+  if (status === 'Approved' && qref) {
+    const qRow = db.prepare(`SELECT paid_ngn FROM quotations WHERE id = ?`).get(qref);
+    const paidNgn = roundMoney(qRow?.paid_ngn ?? 0);
+    const sumRow = db
+      .prepare(
+        `SELECT COALESCE(SUM(amount_ngn), 0) AS s FROM customer_refunds
+         WHERE quotation_ref = ? AND TRIM(COALESCE(LOWER(status), '')) != 'rejected' AND refund_id != ?`
+      )
+      .get(qref, refundID);
+    const sumOthersNgn = roundMoney(sumRow?.s ?? 0);
+    const maxApprovableNgn = roundMoney(paidNgn - sumOthersNgn);
+    if (approvedAmountNgn > maxApprovableNgn) {
+      return {
+        ok: false,
+        error: `Approved amount exceeds quotation refundable headroom (max ₦${maxApprovableNgn.toLocaleString('en-NG')} for this request given other open refunds on the same quotation).`,
+      };
+    }
   }
   try {
     assertPeriodOpen(db, actedAtISO, 'Refund approval date');
@@ -801,7 +967,7 @@ export function decideRefundRequest(db, refundID, payload, actor) {
         details: { status, approvedAmountNgn },
       });
     })();
-    return { ok: true };
+    return { ok: true, warnings: refundWarnings };
   } catch (e) {
     return { ok: false, error: String(e.message || e) };
   }
@@ -836,7 +1002,9 @@ export function previewRefundRequest(db, payload) {
   const overpayAdvanceNgn = roundMoney(overpayRow?.s ?? 0);
 
   const productionJobs = quotationRef
-    ? db.prepare(`SELECT * FROM production_jobs WHERE quotation_ref = ? AND status = 'Completed'`).all(quotationRef)
+    ? db
+        .prepare(`SELECT * FROM production_jobs WHERE quotation_ref = ? AND status IN ('Completed', 'Cancelled')`)
+        .all(quotationRef)
     : [];
 
   const existingRefunds = quotationRef
@@ -1102,6 +1270,11 @@ export function previewRefundRequest(db, payload) {
   }
 
   const suggestedAmountNgn = suggestedLines.reduce((sum, line) => sum + roundMoney(line.amountNgn), 0);
+  let remainingRefundableNgn = null;
+  if (quotationRef) {
+    const el = quotationMeetsRefundEligibility(db, quotationRef);
+    if (el.ok) remainingRefundableNgn = el.remainingNgn;
+  }
   return {
     ok: true,
     preview: {
@@ -1112,6 +1285,7 @@ export function previewRefundRequest(db, payload) {
       paidOnQuoteNgn,
       overpayAdvanceNgn,
       quotationCashInNgn,
+      remainingRefundableNgn,
       quotedMeters,
       actualMeters,
       pricePerMeterNgn: pricePerMeter ? Math.round(pricePerMeter) : null,
@@ -1126,7 +1300,116 @@ export function previewRefundRequest(db, payload) {
   };
 }
 
-/** Returns quotations with money at risk (paid in) and room left to refund. */
+function parseRefundReasonCategoryList(raw) {
+  if (raw == null || raw === '') return [];
+  try {
+    const v = JSON.parse(String(raw));
+    if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
+  } catch {
+    /* stored as plain text */
+  }
+  const s = String(raw).trim();
+  return s ? [s] : [];
+}
+
+function refundReasonCategoriesIncludeOrderCancellation(reasonCategoryField) {
+  return parseRefundReasonCategoryList(reasonCategoryField).some(
+    (c) => String(c).trim().toLowerCase() === 'order cancellation'
+  );
+}
+
+/**
+ * Any non-rejected refund whose categories include “Order cancellation”.
+ * Production must not proceed while this is on file (prevents produce-after-cancel).
+ */
+export function quotationHasNonRejectedOrderCancellationRefund(db, quotationRef) {
+  const ref = String(quotationRef ?? '').trim();
+  if (!ref) return false;
+  const rows = db
+    .prepare(
+      `SELECT reason_category FROM customer_refunds
+       WHERE quotation_ref = ?
+         AND TRIM(COALESCE(LOWER(status), '')) != 'rejected'`
+    )
+    .all(ref);
+  return rows.some((r) => refundReasonCategoriesIncludeOrderCancellation(r.reason_category));
+}
+
+/** True when any production row for the quote is not in a terminal state (Completed / Cancelled). */
+function quotationHasOpenProductionJob(db, quotationRef) {
+  const ref = String(quotationRef ?? '').trim();
+  if (!ref) return null;
+  return db
+    .prepare(
+      `SELECT job_id,
+              CASE WHEN TRIM(COALESCE(status, '')) = '' THEN 'Planned' ELSE TRIM(status) END AS st
+       FROM production_jobs
+       WHERE quotation_ref = ?
+         AND LOWER(
+           CASE WHEN TRIM(COALESCE(status, '')) = '' THEN 'planned' ELSE TRIM(LOWER(status)) END
+         ) NOT IN ('completed', 'cancelled')
+       LIMIT 1`
+    )
+    .get(ref);
+}
+
+/**
+ * Single-quotation checks aligned with {@link getEligibleRefundQuotations} listing rules, plus
+ * remaining headroom: paid_ngn minus non-rejected refund totals.
+ */
+export function quotationMeetsRefundEligibility(db, quotationRef) {
+  const ref = String(quotationRef ?? '').trim();
+  if (!ref) return { ok: false, error: 'Quotation reference is required.' };
+  const q = db.prepare(`SELECT id, paid_ngn, status FROM quotations WHERE id = ?`).get(ref);
+  if (!q) return { ok: false, error: 'Quotation not found.' };
+  const paidNgn = roundMoney(q.paid_ngn);
+  if (paidNgn <= 0) {
+    return { ok: false, error: 'This quotation has no recorded payment toward a refund.' };
+  }
+  const sumRow = db
+    .prepare(
+      `SELECT COALESCE(SUM(amount_ngn), 0) AS s FROM customer_refunds
+       WHERE quotation_ref = ? AND status != 'Rejected'`
+    )
+    .get(ref);
+  const totalRefundedNgn = roundMoney(sumRow?.s ?? 0);
+  const remainingNgn = roundMoney(paidNgn - totalRefundedNgn);
+  if (remainingNgn <= 0) {
+    return {
+      ok: false,
+      error: 'Refundable balance on this quotation is fully covered by existing refund requests.',
+    };
+  }
+  const isVoid = String(q.status || '').trim().toLowerCase() === 'void';
+  const openJob = quotationHasOpenProductionJob(db, ref);
+  if (openJob) {
+    return {
+      ok: false,
+      error: `Finish or cancel production job ${openJob.job_id} (${openJob.st}) before requesting a refund.`,
+    };
+  }
+  const hadClosedProduction = db
+    .prepare(
+      `SELECT 1 FROM production_jobs
+       WHERE quotation_ref = ? AND LOWER(TRIM(COALESCE(status, ''))) IN ('completed', 'cancelled')
+       LIMIT 1`
+    )
+    .get(ref);
+  if (!hadClosedProduction && !isVoid) {
+    return {
+      ok: false,
+      error:
+        'Refund requests are only allowed after production is completed or cancelled, or for a paid void quotation.',
+    };
+  }
+  return { ok: true, paidNgn, totalRefundedNgn, remainingNgn };
+}
+
+/**
+ * Returns quotations with money at risk (paid in), room left to refund, and production closed out:
+ * at least one job in `Completed` or `Cancelled`, or a paid `Void` quotation (sales-side cancellation).
+ * Logic mirrors {@link quotationMeetsRefundEligibility} per row.
+ */
 export function getEligibleRefundQuotations(db) {
   const sql = `
     SELECT q.*,
@@ -1140,6 +1423,21 @@ export function getEligibleRefundQuotations(db) {
         SELECT SUM(amount_ngn) FROM customer_refunds
         WHERE quotation_ref = q.id AND status != 'Rejected'
       ), 0) < q.paid_ngn
+      AND NOT EXISTS (
+        SELECT 1 FROM production_jobs j2
+        WHERE j2.quotation_ref = q.id
+          AND LOWER(
+            CASE WHEN TRIM(COALESCE(j2.status, '')) = '' THEN 'planned' ELSE TRIM(LOWER(j2.status)) END
+          ) NOT IN ('completed', 'cancelled')
+      )
+      AND (
+        EXISTS (
+          SELECT 1 FROM production_jobs j
+          WHERE j.quotation_ref = q.id
+            AND LOWER(TRIM(COALESCE(j.status, ''))) IN ('completed', 'cancelled')
+        )
+        OR TRIM(COALESCE(q.status, '')) = 'Void'
+      )
     ORDER BY q.date_iso DESC
   `;
   return db.prepare(sql).all();

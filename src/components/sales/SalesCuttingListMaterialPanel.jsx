@@ -5,11 +5,11 @@ import { Factory, CheckCircle2, AlertTriangle } from 'lucide-react';
  * Sidebar on Sales → Cutting list: waiting lists whose linked quote coil spec matches in-stock coil.
  * @param {{
  *   ready: Array<{ cl: object; matches: object[]; totalKg: number; totalEstM: number; needM: number; meterCoverageOk: boolean }>;
- *   waitingWithSpecNoStock: number;
+ *   waitingNoMatch?: Array<{ cl: object; alertText: string }>;
  *   onOpenCuttingList: (cl: object) => void;
  * }} props
  */
-export default function SalesCuttingListMaterialPanel({ ready, waitingWithSpecNoStock, onOpenCuttingList }) {
+export default function SalesCuttingListMaterialPanel({ ready, waitingNoMatch = [], onOpenCuttingList }) {
   return (
     <section className="rounded-xl border border-slate-200/90 bg-white shadow-sm overflow-hidden">
       <div className="h-1 bg-sky-600" aria-hidden />
@@ -19,20 +19,43 @@ export default function SalesCuttingListMaterialPanel({ ready, waitingWithSpecNo
           Material vs waiting lists
         </p>
         <p className="text-[11px] text-slate-500 mt-1 leading-snug">
-          Waiting lists with a material spec on the linked quote and at least one in-stock coil line that matches gauge /
-          colour / material (same check as Operations).
+          Waiting lists whose quote expects coil stock and has a spec that matches at least one{' '}
+          <strong className="font-semibold text-slate-600">available</strong> coil lot (weight still on hand, not consumed)
+          or yard register line — same gauge / colour / material check as Operations. Book-only SKU totals are not used
+          here.
         </p>
 
-        {ready.length === 0 ? (
-          <div className="mt-4 rounded-lg border border-dashed border-slate-200 bg-slate-50/70 p-3">
-            <p className="text-[11px] font-semibold text-slate-600">No matching stock alerts</p>
-            <p className="text-[10px] text-slate-500 mt-1 leading-snug">
-              {waitingWithSpecNoStock > 0
-                ? `${waitingWithSpecNoStock} waiting list(s) have a spec on the quote but no matching coil in the current inventory view.`
-                : 'Add gauge / colour / material on quotations, or ensure cutting lists are linked to quotes with specs.'}
+        {waitingNoMatch.length > 0 ? (
+          <div className="mt-4 space-y-2">
+            <p className="text-[9px] font-bold uppercase tracking-widest text-amber-900/90">
+              No matching coil
             </p>
+            <ul className="max-h-[min(220px,36vh)] overflow-y-auto custom-scrollbar space-y-2 pr-0.5">
+              {waitingNoMatch.map(({ cl, alertText }) => (
+                <li key={cl.id}>
+                  <button
+                    type="button"
+                    onClick={() => onOpenCuttingList(cl)}
+                    className="w-full text-left rounded-lg border border-amber-200/90 bg-amber-50/90 hover:bg-amber-50 px-2.5 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/25"
+                  >
+                    <div className="flex gap-2 min-w-0">
+                      <AlertTriangle
+                        size={14}
+                        className="shrink-0 text-amber-600 mt-0.5"
+                        strokeWidth={2}
+                        aria-hidden
+                      />
+                      <p className="text-[10px] text-amber-950 leading-snug min-w-0">{alertText}</p>
+                    </div>
+                    <p className="text-[9px] text-amber-800/80 mt-1 pl-[22px] truncate">{cl.customer}</p>
+                  </button>
+                </li>
+              ))}
+            </ul>
           </div>
-        ) : (
+        ) : null}
+
+        {ready.length > 0 ? (
           <div className="mt-4 space-y-3">
             <div className="rounded-lg border border-emerald-200 bg-emerald-50/80 p-3">
               <p className="text-xs font-bold text-emerald-900 flex items-center gap-1.5">
@@ -79,12 +102,16 @@ export default function SalesCuttingListMaterialPanel({ ready, waitingWithSpecNo
               ))}
             </ul>
           </div>
-        )}
+        ) : null}
 
-        {ready.length > 0 && waitingWithSpecNoStock > 0 ? (
-          <p className="text-[9px] text-slate-400 mt-3 leading-snug">
-            {waitingWithSpecNoStock} other waiting list(s) have a quote spec but no matching coil in inventory.
-          </p>
+        {ready.length === 0 && waitingNoMatch.length === 0 ? (
+          <div className="mt-4 rounded-lg border border-dashed border-slate-200 bg-slate-50/70 p-3">
+            <p className="text-[11px] font-semibold text-slate-600">Nothing to flag here</p>
+            <p className="text-[10px] text-slate-500 mt-1 leading-snug">
+              No waiting lists with a comparable coil spec on the linked quote, or stock already lines up. Add gauge /
+              colour / material on quotations, or link lists to quotes that include those fields.
+            </p>
+          </div>
         ) : null}
       </div>
     </section>

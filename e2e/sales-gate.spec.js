@@ -105,7 +105,7 @@ test.describe('Sales gate (auth → customer → receipt)', () => {
     await page.reload();
     await expect(page).toHaveURL(/\/sales$/);
     await page.getByRole('tab', { name: 'Receipts' }).click();
-    await page.getByPlaceholder(/search id, customer, date/i).fill(String(receiptId));
+    await page.getByPlaceholder(/search receipt id, customer, quotation, date/i).fill(String(receiptId));
     await expect(page.getByText(String(receiptId), { exact: true }).first()).toBeVisible({ timeout: 15_000 });
   });
 });

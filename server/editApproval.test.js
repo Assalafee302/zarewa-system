@@ -15,19 +15,6 @@ afterAll(() => {
   }
 });
 
-async function acceptAllRequiredPolicies(client) {
-  const reqs = await client.get('/api/hr/policy-requirements');
-  if (reqs.status !== 200) return;
-  for (const p of reqs.body.missing || []) {
-    await client.post('/api/hr/policy-acknowledgements').send({
-      policyKey: p.key,
-      policyVersion: p.version,
-      signatureName: 'Test',
-      context: { channel: 'editApproval.test' },
-    });
-  }
-}
-
 describe('Edit approval (second-party token)', () => {
   it('blocks procurement_officer PO status PATCH without token; approves and consumes single-use token', async () => {
     const db = createDatabase(':memory:');
@@ -60,7 +47,6 @@ describe('Edit approval (second-party token)', () => {
     const proc = request.agent(app);
     res = await proc.post('/api/session/login').send({ username: 'procurement', password: 'Procure@123' });
     expect(res.status).toBe(200);
-    await acceptAllRequiredPolicies(proc);
 
     const denied = await proc
       .patch(`/api/purchase-orders/${encodeURIComponent(poId)}/status`)

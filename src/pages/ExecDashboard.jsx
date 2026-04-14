@@ -73,7 +73,7 @@ export default function ExecDashboard() {
             </ul>
           </section>
 
-          <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {[
               ['Customers', c.customersTotal],
               ['Quotations', c.quotationsTotal],
@@ -100,7 +100,7 @@ export default function ExecDashboard() {
 
           <section className="rounded-2xl border border-amber-200/80 bg-amber-50/40 p-6">
             <h2 className="text-sm font-black uppercase tracking-wider text-amber-950">Queues</h2>
-            <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <div>
                 <p className="text-[10px] font-bold uppercase text-amber-900/70">Pending refunds</p>
                 <p className="text-2xl font-black text-amber-950">{data.pendingRefunds ?? 0}</p>
@@ -122,7 +122,7 @@ export default function ExecDashboard() {
 
           <section className="rounded-2xl border border-teal-200/80 bg-teal-50/30 p-6">
             <h2 className="text-sm font-black uppercase tracking-wider text-[#134e4a]">Production rollup</h2>
-            <dl className="mt-4 grid gap-3 sm:grid-cols-2 text-sm">
+            <dl className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 text-sm">
               <div>
                 <dt className="text-[10px] font-bold uppercase text-slate-500">Jobs</dt>
                 <dd className="font-black text-slate-900">{pm.jobCount ?? '—'}</dd>

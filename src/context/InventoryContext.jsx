@@ -63,8 +63,11 @@ function normalizePurchaseOrder(po, catalog = []) {
     transportAgentName: po.transportAgentName ?? '',
     transportReference: po.transportReference ?? '',
     transportNote: po.transportNote ?? '',
+    transportFinanceAdvice: po.transportFinanceAdvice ?? '',
     transportTreasuryMovementId: po.transportTreasuryMovementId ?? '',
     transportAmountNgn: Number(po.transportAmountNgn) || 0,
+    transportAdvanceNgn: Number(po.transportAdvanceNgn) || 0,
+    transportPaidNgn: Number(po.transportPaidNgn) || 0,
     transportPaid: Boolean(po.transportPaid),
     transportPaidAtISO: po.transportPaidAtISO ?? '',
     supplierPaidNgn: Number(po.supplierPaidNgn) || 0,
@@ -87,7 +90,9 @@ export function InventoryProvider({ children }) {
   const [purchaseOrders, setPurchaseOrders] = useState([]);
   const [movements, setMovements] = useState([]);
   const [coilLots, setCoilLots] = useState([]);
+  const [coilControlEvents, setCoilControlEvents] = useState([]);
   const [wipByProduct, setWipByProduct] = useState({});
+  const [inTransitLoads, setInTransitLoads] = useState([]);
 
    
   useEffect(() => {
@@ -97,7 +102,9 @@ export function InventoryProvider({ children }) {
       setPurchaseOrders([]);
       setMovements([]);
       setCoilLots([]);
+      setCoilControlEvents([]);
       setWipByProduct({});
+      setInTransitLoads([]);
       return;
     }
     if (Array.isArray(s.products)) {
@@ -109,6 +116,11 @@ export function InventoryProvider({ children }) {
     }
     if (Array.isArray(s.movements)) {
       setMovements(s.movements.map((m) => ({ ...m })));
+    }
+    if (Array.isArray(s.coilControlEvents)) {
+      setCoilControlEvents(s.coilControlEvents.map((e) => ({ ...e })));
+    } else {
+      setCoilControlEvents([]);
     }
     if (Array.isArray(s.coilLots)) {
       setCoilLots(
@@ -139,6 +151,9 @@ export function InventoryProvider({ children }) {
     }
     if (s.wipByProduct && typeof s.wipByProduct === 'object') {
       setWipByProduct({ ...s.wipByProduct });
+    }
+    if (Array.isArray(s.inTransitLoads)) {
+      setInTransitLoads(s.inTransitLoads.map((load) => ({ ...load, lines: Array.isArray(load.lines) ? load.lines.map((line) => ({ ...line })) : [] })));
     }
   }, [ws?.snapshot]);
    
@@ -356,7 +371,21 @@ export function InventoryProvider({ children }) {
   const linkTransportToPurchaseOrder = useCallback(
     async (
       poID,
-      { transportAgentId, transportAgentName, transportReference, transportNote, editApprovalId } = {}
+      {
+        transportAgentId,
+        transportAgentName,
+        transportReference,
+        transportNote,
+        transportFinanceAdvice,
+        transportAmountNgn,
+        transportAdvanceNgn,
+        treasuryAccountId,
+        dateISO,
+        postedAtISO,
+        note,
+        createdBy,
+        editApprovalId,
+      } = {}
     ) => {
       if (ws?.canMutate) {
         const { ok, data } = await apiFetch(
@@ -368,6 +397,14 @@ export function InventoryProvider({ children }) {
               transportAgentName,
               transportReference,
               transportNote,
+              transportFinanceAdvice,
+              transportAmountNgn,
+              transportAdvanceNgn,
+              treasuryAccountId,
+              dateISO,
+              postedAtISO,
+              note,
+              createdBy,
               ...(editApprovalId ? { editApprovalId: String(editApprovalId).trim() } : {}),
             }),
           }
@@ -379,18 +416,29 @@ export function InventoryProvider({ children }) {
         return { ok: true };
       }
       setPurchaseOrders((prev) =>
-        prev.map((p) =>
-          p.poID === poID && p.status === 'Approved'
-            ? {
-                ...p,
-                transportAgentId: transportAgentId ?? '',
-                transportAgentName: transportAgentName ?? '',
-                transportReference: transportReference ?? '',
-                transportNote: transportNote ?? '',
-                status: 'On loading',
-              }
-            : p
-        )
+        prev.map((p) => {
+          if (p.poID !== poID || !['Approved', 'On loading'].includes(p.status)) return p;
+          const amt = transportAmountNgn != null && transportAmountNgn !== '' ? Number(transportAmountNgn) : 0;
+          const adv =
+            transportAdvanceNgn != null && transportAdvanceNgn !== ''
+              ? Number(transportAdvanceNgn)
+              : amt > 0
+                ? amt
+                : 0;
+          const hasTreasury = Number(treasuryAccountId) > 0 && amt > 0;
+          return {
+            ...p,
+            transportAgentId: transportAgentId ?? '',
+            transportAgentName: transportAgentName ?? '',
+            transportReference: transportReference ?? '',
+            transportNote: transportNote ?? '',
+            transportFinanceAdvice: transportFinanceAdvice ?? '',
+            transportAmountNgn: Number.isFinite(amt) && amt > 0 ? amt : p.transportAmountNgn,
+            transportAdvanceNgn: Number.isFinite(adv) && adv > 0 ? adv : p.transportAdvanceNgn,
+            transportPaid: hasTreasury ? true : p.transportPaid,
+            status: hasTreasury ? 'In Transit' : 'On loading',
+          };
+        })
       );
       appendMovement({
         type: 'PO_TRANSPORT_LINK',
@@ -418,6 +466,10 @@ export function InventoryProvider({ children }) {
         await ws.refresh();
         return { ok: true };
       }
+      const hasTreasury = Number(body.treasuryAccountId) > 0 && Number(body.amountNgn) > 0;
+      if (!hasTreasury) {
+        return { ok: false, error: 'Treasury payment is required.' };
+      }
       setPurchaseOrders((prev) =>
         prev.map((p) =>
           p.poID === poID && p.status === 'On loading'
@@ -440,42 +492,6 @@ export function InventoryProvider({ children }) {
         )
       );
       appendMovement({ type: 'PO_TRANSPORT_POSTED', ref: poID, detail: 'In transit' });
-      return { ok: true };
-    },
-    [appendMovement, ws]
-  );
-
-  const markPurchaseTransportPaid = useCallback(
-    async (poID, { editApprovalId } = {}) => {
-      if (ws?.canMutate) {
-        const { ok, data } = await apiFetch(
-          `/api/purchase-orders/${encodeURIComponent(poID)}/transport-paid`,
-          {
-            method: 'PATCH',
-            body: JSON.stringify({
-              ...(editApprovalId ? { editApprovalId: String(editApprovalId).trim() } : {}),
-            }),
-          }
-        );
-        if (!ok || !data?.ok) {
-          return { ok: false, error: data?.error || 'Could not mark transport paid.' };
-        }
-        await ws.refresh();
-        return { ok: true };
-      }
-      setPurchaseOrders((prev) =>
-        prev.map((p) =>
-          p.poID === poID && ['On loading', 'In Transit'].includes(p.status)
-            ? {
-                ...p,
-                transportPaid: true,
-                transportPaidAtISO: new Date().toISOString(),
-                status: 'In Transit',
-              }
-            : p
-        )
-      );
-      appendMovement({ type: 'PO_TRANSPORT_PAID', ref: poID, detail: 'In transit' });
       return { ok: true };
     },
     [appendMovement, ws]
@@ -551,49 +567,6 @@ export function InventoryProvider({ children }) {
     [appendMovement, ws]
   );
 
-  const attachSupplierInvoice = useCallback(
-    async (poID, { invoiceNo, invoiceDateISO, deliveryDateISO, editApprovalId } = {}) => {
-      if (ws?.canMutate) {
-        const { ok, data } = await apiFetch(
-          `/api/purchase-orders/${encodeURIComponent(poID)}/invoice`,
-          {
-            method: 'PATCH',
-            body: JSON.stringify({
-              invoiceNo,
-              invoiceDateISO,
-              deliveryDateISO,
-              ...(editApprovalId ? { editApprovalId: String(editApprovalId).trim() } : {}),
-            }),
-          }
-        );
-        if (!ok || !data?.ok) {
-          return { ok: false, error: data?.error || 'Could not save invoice.' };
-        }
-        await ws.refresh();
-        return { ok: true };
-      }
-      setPurchaseOrders((prev) =>
-        prev.map((p) =>
-          p.poID === poID
-            ? {
-                ...p,
-                invoiceNo: invoiceNo?.trim() ?? '',
-                invoiceDateISO: invoiceDateISO ?? '',
-                deliveryDateISO: deliveryDateISO ?? '',
-              }
-            : p
-        )
-      );
-      appendMovement({
-        type: 'SUPPLIER_INVOICE',
-        ref: poID,
-        detail: invoiceNo?.trim() || '—',
-      });
-      return { ok: true };
-    },
-    [appendMovement, ws]
-  );
-
   const confirmStoreReceipt = useCallback(
     async (poID, entries, { supplierID: sid, supplierName: sname } = {}, opts = {}) => {
       const po = purchaseOrders.find((p) => p.poID === poID);
@@ -616,14 +589,6 @@ export function InventoryProvider({ children }) {
             error: e.lineKey
               ? `Line ${e.lineKey} not on this PO.`
               : `Product ${e.productID} not on this PO.`,
-          };
-        }
-        const remaining = line.qtyOrdered - line.qtyReceived;
-        const unitLabel = products.find((x) => x.productID === line.productID)?.unit ?? '';
-        if (qty > remaining) {
-          return {
-            ok: false,
-            error: `Qty exceeds remaining for ${line.productName} (max ${remaining} ${unitLabel}).`,
           };
         }
       }
@@ -931,18 +896,18 @@ export function InventoryProvider({ children }) {
     () => ({
       products,
       purchaseOrders,
+      inTransitLoads,
       movements,
       coilLots,
+      coilControlEvents,
       wipByProduct,
       getProduct,
       createPurchaseOrder,
       updatePurchaseOrder,
       setPurchaseOrderStatus,
-      attachSupplierInvoice,
       confirmStoreReceipt,
       linkTransportToPurchaseOrder,
       postPurchaseOrderTransport,
-      markPurchaseTransportPaid,
       recordPurchaseSupplierPayment,
       adjustStock,
       transferToProduction,
@@ -951,18 +916,18 @@ export function InventoryProvider({ children }) {
     [
       products,
       purchaseOrders,
+      inTransitLoads,
       movements,
       coilLots,
+      coilControlEvents,
       wipByProduct,
       getProduct,
       createPurchaseOrder,
       updatePurchaseOrder,
       setPurchaseOrderStatus,
-      attachSupplierInvoice,
       confirmStoreReceipt,
       linkTransportToPurchaseOrder,
       postPurchaseOrderTransport,
-      markPurchaseTransportPaid,
       recordPurchaseSupplierPayment,
       adjustStock,
       transferToProduction,

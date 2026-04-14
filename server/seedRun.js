@@ -109,7 +109,7 @@ export function seedEverything(db) {
   const supCount = db.prepare('SELECT COUNT(*) AS c FROM suppliers').get().c;
   if (supCount === 0) {
     const insS = db.prepare(
-      `INSERT INTO suppliers (supplier_id, name, city, payment_terms, quality_score, notes, branch_id) VALUES (?,?,?,?,?,?,?)`
+      `INSERT INTO suppliers (supplier_id, name, city, payment_terms, quality_score, notes, branch_id, supplier_profile_json) VALUES (?,?,?,?,?,?,?,?)`
     );
     const insA = db.prepare(
       `INSERT INTO transport_agents (id, name, region, phone, branch_id) VALUES (?,?,?,?,?)`
@@ -184,7 +184,7 @@ export function seedEverything(db) {
 
     db.transaction(() => {
       for (const s of SUPPLIERS_SEED) {
-        insS.run(s.supplierID, s.name, s.city, s.paymentTerms, s.qualityScore, s.notes, DEFAULT_BRANCH_ID);
+        insS.run(s.supplierID, s.name, s.city, s.paymentTerms, s.qualityScore, s.notes, DEFAULT_BRANCH_ID, null);
       }
       for (const a of TRANSPORT_AGENTS_SEED) {
         insA.run(a.id, a.name, a.region, a.phone, DEFAULT_BRANCH_ID);

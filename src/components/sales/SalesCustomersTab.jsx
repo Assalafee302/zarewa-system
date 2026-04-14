@@ -1,6 +1,11 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { X, UserCircle, TrendingUp, Ruler, Moon, Trash2 } from 'lucide-react';
+import {
+  SalesListTableFrame,
+  SalesListSearchInput,
+  SalesListSortBar,
+} from './SalesListTableFrame';
 import { ModalFrame } from '../layout';
 import { useCustomers } from '../../context/CustomersContext';
 import { useToast } from '../../context/ToastContext';
@@ -80,10 +85,19 @@ function lastTouchISO(customerID, quotations, receipts, cuttingLists) {
 
 /**
  * Customers workspace embedded in Sales (Customers tab).
- * @param {{ searchQuery: string; addOpen: boolean; onAddClose: () => void; createdByLabel?: string; quotations?: object[]; receipts?: object[]; cuttingLists?: object[] }} props
+ * @param {{ searchQuery: string; onSearchChange: (q: string) => void; addOpen: boolean; onAddClose: () => void; createdByLabel?: string; quotations?: object[]; receipts?: object[]; cuttingLists?: object[] }} props
  */
+const CUSTOMER_SORT_FIELDS = [
+  { id: 'name', label: 'Name' },
+  { id: 'customerID', label: 'Customer ID' },
+  { id: 'tier', label: 'Tier' },
+  { id: 'phoneNumber', label: 'Phone' },
+  { id: 'revenue', label: 'Total revenue' },
+];
+
 export default function SalesCustomersTab({
   searchQuery,
+  onSearchChange = () => {},
   addOpen,
   onAddClose,
   createdByLabel = 'Sales',
@@ -102,6 +116,10 @@ export default function SalesCustomersTab({
   const canDeleteCustomer = Boolean(ws?.hasPermission?.('sales.manage') && ws?.canMutate);
   const [form, setForm] = useState(emptyForm);
   const [deleteBusy, setDeleteBusy] = useState(false);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery]);
 
   const handleDeleteCustomer = async (c) => {
     if (!window.confirm(`Delete ${c.name} (${c.customerID})? This cannot be undone.`)) return;
@@ -128,10 +146,22 @@ export default function SalesCustomersTab({
 
   const sortedAndFiltered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    let list = q ? customers.filter(c => {
-      const blob = [c.customerID, c.name, c.phoneNumber, c.email, c.tier].join(' ').toLowerCase();
-      return blob.includes(q);
-    }) : [...customers];
+    let list = q
+      ? customers.filter((c) => {
+          const blob = [
+            c.customerID,
+            c.name,
+            c.phoneNumber,
+            c.email,
+            c.tier,
+            c.paymentTerms,
+            c.addressShipping,
+          ]
+            .join(' ')
+            .toLowerCase();
+          return blob.includes(q);
+        })
+      : [...customers];
 
     list.sort((a, b) => {
       let valA, valB;
@@ -274,49 +304,40 @@ export default function SalesCustomersTab({
             </div>
           </div>
 
-          <div className="rounded-xl border border-dashed border-slate-200 p-4 bg-slate-50/50">
-             <p className="text-[10px] font-medium text-slate-500 leading-relaxed text-center italic">
-               Sorting & pagination are applied to the filtered results. Use the header to change order.
-             </p>
-          </div>
         </aside>
 
         {/* Main Customer List on Right */}
         <div className="min-w-0 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3 px-1">
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Sort by:</span>
-                <select 
-                  value={sortField} 
-                  onChange={(e) => setSortField(e.target.value)}
-                  className="bg-transparent text-[11px] font-black text-[#134e4a] focus:outline-none"
-                >
-                  <option value="name">Name</option>
-                  <option value="customerID">ID</option>
-                  <option value="revenue">Total Revenue</option>
-                </select>
+          <SalesListTableFrame
+            toolbar={
+              <>
+                <SalesListSearchInput
+                  value={searchQuery}
+                  onChange={onSearchChange}
+                  placeholder="Search name, phone, ID, tier, address…"
+                />
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <SalesListSortBar
+                    fields={CUSTOMER_SORT_FIELDS}
+                    field={sortField}
+                    dir={sortOrder}
+                    onFieldChange={setSortField}
+                    onDirToggle={() => setSortOrder((o) => (o === 'asc' ? 'desc' : 'asc'))}
+                  />
+                  <p className="text-[11px] font-bold text-slate-400 tabular-nums shrink-0">
+                    Showing {paginated.length} of {sortedAndFiltered.length}
+                  </p>
+                </div>
+              </>
+            }
+          >
+            {paginated.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/50 py-14 px-6 text-center">
+                <UserCircle size={40} className="mx-auto text-slate-200 mb-3" strokeWidth={1.5} />
+                <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">No matching customers</p>
               </div>
-              <button 
-                onClick={() => setSortOrder(o => o === 'asc' ? 'desc' : 'asc')}
-                className="text-[10px] font-black text-teal-600 uppercase tracking-widest"
-              >
-                {sortOrder === 'asc' ? 'Ascending' : 'Descending'}
-              </button>
-            </div>
-            
-            <p className="text-[11px] font-bold text-slate-400 tabular-nums">
-              Showing {paginated.length} of {sortedAndFiltered.length} customers
-            </p>
-          </div>
-
-          {paginated.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50/50 py-14 px-6 text-center">
-              <UserCircle size={40} className="mx-auto text-slate-200 mb-3" strokeWidth={1.5} />
-              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">No matching customers</p>
-            </div>
-          ) : (
-            <ul className="space-y-1.5">
+            ) : (
+              <ul className="space-y-1.5">
               {paginated.map((c) => {
                 const rev = customerRevenue.get(c.customerID) || 0;
                 const meta2 = [c.phoneNumber || 'No phone', c.email || 'No email'].join(' · ');
@@ -369,24 +390,33 @@ export default function SalesCustomersTab({
                   </li>
                 );
               })}
-            </ul>
-          )}
+              </ul>
+            )}
 
-          {totalPages > 1 && (
-            <div className="flex items-center justify-center gap-2 pt-2">
-               <button 
-                 disabled={currentPage === 1}
-                 onClick={() => setCurrentPage(p => p - 1)}
-                 className="px-3 py-1 rounded-lg border border-slate-200 text-[10px] font-black uppercase text-[#134e4a] disabled:opacity-30"
-               >Prev</button>
-               <span className="text-[11px] font-black text-[#134e4a] tabular-nums mx-2">Page {currentPage} of {totalPages}</span>
-               <button 
-                 disabled={currentPage === totalPages}
-                 onClick={() => setCurrentPage(p => p + 1)}
-                 className="px-3 py-1 rounded-lg border border-slate-200 text-[10px] font-black uppercase text-[#134e4a] disabled:opacity-30"
-               >Next</button>
-            </div>
-          )}
+            {totalPages > 1 && (
+              <div className="flex items-center justify-center gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={currentPage === 1}
+                  onClick={() => setCurrentPage((p) => p - 1)}
+                  className="px-3 py-1 rounded-lg border border-slate-200 text-[10px] font-black uppercase text-[#134e4a] disabled:opacity-30"
+                >
+                  Prev
+                </button>
+                <span className="text-[11px] font-black text-[#134e4a] tabular-nums mx-2">
+                  Page {currentPage} of {totalPages}
+                </span>
+                <button
+                  type="button"
+                  disabled={currentPage === totalPages}
+                  onClick={() => setCurrentPage((p) => p + 1)}
+                  className="px-3 py-1 rounded-lg border border-slate-200 text-[10px] font-black uppercase text-[#134e4a] disabled:opacity-30"
+                >
+                  Next
+                </button>
+              </div>
+            )}
+          </SalesListTableFrame>
         </div>
       </div>
 
@@ -403,7 +433,7 @@ export default function SalesCustomersTab({
                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Full Name *</label>
                <input required value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className="w-full bg-slate-50 border border-slate-100 rounded-xl py-3 px-4 text-sm font-bold text-[#134e4a] outline-none focus:ring-2 focus:ring-teal-500/10" />
              </div>
-             <div className="grid grid-cols-2 gap-4">
+             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                <div className="space-y-1">
                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Phone *</label>
                  <input required value={form.phoneNumber} onChange={e => setForm(f => ({ ...f, phoneNumber: e.target.value }))} className="w-full bg-slate-50 border border-slate-100 rounded-xl py-3 px-4 text-sm font-bold text-[#134e4a] outline-none focus:ring-2 focus:ring-teal-500/10" />

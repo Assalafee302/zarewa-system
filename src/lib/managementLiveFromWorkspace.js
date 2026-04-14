@@ -3,8 +3,8 @@
  * so the Manager page updates as soon as Sales / Operations data refreshes (no stale API-only lists).
  */
 
-import { DEFAULT_MANAGER_TARGETS_PER_MONTH } from './dashboardPrefs';
-import { productionAttributedRevenueNgn, productionOutputDateISO } from './liveAnalytics';
+import { DEFAULT_MANAGER_TARGETS_PER_MONTH } from './dashboardPrefs.js';
+import { productionAttributedRevenueNgn, productionOutputDateISO } from './liveAnalytics.js';
 
 /** @typedef {'month' | '4months' | 'half' | 'year'} ManagerMetricPeriodKey */
 
@@ -67,6 +67,7 @@ export function buildManagementQueuesFromSnapshot(snapshot) {
       paid_ngn: Number(q.paidNgn) || 0,
       date_iso: q.dateISO,
       status: q.status,
+      branch_id: q.branchId || '',
     }))
     .sort((a, b) => String(b.date_iso || '').localeCompare(String(a.date_iso || '')));
 
@@ -78,6 +79,7 @@ export function buildManagementQueuesFromSnapshot(snapshot) {
       total_ngn: Number(q.totalNgn) || 0,
       manager_flag_reason: q.managerFlagReason || '',
       manager_flagged_at_iso: q.managerFlaggedAtISO,
+      branch_id: q.branchId || '',
     }))
     .sort((a, b) =>
       String(b.manager_flagged_at_iso || '').localeCompare(String(a.manager_flagged_at_iso || ''))
@@ -104,6 +106,7 @@ export function buildManagementQueuesFromSnapshot(snapshot) {
         total_meters: cl.totalMeters,
         paid_ngn: Number(q.paidNgn) || 0,
         total_ngn: Number(q.totalNgn) || 0,
+        branch_id: cl.branchId || q.branchId || '',
       };
     });
 
@@ -116,6 +119,7 @@ export function buildManagementQueuesFromSnapshot(snapshot) {
       amount_ngn: r.amountNgn,
       requested_at_iso: r.requestedAtISO,
       reason_category: r.reasonCategory,
+      branch_id: r.branchId || '',
     }));
 
   const pendingExpenses = paymentRequests
@@ -132,6 +136,7 @@ export function buildManagementQueuesFromSnapshot(snapshot) {
       attachment_present: Boolean(pr.attachmentPresent),
       attachment_name: pr.attachmentName ?? '',
       expense_category: pr.expenseCategory ?? '',
+      branch_id: pr.branchId || '',
     }));
 
   const pendingConversionReviews = productionJobs
@@ -154,6 +159,7 @@ export function buildManagementQueuesFromSnapshot(snapshot) {
       actual_meters: j.actualMeters,
       actual_weight_kg: j.actualWeightKg,
       completed_at_iso: j.completedAtISO,
+      branch_id: j.branchId || '',
     }))
     .sort((a, b) =>
       String(b.completed_at_iso || '').localeCompare(String(a.completed_at_iso || ''))

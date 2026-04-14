@@ -30,16 +30,16 @@ export function PageHeader({ eyebrow, title, subtitle, tabs, toolbar, actions })
                 {eyebrow}
               </p>
             ) : null}
-            <h1 className="sr-only">{a11yTitle}</h1>
+            <h1 className="z-page-title">{a11yTitle}</h1>
             {subtitle ? (
-              <p className="text-xs text-slate-500 font-medium leading-relaxed max-w-2xl mt-1">
+              <p className="z-page-subtitle">
                 {subtitle}
               </p>
             ) : null}
           </div>
         </div>
         {tabs ? (
-          <div className="shrink-0 w-full sm:w-auto flex justify-start sm:justify-end min-w-0">
+          <div className="flex w-full min-w-0 shrink-0 justify-start sm:w-auto sm:justify-end">
             {tabs}
           </div>
         ) : null}

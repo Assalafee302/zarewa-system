@@ -171,6 +171,15 @@ async function createProductionJob(agent, payload) {
   return res.body;
 }
 
+/** Cancel a planned job so POST /api/refunds eligibility (Completed or Cancelled) is satisfied. */
+async function cancelPlannedJobForRefundEligibility(agent, jobID) {
+  const res = await agent.post(`/api/production-jobs/${encodeURIComponent(jobID)}/cancel`).send({
+    reason: 'Scenario — close production for refund eligibility',
+  });
+  expect(res.status).toBe(200);
+  expect(res.body.ok).toBe(true);
+}
+
 async function createExpense(agent, payload) {
   const res = await agent.post('/api/expenses').send(payload);
   expect(res.status).toBe(201);
@@ -515,6 +524,14 @@ function buildScenarioMatrix() {
         lines: buildExactLengths(19, 1900),
       });
       expect(cutting.cuttingList.totalMeters).toBe(1900);
+      const jobScn6 = await createProductionJob(agent, {
+        cuttingListId: cutting.id,
+        productID: fgProduct.productID,
+        productName: fgProduct.name,
+        plannedMeters: 100,
+        plannedSheets: 10,
+      });
+      await cancelPlannedJobForRefundEligibility(agent, jobScn6.jobID);
       const refund = await createRefund(agent, {
         customerID,
         customer: 'Major Project Client',
@@ -775,11 +792,44 @@ function buildScenarioMatrix() {
       run: async () => {
         const { agent } = await createSession();
         const accounts = await ensureTreasuryAccounts(agent, 1, `RF${i + 1}`);
+        const snap = await bootstrap(agent);
+        const fgProduct = snap.products.find((p) => p.productID === 'FG-101') || snap.products[0];
         const customerID = await createCustomer(agent, `RF${i + 1}`, `Refund Customer ${i + 1}`);
+        const quote = await createQuotation(agent, customerID, `RF${i + 1}`, {
+          products: [{ name: 'Roofing Sheet', qty: '1', unitPrice: String(amount) }],
+          accessories: [],
+          services: [],
+        });
+        await postReceipt(agent, {
+          customerID,
+          quotationId: quote.quotationId,
+          amountNgn: amount,
+          paymentMethod: 'Cash',
+          dateISO: '2026-03-29',
+          paymentLines: [{ treasuryAccountId: accounts[0].id, amountNgn: amount, reference: `RF-RCPT-${i + 1}` }],
+        });
+        const clRf = await createCuttingList(agent, {
+          quotationRef: quote.quotationId,
+          customerID,
+          productID: fgProduct.productID,
+          productName: fgProduct.name,
+          dateISO: '2026-03-29',
+          machineName: 'RF matrix',
+          operatorName: 'QA',
+          lines: [{ sheets: 1, lengthM: 5 }],
+        });
+        const pjRf = await createProductionJob(agent, {
+          cuttingListId: clRf.id,
+          productID: fgProduct.productID,
+          productName: fgProduct.name,
+          plannedMeters: 5,
+          plannedSheets: 1,
+        });
+        await cancelPlannedJobForRefundEligibility(agent, pjRf.jobID);
         const refund = await createRefund(agent, {
           customerID,
           customer: `Refund Customer ${i + 1}`,
-          quotationRef: `QT-RF-${i + 1}`,
+          quotationRef: quote.quotationId,
           reasonCategory: 'Adjustment',
           reason: `Scenario refund ${i + 1}`,
           amountNgn: amount,
@@ -1326,11 +1376,44 @@ function buildScenarioMatrix() {
     run: async () => {
       const { agent } = await createSession();
       const accounts = await ensureTreasuryAccounts(agent, 2, 'VAL05');
+      const snap = await bootstrap(agent);
+      const fg = snap.products.find((p) => p.productID === 'FG-101') || snap.products[0];
       const customerID = await createCustomer(agent, 'VAL05', 'Val Customer 05');
+      const quote = await createQuotation(agent, customerID, 'VAL05', {
+        products: [{ name: 'Roofing Sheet', qty: '1', unitPrice: '450000' }],
+        accessories: [],
+        services: [],
+      });
+      await postReceipt(agent, {
+        customerID,
+        quotationId: quote.quotationId,
+        amountNgn: 450_000,
+        paymentMethod: 'Transfer',
+        dateISO: '2026-03-29',
+        paymentLines: [{ treasuryAccountId: accounts[0].id, amountNgn: 450_000, reference: 'VAL05-PAY' }],
+      });
+      const clV5 = await createCuttingList(agent, {
+        quotationRef: quote.quotationId,
+        customerID,
+        productID: fg.productID,
+        productName: fg.name,
+        dateISO: '2026-03-29',
+        machineName: 'M1',
+        operatorName: 'QA',
+        lines: [{ sheets: 1, lengthM: 5 }],
+      });
+      const pjV5 = await createProductionJob(agent, {
+        cuttingListId: clV5.id,
+        productID: fg.productID,
+        productName: fg.name,
+        plannedMeters: 5,
+        plannedSheets: 1,
+      });
+      await cancelPlannedJobForRefundEligibility(agent, pjV5.jobID);
       const refund = await createRefund(agent, {
         customerID,
         customer: 'Val Customer 05',
-        quotationRef: 'QT-VAL05-NEW',
+        quotationRef: quote.quotationId,
         reasonCategory: 'Adjustment',
         reason: 'Staged refund scenario',
         amountNgn: 450_000,

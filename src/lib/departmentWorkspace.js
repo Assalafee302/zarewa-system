@@ -1,4 +1,4 @@
-import { canAccessModuleWithPermissions } from './moduleAccess';
+import { canAccessModuleWithPermissions } from './moduleAccess.js';
 
 /** Mirror of server `WORKSPACE_DEPARTMENT_IDS` for offline / stale bootstrap. */
 export const WORKSPACE_DEPARTMENT_IDS = [
@@ -20,7 +20,7 @@ export const WORKSPACE_DEPARTMENT_LABELS = {
   inventory: 'Store & inventory',
   production: 'Production floor',
   purchase: 'Purchase & procurement',
-  finance: 'Finance & accounting',
+  finance: 'Finance',
   reports: 'Reports & analytics',
   it: 'IT & platform',
 };
@@ -54,16 +54,15 @@ export function defaultHomePathForDepartment(deptId) {
 export function pathToModuleKey(pathname) {
   const p = String(pathname || '').replace(/\/$/, '') || '/';
   if (p === '/') return null;
+  if (p === '/office' || p.startsWith('/office/')) return 'office';
   if (p === '/manager') return 'sales';
   if (p === '/edit-approvals') return 'edit_approvals';
   if (p === '/sales' || p.startsWith('/customers')) return 'sales';
   if (p === '/procurement' || p.startsWith('/procurement/')) return 'procurement';
-  if (p === '/operations' || p === '/deliveries') return 'operations';
+  if (p === '/operations') return 'operations';
   if (p === '/accounts') return 'finance';
-  if (p === '/accounting' || p.startsWith('/accounting/')) return 'finance';
   if (p === '/reports') return 'reports';
   if (p === '/settings' || p.startsWith('/settings/')) return 'settings';
-  if (p === '/hr' || p.startsWith('/hr/') || p === '/hr-next' || p.startsWith('/hr-next/')) return 'hr';
   return null;
 }
 
@@ -146,13 +145,9 @@ export const WORKSPACE_GUIDE_ENTRIES = [
     bullets: [
       'Reception: Store GRN with coil / weight / location; validates against PO open qty.',
       'Movement: store → production transfers and finished-goods back to sellable stock.',
-      'Deliveries: dispatch board under Production → Deliveries tab.',
       'Reporting: low stock strip, live levels in Reports.',
     ],
-    links: [
-      { to: '/operations', label: 'Production' },
-      { to: '/operations', label: 'Deliveries (Production tab)', state: { focusOpsTab: 'deliveries' } },
-    ],
+    links: [{ to: '/operations', label: 'Production' }],
   },
   {
     id: 'production',
@@ -175,22 +170,19 @@ export const WORKSPACE_GUIDE_ENTRIES = [
     bullets: [
       'Suppliers: directory and transport agents (Purchases / Transportation tabs).',
       'Purchase orders: multi-line POs, totals, Pending → Approved / Rejected; assign transport (on loading), then post to in transit (optional treasury-linked haulage) before GRN.',
-      'Invoices: supplier invoice metadata on PO; quantities finalized at store receipt.',
-      'Spend: tie-in to Finance payables for procurement cost views.',
+      'Quantities finalized at store receipt (GRN).',
+      'Supplier payables and payments: Procurement → Payments tab (same module as POs).',
     ],
-    links: [
-      { to: '/procurement', label: 'Purchase' },
-      { to: '/accounts', label: 'Finance (payables)' },
-    ],
+    links: [{ to: '/procurement', label: 'Procurement' }],
   },
   {
     id: 'finance',
-    title: 'Financial / accounting',
+    title: 'Finance',
     primary:
       'Liquidity, AR/AP, expenses, approvals, movements, audit and bank reconciliation.',
     bullets: [
       'Receivables: summary from Finance sidebar; detail in Sales receipts / customer dashboards.',
-      'Payables: supplier balances and payments from bank/cash.',
+      'Supplier AP: procurement posts payments on Payments; Finance focuses on treasury, AR, expenses, recon.',
       'Expenses & requests: vouchers and approval workflow.',
       'Control: reconciliation lines, audit checklist, reporting exports (stubs).',
     ],

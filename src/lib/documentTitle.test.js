@@ -17,15 +17,13 @@ describe('documentTitleForPath', () => {
     expect(documentTitleForPath('/sales/')).toBe(documentTitleForPath('/sales'));
   });
 
-  it('orders HR staff routes correctly', () => {
-    expect(documentTitleForPath('/hr/staff/directory-quality')).toContain('Directory data quality');
-    expect(documentTitleForPath('/hr/staff/USR-1')).toContain('Staff profile');
-    expect(documentTitleForPath('/hr/staff')).toContain('Staff');
+  it('treats legacy /deliveries like production workspace', () => {
+    expect(documentTitleForPath('/deliveries')).toContain('Store & production');
   });
 
-  it('maps accounting sub-routes', () => {
-    expect(documentTitleForPath('/accounting/ledger')).toContain('General ledger');
-    expect(documentTitleForPath('/accounting')).toContain('Overview');
+  it('uses page-not-found title for removed HR / accounting paths', () => {
+    expect(documentTitleForPath('/hr/staff')).toMatch(/page not found/i);
+    expect(documentTitleForPath('/accounting/ledger')).toMatch(/page not found/i);
   });
 
   it('maps settings sections', () => {

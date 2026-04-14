@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { signInViaApi, csrfHeader } from './helpers/auth';
+import { signInViaApi } from './helpers/auth';
 
 test.describe.configure({ timeout: 90_000 });
 
@@ -17,12 +17,6 @@ test.describe('Role-based access (API + UI)', () => {
     expect(sumJson.ok).toBe(true);
     expect(sumJson.counts).toBeTruthy();
     expect(typeof sumJson.counts.customersTotal).toBe('number');
-  });
-
-  test('viewer: employment letters API forbidden', async ({ page }) => {
-    await signInViaApi(page, 'viewer', 'Viewer@123456!');
-    const res = await page.request.get('/api/hr/employment-letters');
-    expect(res.status()).toBe(403);
   });
 
   test('viewer: Reports shows count-only overview', async ({ page }) => {
@@ -101,7 +95,7 @@ test.describe('Role-based access (API + UI)', () => {
     await signInViaApi(page, 'md', 'Md@1234567890!');
     await page.goto('/');
     await expect(page).toHaveURL(/\/manager$/, { timeout: 20_000 });
-    await expect(page.getByRole('button', { name: /mark attendance/i })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('button', { name: /stock note/i })).toBeVisible({ timeout: 15_000 });
   });
 
   test('branch manager: refunds list readable (approval lane)', async ({ page }) => {
@@ -113,34 +107,4 @@ test.describe('Role-based access (API + UI)', () => {
     expect(Array.isArray(body.refunds)).toBe(true);
   });
 
-  test('sales officer: cannot confirm deliveries (operations-only)', async ({ page }) => {
-    await signInViaApi(page, 'sales.staff', 'Sales@123');
-    const headers = await csrfHeader(page);
-    const patch = await page.request.patch('/api/deliveries/DL-E2E-NONEXIST/confirm', {
-      data: { status: 'Delivered' },
-      headers,
-    });
-    expect(patch.status()).toBe(403);
-  });
-
-  test('HR: cannot lock payroll run without MD approval', async ({ page }) => {
-    await signInViaApi(page, 'hr.manager', 'HrManager@12345!');
-    const headers = await csrfHeader(page);
-    const period = String(209900 + Math.floor(Math.random() * 99)).padStart(6, '0');
-    const create = await page.request.post('/api/hr/payroll-runs', {
-      data: { periodYyyymm: period },
-      headers,
-    });
-    expect(create.status(), await create.text()).toBe(201);
-    const body = await create.json();
-    const id = body.id;
-    expect(String(id || '')).toMatch(/^HRP-/);
-    const lock = await page.request.patch(`/api/hr/payroll-runs/${encodeURIComponent(id)}`, {
-      data: { status: 'locked' },
-      headers,
-    });
-    expect(lock.status()).toBe(400);
-    const lockJson = await lock.json();
-    expect(String(lockJson.error || '').toLowerCase()).toMatch(/managing director|approval/i);
-  });
 });

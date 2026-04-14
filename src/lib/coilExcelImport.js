@@ -20,6 +20,55 @@ function strish(v) {
   return String(v).trim();
 }
 
+/** Normalise colour/gauge for auto-generated coil tags (stable per sheet row). */
+function coilSlug(s) {
+  const t = strish(s)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '')
+    .slice(0, 14);
+  return t || 'na';
+}
+
+/**
+ * Map free-text material to stock product_id (coil SKUs). Empty if unknown — caller should error.
+ * @param {string} raw
+ */
+export function materialTextToProductId(raw) {
+  const t = strish(raw);
+  if (!t) return '';
+  const u = t.toUpperCase();
+  if (/^PRD-\d+$/i.test(t)) return u;
+  if (/^COIL-[A-Z0-9_-]+$/i.test(t)) return u;
+  const low = t.toLowerCase();
+  if (/\baluzinc\b|\bppgi\b|\bgalvan/i.test(low) || /\bzinc\b.*\bcoil\b/i.test(low)) return 'PRD-102';
+  if (/\balumin/i.test(low) || /\balu\b/i.test(low) || /\baluminium\b/i.test(low)) return 'COIL-ALU';
+  return '';
+}
+
+/**
+ * When the sheet has no coil tag, derive a stable id from Excel row + colour + gauge (re-import same layout upserts).
+ */
+function generatedStockCoilNo(excelRow, colour, gaugeLabel) {
+  return `STK-L${excelRow}-${coilSlug(colour)}-${coilSlug(gaugeLabel)}`;
+}
+
+/**
+ * Fill productID from Material column and/or coilNo when omitted (simple register uploads).
+ * @param {ReturnType<typeof rowToPayload>} pr
+ */
+function finalizeCoilImportPayload(pr, excelRow) {
+  const out = { ...pr };
+  const matHint = strish(out.materialTypeName || '');
+  if (!strish(out.productID)) {
+    const pid = materialTextToProductId(matHint);
+    if (pid) out.productID = pid;
+  }
+  if (!strish(out.coilNo)) {
+    out.coilNo = generatedStockCoilNo(excelRow, out.colour, out.gaugeLabel);
+  }
+  return out;
+}
+
 /** @type {Record<string, string[]>} */
 const COL_ALIASES = {
   coilNo: ['coil no', 'coil_no', 'coil number', 'coil', 'coil id', 'tag', 'coil tag'],
@@ -48,7 +97,14 @@ const COL_ALIASES = {
   currentStatus: ['status', 'current status', 'current_status'],
   parentCoilNo: ['parent coil no', 'parent_coil_no', 'parent coil'],
   note: ['note', 'notes', 'comment', 'remarks'],
-  materialTypeName: ['material type', 'material_type', 'material'],
+  materialTypeName: [
+    'material',
+    'mat',
+    'metal',
+    'stock material',
+    'material type',
+    'material_type',
+  ],
   supplierExpectedMeters: ['supplier expected meters', 'expected meters', 'meters'],
   supplierConversionKgPerM: ['supplier conversion kg per m', 'conversion kg/m', 'kg per m'],
 };
@@ -74,10 +130,12 @@ function resolveCell(row, aliases) {
 function rowToPayload(row) {
   const coilNo = strish(resolveCell(row, COL_ALIASES.coilNo));
   const productID = strish(resolveCell(row, COL_ALIASES.productID));
-  if (!coilNo && !productID && resolveCell(row, COL_ALIASES.currentKg) === '') {
+  const currentKgRaw = resolveCell(row, COL_ALIASES.currentKg);
+  const materialHint = strish(resolveCell(row, COL_ALIASES.materialTypeName));
+  const kgEmpty = currentKgRaw === '' || currentKgRaw == null;
+  if (!coilNo && !productID && !materialHint && kgEmpty) {
     return { skip: true };
   }
-  const currentKgRaw = resolveCell(row, COL_ALIASES.currentKg);
   const currentKg = numish(currentKgRaw);
   return {
     skip: false,
@@ -113,9 +171,12 @@ function looksLikeBrokenHeaderKeys(keys) {
       k === 'coil no' ||
       k === 'product id' ||
       k === 'current kg' ||
+      k === 'kg' ||
+      k === 'material' ||
       k.includes('coil no') ||
       k.includes('product id') ||
-      k.includes('current kg')
+      k.includes('current kg') ||
+      k.includes('material')
   );
   if (hasRealHeader) return false;
   const numericKeyCount = keys.filter((k) => /^\d+([.,]\d+)?$/.test(String(k).trim())).length;
@@ -157,6 +218,7 @@ function findHeaderRowIndex(aoa) {
     const hasProd = cells.some((c) => c === 'product id' || c === 'product_id' || c === 'sku');
     const hasKg = cells.some(
       (c) =>
+        c === 'kg' ||
         c === 'current kg' ||
         c === 'current_kg' ||
         c === 'qty remaining' ||
@@ -164,7 +226,19 @@ function findHeaderRowIndex(aoa) {
         c === 'balance kg' ||
         c === 'on hand kg'
     );
-    if (hasCoil && hasProd && hasKg) return r;
+    const hasMaterial = cells.some(
+      (c) =>
+        c === 'material' ||
+        c === 'mat' ||
+        c === 'metal' ||
+        c === 'stock material' ||
+        c === 'material type' ||
+        c === 'material_type' ||
+        (c.includes('material') && !c.includes('origin') && !c.includes('note'))
+    );
+    const legacy = hasCoil && hasProd && hasKg;
+    const simple = hasKg && (hasMaterial || hasProd);
+    if (legacy || simple) return r;
   }
   return -1;
 }
@@ -272,6 +346,7 @@ function mappedRowToPayload(row, colMap) {
   set('currentStatus', ['Status']);
   set('parentCoilNo', ['Parent coil no']);
   set('note', ['Note']);
+  set('materialTypeName', ['Material']);
   return rowToPayload(fake);
 }
 
@@ -286,28 +361,32 @@ function parseRowsFromMatrix(aoa, fileErrors) {
       const field = headerFieldForCell(header[c]);
       if (field && colMap[field] === undefined) colMap[field] = c;
     }
-    if (colMap.coilNo === undefined || colMap.productID === undefined || colMap.currentKg === undefined) {
+    const legacy =
+      colMap.coilNo !== undefined && colMap.productID !== undefined && colMap.currentKg !== undefined;
+    const simple =
+      colMap.currentKg !== undefined &&
+      (colMap.materialTypeName !== undefined || colMap.productID !== undefined);
+    if (!legacy && !simple) {
       fileErrors.push(
-        'Header row is incomplete: need columns Coil no, Product ID, and Current kg (check spelling).'
+        'Header row: add a kg column (Kg or Current kg) plus either Material (and optional Colour, Gauge, Coil no) or Coil no + Product ID. Supplier and other columns are optional.'
       );
       return rows;
     }
     for (let r = hi + 1; r < aoa.length; r++) {
       const line = aoa[r];
       if (!Array.isArray(line) || !line.some((c) => strish(c) !== '')) continue;
-      const pr = mappedRowToPayload(line, colMap);
+      const pr0 = mappedRowToPayload(line, colMap);
       const excelRow = r + 1;
-      if (pr.skip) continue;
-      if (!pr.coilNo) {
-        fileErrors.push(`Row ${excelRow}: missing coil number.`);
-        continue;
-      }
-      if (!pr.productID) {
-        fileErrors.push(`Row ${excelRow}: missing product ID.`);
+      if (pr0.skip) continue;
+      const pr = finalizeCoilImportPayload(pr0, excelRow);
+      if (!strish(pr.productID)) {
+        fileErrors.push(
+          `Row ${excelRow}: add Product ID (e.g. COIL-ALU, PRD-102) or Material (e.g. Aluminium, Aluzinc).`
+        );
         continue;
       }
       if (pr.currentKg == null || !Number.isFinite(pr.currentKg)) {
-        fileErrors.push(`Row ${excelRow}: missing or invalid current kg.`);
+        fileErrors.push(`Row ${excelRow}: missing or invalid kg.`);
         continue;
       }
       rows.push(payloadToImportRow(pr));
@@ -318,7 +397,7 @@ function parseRowsFromMatrix(aoa, fileErrors) {
   const det = autoDetectCoreColumns(aoa);
   if (!det) {
     fileErrors.push(
-      'Could not read columns. Add row 1 with: Coil no, Product ID, Current kg (use Procurement → Excel template), or use a sheet where each row has coil tag, product code (COIL-… / PRD-…), and current kg in separate columns.'
+      'Could not read columns. Use row 1 headers: Material + Kg (+ Colour, Gauge, optional Coil no), or Coil no + Product ID + Current kg, or a grid of coil tags with product codes and kg (see Store & production → Excel template).'
     );
     return rows;
   }
@@ -344,7 +423,7 @@ function parseRowsFromMatrix(aoa, fileErrors) {
   }
   if (!rows.length) {
     fileErrors.push(
-      'No valid data rows found after auto-detecting columns. Prefer downloading the Excel template and a header row with Coil no, Product ID, Current kg.'
+      'No valid data rows after auto-detect. Try a clear header row: Material, Kg, Colour, Gauge (optional Coil no), or the classic Coil no / Product ID / Current kg layout.'
     );
   }
   return rows;
@@ -383,19 +462,18 @@ function parseObjectJsonRows(json) {
   const rows = [];
   const fileErrors = [];
   for (let i = 0; i < json.length; i++) {
-    const r = rowToPayload(json[i]);
-    if (r.skip) continue;
+    const r0 = rowToPayload(json[i]);
+    if (r0.skip) continue;
     const excelRow = i + 2;
-    if (!r.coilNo) {
-      fileErrors.push(`Row ${excelRow}: missing coil number.`);
-      continue;
-    }
-    if (!r.productID) {
-      fileErrors.push(`Row ${excelRow}: missing product ID.`);
+    const r = finalizeCoilImportPayload(r0, excelRow);
+    if (!strish(r.productID)) {
+      fileErrors.push(
+        `Row ${excelRow}: add Product ID (e.g. COIL-ALU, PRD-102) or Material (e.g. Aluminium, Aluzinc).`
+      );
       continue;
     }
     if (r.currentKg == null || !Number.isFinite(r.currentKg)) {
-      fileErrors.push(`Row ${excelRow}: missing or invalid current kg.`);
+      fileErrors.push(`Row ${excelRow}: missing or invalid kg.`);
       continue;
     }
     rows.push(payloadToImportRow(r));
@@ -451,7 +529,7 @@ export function parseCoilImportWorkbookArrayBuffer(ab) {
           : [...fileErrors, ...matrixErrors].filter(Boolean);
       if (!fileErrors.length) {
         fileErrors = [
-          'No valid coil rows found. Row 1 should be titles: Coil no, Product ID, Current kg (download Excel template from Procurement).',
+          'No valid coil rows found. Row 1: Material, Kg, Colour, Gauge (optional Coil no), or Coil no + Product ID + Kg — download the Excel template from Store & production (Inventory → Coil).',
         ];
       }
     }
@@ -462,44 +540,9 @@ export function parseCoilImportWorkbookArrayBuffer(ab) {
 
 export function downloadCoilImportTemplate() {
   const aoa = [
-    [
-      'Coil no',
-      'Product ID',
-      'Colour',
-      'Gauge',
-      'Current kg',
-      'Qty reserved',
-      'Location',
-      'Supplier name',
-      'Supplier ID',
-      'Received date',
-      'Qty received',
-      'Weight kg',
-      'Unit cost NGN per kg',
-      'Landed cost NGN',
-      'Status',
-      'Parent coil no',
-      'Note',
-    ],
-    [
-      'CL-26-0001',
-      'COIL-ALU',
-      'Traffic white',
-      '0.45',
-      '1250',
-      '0',
-      'Main yard',
-      'Example Ltd',
-      '',
-      '2026-01-15',
-      '1250',
-      '',
-      '',
-      '',
-      'Available',
-      '',
-      'Opening balance',
-    ],
+    ['Material', 'Kg', 'Colour', 'Gauge', 'Coil no (optional)'],
+    ['Aluminium', '1250', 'Traffic white', '0.45', ''],
+    ['Aluzinc (PPGI)', '980', 'Traffic black', '0.24', 'CL-26-0001'],
   ];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   const wb = XLSX.utils.book_new();

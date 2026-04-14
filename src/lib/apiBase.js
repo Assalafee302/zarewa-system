@@ -40,7 +40,16 @@ export async function apiFetch(path, options = {}) {
   try {
     data = text ? JSON.parse(text) : null;
   } catch {
-    data = { ok: false, error: text || 'Invalid JSON' };
+    const htmlExpressMissingRoute =
+      /<pre>\s*Cannot\s+(POST|GET|PUT|PATCH|DELETE)\s+\//i.test(text || '') ||
+      (/Cannot\s+POST\s+\//i.test(text || '') && /<!DOCTYPE\s+html/i.test(text || ''));
+    data = {
+      ok: false,
+      code: 'NON_JSON_RESPONSE',
+      error: htmlExpressMissingRoute
+        ? 'API route not found (server returned an HTML 404). Use a current API build and restart it. With Vite, run the API on port 8787 (npm run server) so /api proxies correctly, or set VITE_API_BASE to your API origin. Production: redeploy and restart the Node server.'
+        : String(text || 'Invalid JSON').slice(0, 500),
+    };
   }
   return { ok: r.ok, status: r.status, data };
 }

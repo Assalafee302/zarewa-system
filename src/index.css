@@ -49,6 +49,19 @@ body {
   -webkit-tap-highlight-color: rgb(19 78 74 / 0.08);
 }
 
+#root {
+  min-width: 0;
+  min-height: 100dvh;
+}
+
+/* Use on wide tables / toolbars so small devices scroll instead of blowing out the page */
+.z-scroll-x {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
 /* Faster taps on controls; avoid breaking document scroll */
 button,
 [role='button'],
@@ -81,6 +94,27 @@ summary {
 
 .z-section-title {
   @apply text-xs font-bold text-zarewa-teal uppercase tracking-widest mb-4;
+}
+
+/* Program-wide readability standards (bank-grade baseline) */
+.z-page-title {
+  @apply text-lg sm:text-xl font-black tracking-tight text-slate-900 break-words;
+}
+
+.z-page-subtitle {
+  @apply mt-1 text-sm text-slate-600 leading-relaxed max-w-3xl break-words [overflow-wrap:anywhere];
+}
+
+.z-meta-text {
+  @apply text-xs text-slate-500 leading-relaxed;
+}
+
+.z-chip {
+  @apply inline-flex items-center rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide;
+}
+
+.z-list-row-compact {
+  @apply rounded-lg border border-slate-200/70 bg-white/70 px-3 py-2 shadow-sm transition-colors hover:bg-white;
 }
 
 .z-btn-primary {
@@ -187,6 +221,42 @@ summary {
   margin-left: auto;
   margin-right: auto;
   box-sizing: border-box;
+}
+
+/* Quotation modal preview only — keep terms to 2 lines on screen */
+@media screen {
+  .quotation-print-terms {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+}
+
+/* Fullscreen print preview layer — reliable scroll inside Radix dialog (RemoveScroll) */
+.print-portal-scroll {
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+}
+
+/*
+ * Modal print preview: match on-screen layout to printed output (no gray mat / card chrome).
+ * Printed styles still come from @media print + print: utilities.
+ */
+.quotation-print-preview-mode .quotation-print-a4 {
+  max-width: 210mm;
+  margin-left: auto;
+  margin-right: auto;
+  background-color: #fff !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+}
+
+.quotation-print-preview-mode .quotation-print-a4 > div.relative.overflow-hidden {
+  border-radius: 0 !important;
+  border: none !important;
+  box-shadow: none !important;
+  overflow: visible !important;
 }
 
 /* Unified data lists — same rhythm as Sales / Operations tables */
@@ -680,6 +750,412 @@ summary {
   min-height: 198mm;
 }
 
+/* Cutting list A4 landscape — left = factory pack, right = waybill */
+@page cutting-list-a4-landscape {
+  margin: 5mm 6mm;
+  size: A4 landscape;
+}
+
+.cutting-list-a4-landscape-report-root {
+  width: 100%;
+  max-width: 297mm;
+  margin-left: auto;
+  margin-right: auto;
+  box-sizing: border-box;
+  font-size: 6.35pt;
+  line-height: 1.18;
+  /* Paged media: lock to named page (see @page cutting-list-a4-landscape) */
+  page: cutting-list-a4-landscape;
+}
+
+.cutting-list-a4-landscape-sheet {
+  page: cutting-list-a4-landscape;
+  display: flex;
+  flex-direction: column;
+  min-height: 198mm;
+  gap: 1.25mm;
+  box-sizing: border-box;
+}
+
+.cutting-list-a4-landscape-sheet--break-after {
+  break-after: page;
+  page-break-after: always;
+}
+
+.cutting-list-a4-landscape-sheet--continuation {
+  min-height: 198mm;
+}
+
+.cl-a4-landscape-split {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.cl-a4-pane--cutting {
+  flex: 1 1 50%;
+  min-width: 0;
+  border-right: 1px solid var(--cl-border);
+  padding-right: 3mm;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.cl-a4-pane--waybill {
+  flex: 1 1 50%;
+  min-width: 0;
+  padding-left: 3mm;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.cl-factory-body--a4-landscape-left {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.cl-factory-subbar--double {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.15mm;
+  align-items: stretch;
+}
+
+.cl-factory-subbar--double .cl-factory-subbar-seg {
+  min-width: 0;
+}
+
+.cl-factory-continue--a4-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.cl-factory-continue--a4-pane .cl-factory-col-right--full {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cl-factory-banner--waybill-pane .cl-factory-logo-ring {
+  width: 7.5mm;
+  height: 7.5mm;
+}
+
+.cl-factory-banner--waybill-pane .cl-factory-logo-img {
+  width: 4.8mm;
+  height: 4.8mm;
+}
+
+.cl-factory-banner--waybill-pane .cl-factory-doc-title {
+  font-size: 8.25pt;
+}
+
+.cl-waybill-continuation-strip {
+  margin: 0;
+  padding: 0.55mm 1.65mm 0.85mm;
+  font-size: 5.35pt;
+  font-weight: 700;
+  line-height: 1.3;
+  color: #9a3412;
+  background: linear-gradient(90deg, #fff7ed 0%, #fff 100%);
+  border-top: 1px solid rgb(234 88 12 / 0.2);
+}
+
+.cl-waybill-banner--top {
+  flex-shrink: 0;
+}
+
+.cl-waybill-section--delivery-left {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0.85mm 1mm;
+}
+
+.cl-waybill-root {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+  height: 100%;
+}
+
+.cl-waybill-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25mm;
+  padding: 1.35mm !important;
+  margin-top: 0.5mm;
+}
+
+/* Waybill: banner → split: left = branches + delivery + cargo + transport + receipt; right = material check */
+.cl-waybill-mid-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: minmax(0, auto);
+  align-items: stretch;
+  min-height: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid var(--cl-border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.cl-waybill-col--addresses {
+  min-width: 0;
+  padding: 1.05mm 1.15mm 1.15mm;
+  border-right: 1px solid var(--cl-border);
+  display: flex;
+  flex-direction: column;
+  gap: 1mm;
+  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+}
+
+.cl-waybill-col--cuts {
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+}
+
+.cl-waybill-branches-block--compact {
+  flex: 0 0 auto;
+}
+
+.cl-waybill-branches-stack--compact-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0 1.15mm;
+  align-items: start;
+}
+
+.cl-waybill-branches-block--compact .cl-waybill-branch-card {
+  margin: 0;
+  min-width: 0;
+  padding: 0 0.65mm 0 0.75mm;
+  border-left: 1px solid var(--cl-border);
+}
+
+.cl-waybill-branches-block--compact .cl-waybill-branch-card:first-child {
+  padding-left: 0.85mm;
+  border-left: 2px solid var(--cl-teal-mid);
+}
+
+.cl-waybill-branches-block--compact .cl-waybill-branch-heading {
+  font-size: 4.85pt;
+}
+
+.cl-waybill-branches-block--compact .cl-waybill-branch-line {
+  font-size: 5.05pt;
+  line-height: 1.22;
+}
+
+/* Branches inside narrow left column: stack vertically (full-width row layout is too cramped here) */
+.cl-waybill-branches-in-left {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0 0 0.25mm;
+}
+
+.cl-waybill-branches-in-left .cl-waybill-branches-stack--compact-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.95mm;
+}
+
+.cl-waybill-branches-in-left .cl-waybill-branches-block--compact .cl-waybill-branch-card {
+  border-left: 2px solid var(--cl-teal-mid);
+  padding: 0 0.35mm 0 0.85mm;
+}
+
+.cl-waybill-branches-in-left .cl-waybill-branches-block--compact .cl-waybill-branch-card:first-child {
+  border-left: 2px solid var(--cl-teal-mid);
+  padding-left: 0.85mm;
+}
+
+.cl-waybill-branches-in-left .cl-waybill-branches-block--compact .cl-waybill-branch-heading {
+  font-size: 6.35pt;
+}
+
+.cl-waybill-branches-in-left .cl-waybill-branches-block--compact .cl-waybill-branch-line {
+  font-size: 6.15pt;
+  line-height: 1.32;
+}
+
+/* Right column: material check fills entire half */
+.cl-waybill-section--cuts-full-column {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 1.05mm 1.15mm 1.15mm;
+  border: none;
+  border-radius: 0;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  box-shadow: none;
+}
+
+.cl-waybill-section--cuts-full-column .cl-waybill-cut-tables {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: visible;
+}
+
+.cl-factory-panel--waybill {
+  border-color: rgb(19 78 74 / 0.18);
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.cl-waybill-section {
+  border-radius: 5px;
+  border: 1px solid var(--cl-border);
+  background: var(--cl-surface);
+  padding: 1.1mm 1.25mm;
+}
+
+.cl-waybill-section-title {
+  margin: 0 0 0.65mm;
+  font-size: 5.35pt;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--cl-teal);
+}
+
+.cl-waybill-section--branches {
+  padding: 0.85mm 1.1mm;
+  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+}
+
+.cl-waybill-branches-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85mm;
+}
+
+.cl-waybill-branch-card {
+  margin: 0;
+  padding: 0 0 0 1.15mm;
+  border-left: 2px solid var(--cl-teal-mid);
+}
+
+.cl-waybill-branch-heading {
+  margin: 0 0 0.15mm;
+  font-size: 5.15pt;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--cl-teal);
+}
+
+.cl-waybill-branch-line {
+  margin: 0;
+  font-size: 5.35pt;
+  font-weight: 600;
+  line-height: 1.28;
+  color: #334155;
+}
+
+.cl-waybill-section--cut-confirm {
+  padding: 0.9mm 1mm;
+}
+
+.cl-waybill-cut-tables .cl-factory-cut-block {
+  margin-bottom: 0.65mm;
+}
+
+.cl-waybill-cut-tables .cl-factory-cut-block:last-child {
+  margin-bottom: 0;
+}
+
+.cl-waybill-cut-tables .cl-factory-cut-title {
+  font-size: 5.35pt;
+}
+
+.cl-waybill-cut-tables .cl-factory-cut-th,
+.cl-waybill-cut-tables .cl-factory-cut-td {
+  padding: 0.2mm 0.4mm;
+  font-size: 5.5pt;
+}
+
+.cl-waybill-cut-tables .cl-factory-cut-empty {
+  font-size: 5.65pt;
+}
+
+.cl-waybill-address-text {
+  margin: 0 0 0.5mm;
+  font-size: 6pt;
+  font-weight: 600;
+  color: #0f172a;
+  line-height: 1.25;
+}
+
+.cl-waybill-write-gap {
+  margin-top: 0.45mm;
+}
+
+.cl-waybill-dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.35mm 1.25mm;
+  margin: 0;
+  font-size: 5.85pt;
+}
+
+.cl-waybill-dl dt {
+  margin: 0;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.055em;
+  font-size: 5.15pt;
+  color: var(--cl-text-muted);
+}
+
+.cl-waybill-dl dd {
+  margin: 0;
+  font-weight: 700;
+  color: #0f172a;
+  min-width: 0;
+}
+
+.cl-waybill-labeled-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 1mm;
+}
+
+.cl-waybill-sign-row {
+  display: flex;
+  gap: 2mm;
+  align-items: flex-end;
+}
+
+.cl-waybill-sign-cell {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.cl-waybill-sign-cell--date {
+  flex: 0 0 32%;
+}
+
+.cl-factory-sign-line--waybill {
+  min-height: 5.5mm;
+}
+
 .cl-a5-merge-top {
   border: 1px solid #cbd5e1;
   border-radius: 2px;
@@ -806,11 +1282,18 @@ summary {
   gap: 1.25mm;
 }
 
+.cutting-list-factory-root .cutting-list-a4-landscape-sheet {
+  display: flex;
+  flex-direction: column;
+  min-height: 198mm;
+  gap: 1.25mm;
+}
+
 .cl-factory-body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 1.75mm;
-  align-items: start;
+  align-items: stretch;
   flex: 1 1 auto;
   min-height: 0;
 }
@@ -818,6 +1301,36 @@ summary {
 /* Cutting lengths column first, slightly wider for numbers */
 .cl-factory-body--cut-first {
   grid-template-columns: 1.08fr 0.92fr;
+}
+
+/* A4 landscape left pane: equal columns — must follow .cl-factory-body--cut-first */
+.cl-factory-body--cut-first.cl-factory-body--a4-landscape-left {
+  grid-template-columns: 1fr 1fr;
+  gap: 1.35mm;
+}
+
+.cl-factory-col-commercial {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  align-self: stretch;
+}
+
+.cl-factory-commercial-filler {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.cl-factory-scratch-anchor {
+  margin-top: auto;
+  flex-shrink: 0;
+  padding-top: 1.25mm;
+}
+
+.cl-factory-scratch-anchor .cl-factory-scratch {
+  margin-top: 0;
 }
 
 .cl-factory-panel {
@@ -894,6 +1407,38 @@ summary {
   padding: 1.15mm 1.65mm 0.55mm;
 }
 
+.cl-factory-banner-inner--balanced {
+  display: grid;
+  grid-template-columns: minmax(8.5mm, auto) 1fr minmax(8.5mm, auto);
+  align-items: center;
+  gap: 1mm 1.25mm;
+}
+
+.cl-factory-banner-side {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.cl-factory-banner-side--spacer {
+  width: 8.5mm;
+  height: 8.5mm;
+  pointer-events: none;
+}
+
+.cl-factory-banner-titles--center {
+  text-align: center;
+  justify-self: center;
+  width: 100%;
+  max-width: 100%;
+}
+
+.cl-factory-banner-titles--center .cl-factory-legal-name,
+.cl-factory-banner-titles--center .cl-factory-doc-title {
+  text-align: center;
+}
+
 .cl-factory-banner-refline {
   display: flex;
   flex-wrap: wrap;
@@ -925,6 +1470,12 @@ summary {
 .cl-factory-ref-v {
   font-weight: 700;
   color: #0f172a;
+}
+
+.cl-factory-ref-v--id {
+  font-size: 8.35pt;
+  font-weight: 900;
+  letter-spacing: 0.02em;
 }
 
 .cl-factory-ref-sep {
@@ -1278,6 +1829,45 @@ summary {
   color: #475569;
 }
 
+.cl-factory-receipt-block {
+  break-inside: avoid;
+  page-break-inside: avoid;
+  margin-bottom: 0.65mm;
+}
+
+.cl-factory-receipt-block:last-child {
+  margin-bottom: 0;
+}
+
+.cl-factory-receipt-block .cl-factory-receipt-row {
+  margin-bottom: 0.35mm;
+}
+
+.cl-factory-receipt-splits {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 2.25mm;
+  font-size: 5.65pt;
+  line-height: 1.38;
+  color: #334155;
+}
+
+.cl-factory-receipt-split-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 2mm;
+  padding: 0.15mm 0;
+}
+
+.cl-factory-receipt-split-fallback {
+  margin: 0.25mm 0 0;
+  padding-left: 2.25mm;
+  font-size: 5.5pt;
+  font-style: italic;
+  color: var(--cl-text-muted);
+}
+
 /* Chips */
 .cl-factory-chips {
   display: flex;
@@ -1411,6 +2001,104 @@ summary {
   color: #334155;
 }
 
+.cl-factory-prepared-by-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35mm 0.75mm;
+  margin: 0 0 1.1mm;
+  padding: 1mm 1.5mm;
+  border-radius: 6px;
+  border: 1px solid rgb(19 78 74 / 0.18);
+  background: linear-gradient(90deg, var(--cl-mint) 0%, #ffffff 92%);
+}
+
+.cl-factory-prepared-by-top .cl-factory-created-by-k {
+  display: inline;
+  margin-bottom: 0;
+}
+
+.cl-factory-prepared-by-top .cl-factory-created-by-v {
+  display: inline;
+  font-size: 7pt;
+}
+
+.cl-factory-sheet-signfoot {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: flex-end;
+  gap: 2mm 2.5mm;
+  margin-top: 1.25mm;
+  padding: 1.35mm 0 0;
+  border-top: 1px solid var(--cl-border);
+}
+
+.cl-factory-sheet-signfoot--a4-cutting-pane {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.cl-factory-sheet-signfoot--a4-cutting-pane .cl-factory-sign-cell {
+  flex: 0 0 auto;
+  width: min(36mm, 50%);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.cl-factory-sheet-signfoot--a4-cutting-pane .cl-factory-sign-line {
+  width: 100%;
+}
+
+.cl-factory-sign-cell {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.cl-factory-sign-cell--narrow {
+  flex: 0 0 16mm;
+}
+
+.cl-factory-sign-line {
+  min-height: 7mm;
+  border-bottom: 1px solid #0f172a;
+  margin-bottom: 0.45mm;
+}
+
+.cl-factory-sign-label {
+  margin: 0;
+  font-size: 5.35pt;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--cl-text-muted);
+}
+
+.cl-factory-created-by {
+  flex: 0 1 auto;
+  margin-left: auto;
+  text-align: right;
+  min-width: 0;
+  max-width: 38%;
+}
+
+.cl-factory-created-by-k {
+  display: block;
+  font-size: 5.15pt;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--cl-text-muted);
+  margin-bottom: 0.35mm;
+}
+
+.cl-factory-created-by-v {
+  display: block;
+  font-size: 7.25pt;
+  font-weight: 900;
+  color: var(--cl-teal);
+  letter-spacing: 0.02em;
+}
+
 .cl-factory-page-foot {
   margin: 0.65mm 0 0;
   text-align: right;
@@ -1437,14 +2125,19 @@ summary {
     size: A5 portrait;
   }
 
+  @page cutting-list-a4-landscape {
+    margin: 5mm 6mm;
+    size: A4 landscape;
+  }
+
   @page receipt-a5-landscape {
     margin: 5mm 6mm;
     size: A5 landscape;
   }
 
-  /* Quotation / invoice / official receipt — fits printable area inside A4 margins */
+  /* Quotation / invoice / official receipt — slightly tighter margins so typical quotes fit one page */
   @page quotation-a4 {
-    margin: 12mm 14mm;
+    margin: 9mm 11mm;
     size: A4 portrait;
   }
 
@@ -1455,6 +2148,42 @@ summary {
 
   .no-print {
     display: none !important;
+  }
+
+  /* Avoid huge invisible layout from “ZP” watermark (was forcing many blank pages in print). */
+  .quotation-print-watermark {
+    display: none !important;
+  }
+
+  html,
+  body {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+
+  /*
+   * Print-preview portal: must NOT use `no-print` on ancestors of *-print-root.
+   * Otherwise display:none hides the document and the printout is blank.
+   * Reset fixed fullscreen layout so it does not create extra blank pages.
+   */
+  .print-portal-scroll {
+    position: static !important;
+    inset: unset !important;
+    top: unset !important;
+    left: unset !important;
+    right: unset !important;
+    bottom: unset !important;
+    width: 100% !important;
+    max-width: none !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    z-index: auto !important;
+    display: block !important;
   }
 
   body * {
@@ -1470,7 +2199,9 @@ summary {
   .cutting-list-print-root,
   .cutting-list-print-root *,
   .cutting-list-a5-report-root,
-  .cutting-list-a5-report-root * {
+  .cutting-list-a5-report-root *,
+  .cutting-list-a4-landscape-report-root,
+  .cutting-list-a4-landscape-report-root * {
     visibility: visible;
   }
 
@@ -1524,6 +2255,14 @@ summary {
     overflow: visible !important;
   }
 
+  /* Match on-screen preview-mode (flat sheet, no inner card chrome) when printing */
+  .quotation-print-root.quotation-print-preview-mode .quotation-print-a4 > div.relative {
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    overflow: visible !important;
+  }
+
   /* A5 cutting list pack — own width + named page size */
   .cutting-list-a5-report-root {
     position: absolute;
@@ -1538,6 +2277,35 @@ summary {
     box-sizing: border-box;
     z-index: auto !important;
     pointer-events: auto !important;
+  }
+
+  .print-cutting-list-a4-host {
+    width: 100% !important;
+    max-width: none !important;
+    padding-bottom: 0 !important;
+  }
+
+  .cutting-list-a4-landscape-report-root {
+    position: absolute;
+    left: 0;
+    top: 0;
+    right: 0;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    page: cutting-list-a4-landscape;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    border: none !important;
+    box-sizing: border-box !important;
+    z-index: auto !important;
+    pointer-events: auto !important;
+    overflow: visible !important;
+  }
+
+  html[data-print-cutting-list-a4] {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
 
   .cutting-list-factory-root,
@@ -1663,8 +2431,23 @@ summary {
     page-break-inside: avoid;
   }
 
-  /* Prefer signature block on one page; payment/terms may flow above it */
+  /* Full legal/terms text on paper (screen uses 2-line clamp in @media screen above) */
+  .quotation-print-terms {
+    display: block !important;
+    -webkit-line-clamp: unset !important;
+    overflow: visible !important;
+  }
+
+  /*
+   * Avoid a near-empty page 2: allow the signature row to break if needed rather than
+   * forcing the whole grid to the next page (still keep row lines intact via children).
+   */
   .quotation-print-signatures {
+    break-inside: auto;
+    page-break-inside: auto;
+  }
+
+  .quotation-print-signatures > div {
     break-inside: avoid;
     page-break-inside: avoid;
   }

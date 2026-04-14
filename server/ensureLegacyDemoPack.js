@@ -1,6 +1,7 @@
 import { CUSTOMERS_SEED, QUOTATIONS_SEED } from './seedData.js';
 import { SALES_RECEIPTS_SEED } from './seedExtra.js';
 import { LAGACY_CUTTING_LIST_SEED } from './lagacyCuttingListSeed.js';
+import { DEFAULT_BRANCH_ID } from './branches.js';
 
 const DEMO_CUSTOMER_ID = 'CUS-NDA';
 const DEMO_QUOTE_ID = 'QT-2026-027';
@@ -40,8 +41,8 @@ export function ensureLegacyDemoPack(db) {
       INSERT OR IGNORE INTO customers (
         customer_id, name, phone_number, email, address_shipping, address_billing,
         status, tier, payment_terms, created_by, created_at_iso, last_activity_iso,
-        company_name, lead_source, preferred_contact, follow_up_iso, crm_tags_json, crm_profile_notes
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        company_name, lead_source, preferred_contact, follow_up_iso, crm_tags_json, crm_profile_notes, branch_id
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `);
     const tagsJson = JSON.stringify(Array.isArray(customer.crmTags) ? customer.crmTags : []);
     inserted += insC.run(
@@ -62,7 +63,8 @@ export function ensureLegacyDemoPack(db) {
       customer.preferredContact ?? '',
       customer.followUpISO ?? '',
       tagsJson,
-      customer.crmProfileNotes ?? ''
+      customer.crmProfileNotes ?? '',
+      DEFAULT_BRANCH_ID
     ).changes;
   });
 
@@ -71,8 +73,8 @@ export function ensureLegacyDemoPack(db) {
       INSERT OR IGNORE INTO quotations (
         id, customer_id, customer_name, date_label, date_iso, due_date_iso,
         total_display, total_ngn, paid_ngn, payment_status, status, approval_date, customer_feedback, handled_by,
-        project_name, lines_json
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        project_name, lines_json, branch_id
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `);
     inserted += insQ.run(
       quotation.id,
@@ -90,15 +92,16 @@ export function ensureLegacyDemoPack(db) {
       quotation.customerFeedback,
       quotation.handledBy,
       quotation.projectName ?? null,
-      quotation.linesJson ?? null
+      quotation.linesJson ?? null,
+      DEFAULT_BRANCH_ID
     ).changes;
   });
 
   step('receipt', () => {
     const insR = db.prepare(`
       INSERT OR IGNORE INTO sales_receipts (
-        id, customer_id, customer_name, quotation_ref, date_label, date_iso, amount_display, amount_ngn, method, status, handled_by, ledger_entry_id
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        id, customer_id, customer_name, quotation_ref, date_label, date_iso, amount_display, amount_ngn, method, status, handled_by, ledger_entry_id, branch_id
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
     `);
     inserted += insR.run(
       receipt.id,
@@ -112,7 +115,8 @@ export function ensureLegacyDemoPack(db) {
       receipt.method,
       receipt.status,
       receipt.handledBy,
-      receipt.ledgerEntryId ?? null
+      receipt.ledgerEntryId ?? null,
+      DEFAULT_BRANCH_ID
     ).changes;
   });
 
@@ -121,8 +125,9 @@ export function ensureLegacyDemoPack(db) {
       INSERT OR IGNORE INTO cutting_lists (
         id, customer_id, customer_name, quotation_ref, product_id, product_name, date_label, date_iso,
         sheets_to_cut, total_meters, total_label, status, machine_name, operator_name,
-        production_registered, production_register_ref, handled_by
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        production_registered, production_register_ref, handled_by, branch_id,
+        production_release_pending, production_released_at_iso, production_released_by
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `);
     inserted += insCl.run(
       cutting.id,
@@ -141,7 +146,11 @@ export function ensureLegacyDemoPack(db) {
       cutting.operatorName ?? null,
       cutting.productionRegistered ? 1 : 0,
       cutting.productionRegisterRef || '',
-      cutting.handledBy
+      cutting.handledBy,
+      DEFAULT_BRANCH_ID,
+      0,
+      null,
+      null
     ).changes;
   });
 

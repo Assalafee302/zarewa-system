@@ -84,7 +84,8 @@ export function searchWorkspaceSnapshot(snapshot, rawQuery, hasPermission, limit
     }
     for (const s of snapshot.suppliers || []) {
       if (results.length >= limit) break;
-      const blob = `${s.supplierID} ${s.name || ''} ${s.city || ''}`.toLowerCase();
+      const p = s.supplierProfile || {};
+      const blob = `${s.supplierID} ${s.name || ''} ${s.city || ''} ${p.companyEmail || ''} ${p.phoneMain || ''}`.toLowerCase();
       if (blob.includes(q)) {
         push({
           kind: 'supplier',

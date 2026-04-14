@@ -2,14 +2,18 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { X, Plus, Trash2, ChevronDown, Save, UserPlus, Package } from 'lucide-react';
 import { ModalFrame } from '../layout/ModalFrame';
 import { ProcurementFormSection } from './ProcurementFormSection';
+import { formatNgn } from '../../Data/mockData';
 
 const inputClass =
-  'w-full bg-white border border-slate-200 rounded-lg py-2 px-3 text-xs font-semibold text-[#134e4a] outline-none focus:ring-2 focus:ring-[#134e4a]/15';
-/** Taller / roomier controls for coil line rows so values and option text stay readable. */
+  'w-full bg-white border border-slate-200 rounded-lg py-1.5 px-2.5 text-[11px] font-semibold text-[#134e4a] outline-none focus:ring-2 focus:ring-[#134e4a]/15 min-h-[2rem]';
+/** Coil line controls: compact single-row layout on desktop. */
 const lineFieldClass =
-  'w-full bg-white border border-slate-200 rounded-lg py-3 px-3.5 min-h-[3.25rem] text-sm font-semibold text-[#134e4a] outline-none focus:ring-2 focus:ring-[#134e4a]/15';
+  'w-full box-border min-w-0 max-w-full bg-white border border-slate-200 rounded-md py-0.5 px-1.5 min-h-[1.625rem] h-[1.625rem] text-[10px] font-semibold text-[#134e4a] outline-none focus:ring-2 focus:ring-[#134e4a]/15 leading-none';
+/** Label directly above its field (desktop + mobile) — avoids separate header column drift. */
+const lineLabelClass =
+  'text-[8px] font-semibold text-slate-500 uppercase tracking-wide leading-none block mb-0.5';
 const labelClass =
-  'text-[9px] font-semibold text-slate-400 uppercase tracking-wide ml-0.5 mb-1 block';
+  'text-[8px] font-semibold text-slate-400 uppercase tracking-wide ml-0.5 mb-0.5 block';
 
 /** Stock SKU for kg ledger: aluminium vs aluzinc only. Colour / gauge / coil # live on PO lines & coil lots. */
 const MATERIAL_OPTS = [
@@ -229,30 +233,49 @@ export default function CoilPurchaseOrderModal({
   };
 
   return (
-    <ModalFrame isOpen={isOpen} onClose={onClose}>
+    <ModalFrame
+      isOpen={isOpen}
+      onClose={onClose}
+      title={editPoId ? 'Edit coil purchase order' : 'New coil purchase order'}
+      description="Supplier coil purchase: material, colour, gauge, kg, metres, price per kg."
+    >
       <div className="z-modal-panel max-w-[min(100%,min(96vw,64rem))] w-full max-h-[min(92vh,900px)] flex flex-col mx-auto">
-        <div className="px-5 py-4 border-b border-slate-200 flex justify-between items-center bg-white shrink-0">
-          <div>
-            <h2 className="text-lg font-bold text-[#134e4a]">
-              {editPoId ? 'Edit coil purchase' : 'New coil purchase'}
-            </h2>
-            <p className="text-[9px] font-semibold text-slate-400 uppercase tracking-widest mt-0.5">
-              Material · colour · gauge · kg · metres · conversion · ₦/kg — coil # at GRN
-            </p>
+        <div className="px-5 py-4 border-b border-slate-200 flex justify-between items-center bg-white shrink-0 gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 bg-[#134e4a] rounded-xl flex items-center justify-center text-white font-bold text-sm shrink-0">
+              C
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-base font-bold text-[#134e4a] tracking-tight">
+                {editPoId ? 'Edit coil purchase' : 'New coil purchase'}
+              </h2>
+              <p className="text-[9px] font-semibold text-slate-400 uppercase tracking-widest mt-0.5">
+                Material · colour · gauge · kg · metres · conversion · ₦/kg — coil # at GRN
+              </p>
+              <p className="text-[9px] font-medium text-slate-500 mt-1 truncate">
+                {editPoId ? (
+                  <>
+                    <span className="font-mono font-semibold text-[#134e4a]">{editPoId}</span>
+                    <span className="text-slate-400"> · amending</span>
+                  </>
+                ) : (
+                  'New purchase order'
+                )}
+              </p>
+            </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-2.5 bg-slate-50 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded-xl"
+            className="p-2.5 bg-slate-50 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded-xl transition-colors shrink-0"
+            aria-label="Close"
           >
             <X size={20} />
           </button>
         </div>
 
-        <form
-          className="flex-1 overflow-y-auto p-5 custom-scrollbar flex flex-col gap-2 min-h-0"
-          onSubmit={handleSubmit}
-        >
+        <form className="flex flex-col flex-1 min-h-0" onSubmit={handleSubmit}>
+          <div className="flex-1 overflow-y-auto p-5 custom-scrollbar bg-white min-h-0 flex flex-col gap-6">
           <ProcurementFormSection
             letter="A"
             title="Supplier & order header"
@@ -324,7 +347,7 @@ export default function CoilPurchaseOrderModal({
               </button>
             }
           >
-            <p className="text-[10px] text-slate-500 mb-4 leading-relaxed">
+            <p className="text-[9px] text-slate-500 mb-2 leading-snug">
               Choose <strong>Aluminium</strong> or <strong>Aluzinc</strong> for stock (kg). Add colour (HMB, TB, …),
               gauge, ordered kg, reference metres, and price. <strong>kg/m</strong> = kg ÷ metres. Assign{' '}
               <strong>coil number</strong> and <strong>kg received</strong> when you post store receipt — that links
@@ -332,44 +355,24 @@ export default function CoilPurchaseOrderModal({
             </p>
 
             <div className="overflow-x-auto -mx-1 px-1 sm:mx-0 sm:px-0 [scrollbar-gutter:stable]">
-              {/* sm+ grid: 1 + 2 + 2 + 2 + 1+1+1+1 + 1 + 1 = 12; min width gives each column enough room for data */}
-              <div className="hidden sm:grid sm:grid-cols-12 gap-2 mb-2 min-w-[56rem] px-1 text-[9px] font-semibold text-slate-400 uppercase tracking-wider items-end">
-                <div className="col-span-1 text-center pb-2" aria-hidden />
-                <div className="col-span-2 min-w-0">Material</div>
-                <div className="col-span-2 min-w-0">Colour</div>
-                <div className="col-span-2 min-w-0">Gauge</div>
-                <div className="col-span-1 min-w-0">Kg</div>
-                <div className="col-span-1 min-w-0">Metres</div>
-                <div className="col-span-1 min-w-0">kg/m</div>
-                <div className="col-span-1 min-w-0">₦/kg</div>
-                <div className="col-span-1 min-w-0 text-right">Line ₦</div>
-                <div className="col-span-1 min-w-0" aria-hidden />
-              </div>
-
-              <div className="space-y-3 min-w-0">
+              <div className="space-y-2 min-w-0">
                 {lines.map((l, idx) => {
                   const conv = conversionForLine(l);
                   return (
                     <div
                       key={l.rowUid}
-                      className="grid grid-cols-1 gap-3 border border-slate-100 rounded-xl p-4 bg-white/90 w-full max-w-full sm:grid-cols-12 sm:gap-x-2 sm:gap-y-2 sm:items-end sm:min-w-[56rem]"
+                      className="grid w-full max-w-full grid-cols-1 gap-2 border border-slate-100 rounded-lg bg-white/90 p-2 sm:grid-cols-12 sm:items-end sm:gap-x-2 sm:gap-y-1"
                     >
-                      <div className="flex items-center gap-2 text-[10px] font-semibold text-slate-500 sm:hidden border-b border-slate-100 pb-2 -mt-0.5">
-                        <Package className="text-[#134e4a]/70 shrink-0" size={20} strokeWidth={1.75} />
+                      <div className="flex items-center gap-2 text-[9px] font-semibold text-slate-500 sm:hidden border-b border-slate-100 pb-1.5 -mt-0.5">
+                        <Package className="text-[#134e4a]/70 shrink-0" size={16} strokeWidth={1.75} />
                         <span>Coil line {idx + 1}</span>
                       </div>
-                      <div
-                        className="hidden sm:flex sm:col-span-1 items-center justify-center sm:pb-2 min-w-0"
-                        title={`Coil line ${idx + 1}`}
-                      >
-                        <Package className="text-[#134e4a]/70 shrink-0" size={22} strokeWidth={1.75} />
-                      </div>
-                      <div className="min-w-0 sm:col-span-2">
-                        <label className={`${labelClass} sm:hidden`}>Material *</label>
+                      <div className="min-w-0 sm:col-span-2 flex flex-col justify-end">
+                        <label className={lineLabelClass}>Material *</label>
                         <select
                           value={l.materialKind}
                           onChange={(e) => setLine(idx, { materialKind: e.target.value })}
-                          className={`${lineFieldClass} appearance-none min-w-0 max-w-full`}
+                          className={lineFieldClass}
                         >
                           <option value="">Material *</option>
                           {MATERIAL_OPTS.map((o) => (
@@ -379,12 +382,13 @@ export default function CoilPurchaseOrderModal({
                           ))}
                         </select>
                       </div>
-                      <div className="min-w-0 sm:col-span-2">
-                        <label className={`${labelClass} sm:hidden`}>Colour</label>
+                      <div className="min-w-0 sm:col-span-2 flex flex-col justify-end">
+                        <label className={lineLabelClass}>Colour</label>
                         <select
                           value={l.color}
                           onChange={(e) => setLine(idx, { color: e.target.value })}
-                          className={`${lineFieldClass} appearance-none min-w-0 max-w-full`}
+                          className={lineFieldClass}
+                          title={l.color || undefined}
                         >
                           <option value="">Colour</option>
                           {colourOptions.map((colour) => (
@@ -394,12 +398,12 @@ export default function CoilPurchaseOrderModal({
                           ))}
                         </select>
                       </div>
-                      <div className="min-w-0 sm:col-span-2">
-                        <label className={`${labelClass} sm:hidden`}>Gauge</label>
+                      <div className="min-w-0 sm:col-span-1 flex flex-col justify-end">
+                        <label className={lineLabelClass}>Gauge</label>
                         <select
                           value={l.gauge}
                           onChange={(e) => setLine(idx, { gauge: e.target.value })}
-                          className={`${lineFieldClass} appearance-none min-w-0 max-w-full`}
+                          className={lineFieldClass}
                         >
                           <option value="">Gauge</option>
                           {gaugeOptions.map((gauge) => (
@@ -409,8 +413,8 @@ export default function CoilPurchaseOrderModal({
                           ))}
                         </select>
                       </div>
-                      <div className="min-w-0 sm:col-span-1">
-                        <label className={`${labelClass} sm:hidden`}>Kg</label>
+                      <div className="min-w-0 sm:col-span-1 flex flex-col justify-end">
+                        <label className={lineLabelClass}>Kg</label>
                         <input
                           type="number"
                           min="0"
@@ -418,12 +422,12 @@ export default function CoilPurchaseOrderModal({
                           inputMode="decimal"
                           value={l.kg}
                           onChange={(e) => setLine(idx, { kg: e.target.value })}
-                          className={`${lineFieldClass} tabular-nums min-w-0 max-w-full`}
-                          placeholder="kg"
+                          className={`${lineFieldClass} tabular-nums`}
+                          placeholder="0"
                         />
                       </div>
-                      <div className="min-w-0 sm:col-span-1">
-                        <label className={`${labelClass} sm:hidden`}>Metres</label>
+                      <div className="min-w-0 sm:col-span-1 flex flex-col justify-end">
+                        <label className={lineLabelClass}>Metres</label>
                         <input
                           type="number"
                           min="0"
@@ -431,21 +435,23 @@ export default function CoilPurchaseOrderModal({
                           inputMode="decimal"
                           value={l.meters}
                           onChange={(e) => setLine(idx, { meters: e.target.value })}
-                          className={`${lineFieldClass} tabular-nums min-w-0 max-w-full`}
-                          placeholder="m"
+                          className={`${lineFieldClass} tabular-nums`}
+                          placeholder="0"
                         />
                       </div>
-                      <div className="min-w-0 sm:col-span-1">
-                        <label className={`${labelClass} sm:hidden`}>kg/m</label>
+                      <div className="min-w-0 sm:col-span-1 flex flex-col justify-end">
+                        <label className={lineLabelClass} title="kg ÷ metres">
+                          kg/m
+                        </label>
                         <div
-                          className={`${lineFieldClass} tabular-nums bg-slate-50 text-slate-600 flex items-center min-w-0 px-3 overflow-x-auto`}
+                          className={`${lineFieldClass} tabular-nums bg-slate-50 text-slate-600 flex items-center justify-end px-1.5 overflow-x-auto shrink-0`}
                           title="kg ÷ metres"
                         >
                           {conv != null ? conv : '—'}
                         </div>
                       </div>
-                      <div className="min-w-0 sm:col-span-1">
-                        <label className={`${labelClass} sm:hidden`}>₦/kg</label>
+                      <div className="min-w-0 sm:col-span-1 flex flex-col justify-end">
+                        <label className={lineLabelClass}>₦/kg</label>
                         <input
                           type="number"
                           min="0"
@@ -453,27 +459,34 @@ export default function CoilPurchaseOrderModal({
                           inputMode="decimal"
                           value={l.pricePerKg}
                           onChange={(e) => setLine(idx, { pricePerKg: e.target.value })}
-                          className={`${lineFieldClass} tabular-nums min-w-0 max-w-full`}
-                          placeholder="₦/kg"
+                          className={`${lineFieldClass} tabular-nums`}
+                          placeholder="0"
                         />
                       </div>
-                      <div className="flex flex-wrap items-center justify-between gap-2 min-w-0 sm:col-span-1 sm:block sm:text-right">
-                        <p className="text-sm font-bold text-[#134e4a] tabular-nums py-1 sm:py-0 break-all text-right leading-snug">
-                          <span className="sm:hidden text-[9px] font-semibold text-slate-400 uppercase mr-1">
-                            Line ₦
-                          </span>
-                          ₦{lineTotals[idx].toLocaleString()}
-                        </p>
-                      </div>
-                      <div className="flex justify-end min-w-0 sm:col-span-1 sm:justify-end sm:pb-0.5">
-                        <button
-                          type="button"
-                          onClick={() => removeRow(idx)}
-                          className="p-2 text-slate-300 hover:text-red-500 rounded-lg shrink-0"
-                          aria-label="Remove line"
-                        >
-                          <Trash2 size={16} />
-                        </button>
+                      <div className="flex flex-col justify-end min-w-0 sm:col-span-3 gap-0.5">
+                        <label className={`${lineLabelClass} sm:text-right`}>Line ₦</label>
+                        <div className="flex flex-nowrap items-center justify-end gap-1.5 min-h-[1.625rem] min-w-0">
+                          <p className="text-[10px] font-bold text-[#134e4a] tabular-nums leading-none truncate text-right flex-1 min-w-0">
+                            {formatNgn(lineTotals[idx])}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={addRow}
+                            className="p-1 rounded-md border border-[#134e4a]/25 bg-teal-50/90 text-[#134e4a] hover:bg-teal-100 shrink-0"
+                            title="Add coil line"
+                            aria-label="Add coil line"
+                          >
+                            <Plus size={14} strokeWidth={2.25} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => removeRow(idx)}
+                            className="p-1 text-slate-300 hover:text-red-500 rounded-md shrink-0 -mr-0.5"
+                            aria-label="Remove line"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
                       </div>
                     </div>
                   );
@@ -481,14 +494,11 @@ export default function CoilPurchaseOrderModal({
               </div>
             </div>
 
-            <div className="mt-4 flex flex-wrap justify-between items-center gap-3 pt-4 border-t border-slate-200">
-              <p className="text-[10px] text-slate-500">
+            <div className="mt-4 pt-4 border-t border-slate-200">
+              <p className="text-[10px] text-slate-500 leading-relaxed">
                 After save, use <strong>Assign transport</strong> (on loading), then{' '}
                 <strong>Post to in transit</strong>. In Operations, enter <strong>coil #</strong> and{' '}
                 <strong>kg in</strong> at receipt — that ties the coil to this PO line for production.
-              </p>
-              <p className="text-sm font-black text-[#134e4a] tabular-nums">
-                Total ₦{grandTotal.toLocaleString()}
               </p>
             </div>
           </ProcurementFormSection>
@@ -500,21 +510,28 @@ export default function CoilPurchaseOrderModal({
           ) : null}
 
           {editApprovalSlot ? <div className="mt-2 shrink-0">{editApprovalSlot}</div> : null}
+          </div>
 
-          <div className="flex justify-end gap-2 pt-4 border-t border-slate-200 mt-auto">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2.5 rounded-lg text-[9px] font-semibold uppercase tracking-wide text-slate-500 hover:bg-slate-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="bg-[#134e4a] text-white px-5 py-2.5 rounded-lg text-[9px] font-semibold uppercase tracking-wide shadow-sm hover:brightness-105 flex items-center gap-2"
-            >
-              <Save size={14} /> {editPoId ? 'Save changes' : 'Save purchase order'}
-            </button>
+          <div className="px-5 py-4 bg-[#134e4a] flex flex-wrap justify-between items-center gap-3 text-white shrink-0 border-t border-[#0f3d39]/30">
+            <div>
+              <p className="text-[9px] font-semibold text-white/50 uppercase tracking-widest mb-0.5">Order total</p>
+              <p className="text-2xl font-bold text-white tabular-nums">{formatNgn(grandTotal)}</p>
+            </div>
+            <div className="flex gap-2 flex-wrap justify-end">
+              <button
+                type="button"
+                onClick={onClose}
+                className="bg-white/10 px-4 py-2.5 rounded-lg text-[9px] font-semibold uppercase tracking-wide border border-white/15 hover:bg-white/20"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="bg-white text-[#134e4a] px-4 py-2.5 rounded-lg text-[9px] font-semibold uppercase tracking-wide shadow-sm inline-flex items-center gap-2 hover:brightness-105"
+              >
+                <Save size={14} /> {editPoId ? 'Save changes' : 'Save purchase order'}
+              </button>
+            </div>
           </div>
         </form>
       </div>

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import { createDatabase } from './db.js';
 import { createApp } from './app.js';
+import { getEligibleRefundQuotations } from './controlOps.js';
 
 /** Isolated quotation IDs so rows are not merged with totals from `seedEverything()`. */
 function seedData(db) {
@@ -32,35 +33,35 @@ function seedData(db) {
   });
 
   const insQ = db.prepare(
-    `INSERT OR REPLACE INTO quotations (id, customer_id, customer_name, total_ngn, status, lines_json)
-     VALUES (?,?,?,?,?,?)`
+    `INSERT OR REPLACE INTO quotations (id, customer_id, customer_name, total_ngn, paid_ngn, payment_status, status, lines_json)
+     VALUES (?,?,?,?,?,?,?,?)`
   );
-  insQ.run('QT-RFS-OVR-001', 'CUS-001', 'John Doe', 100000, 'Finished', linesOvr);
-  insQ.run('QT-RFS-UNPR-001', 'CUS-001', 'John Doe', 100000, 'Finished', linesUnpr);
-  insQ.run('QT-RFS-DUP-001', 'CUS-001', 'John Doe', 1000, 'Finished', linesDup);
-  insQ.run('QT-RFS-SELF-002', 'CUS-001', 'John Doe', 50000, 'Finished', linesSelf);
-  insQ.run('QT-RFS-PRICE-027', 'CUS-NDA', 'NDA Corp', 12000, 'Finished', linesPrice);
+  insQ.run('QT-RFS-OVR-001', 'CUS-001', 'John Doe', 100000, 120000, 'Paid', 'Finished', linesOvr);
+  insQ.run('QT-RFS-UNPR-001', 'CUS-001', 'John Doe', 100000, 100000, 'Paid', 'Finished', linesUnpr);
+  insQ.run('QT-RFS-DUP-001', 'CUS-001', 'John Doe', 1000, 1000, 'Paid', 'Finished', linesDup);
+  insQ.run('QT-RFS-SELF-002', 'CUS-001', 'John Doe', 50000, 50000, 'Paid', 'Finished', linesSelf);
+  insQ.run('QT-RFS-PRICE-027', 'CUS-NDA', 'NDA Corp', 12000, 12000, 'Paid', 'Finished', linesPrice);
 
   const linesDeliverySvc = JSON.stringify({
     products: [{ name: 'Roofing', qty: 10, unitPrice: 5000 }],
     accessories: [],
     services: [{ name: 'Site delivery', qty: 1, unit_price_ngn: 75000 }],
   });
-  insQ.run('QT-RFS-TRN-001', 'CUS-001', 'John Doe', 125000, 'Finished', linesDeliverySvc);
+  insQ.run('QT-RFS-TRN-001', 'CUS-001', 'John Doe', 125000, 125000, 'Paid', 'Finished', linesDeliverySvc);
 
   const linesBundleSvc = JSON.stringify({
     products: [{ name: 'Roofing', qty: 5, unitPrice: 5000 }],
     accessories: [],
     services: [{ name: 'Transport and installation', qty: 1, value: 99000 }],
   });
-  insQ.run('QT-RFS-BND-001', 'CUS-001', 'John Doe', 124000, 'Finished', linesBundleSvc);
+  insQ.run('QT-RFS-BND-001', 'CUS-001', 'John Doe', 124000, 124000, 'Paid', 'Finished', linesBundleSvc);
 
   const linesCalcMismatch = JSON.stringify({
     products: [{ name: 'Roofing', qty: 10, unitPrice: 5000 }],
     accessories: [],
     services: [],
   });
-  insQ.run('QT-RFS-CALC-001', 'CUS-001', 'John Doe', 50001, 'Finished', linesCalcMismatch);
+  insQ.run('QT-RFS-CALC-001', 'CUS-001', 'John Doe', 50001, 50001, 'Paid', 'Finished', linesCalcMismatch);
 
   db.prepare(
     `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
@@ -79,6 +80,26 @@ function seedData(db) {
 
   db.prepare(
     `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
+     VALUES ('RCT-RFS-UNPR', 'CUS-001', 'John Doe', 'QT-RFS-UNPR-001', 100000, 'Confirmed', '2026-04-01')`
+  ).run();
+
+  db.prepare(
+    `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
+     VALUES ('RCT-RFS-DUP', 'CUS-001', 'John Doe', 'QT-RFS-DUP-001', 1000, 'Confirmed', '2026-04-01')`
+  ).run();
+
+  db.prepare(
+    `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
+     VALUES ('RCT-RFS-SELF', 'CUS-001', 'John Doe', 'QT-RFS-SELF-002', 50000, 'Confirmed', '2026-04-01')`
+  ).run();
+
+  db.prepare(
+    `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
+     VALUES ('RCT-RFS-PRICE', 'CUS-NDA', 'NDA Corp', 'QT-RFS-PRICE-027', 12000, 'Confirmed', '2026-04-01')`
+  ).run();
+
+  db.prepare(
+    `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
      VALUES ('RCT-RFS-TRN', 'CUS-001', 'John Doe', 'QT-RFS-TRN-001', 125000, 'Confirmed', '2026-04-01')`
   ).run();
 
@@ -87,12 +108,32 @@ function seedData(db) {
      VALUES ('JOB-RFS-OVR', 'QT-RFS-OVR-001', 100, 'Completed', '2026-04-01T10:00:00Z')`
   ).run();
 
+  db.prepare(
+    `INSERT OR REPLACE INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
+     VALUES ('JOB-RFS-UNPR', 'QT-RFS-UNPR-001', 0, 'Cancelled', '2026-04-01T10:00:00Z')`
+  ).run();
+
+  db.prepare(
+    `INSERT OR REPLACE INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
+     VALUES ('JOB-RFS-DUP', 'QT-RFS-DUP-001', 0, 'Cancelled', '2026-04-01T10:00:00Z')`
+  ).run();
+
+  db.prepare(
+    `INSERT OR REPLACE INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
+     VALUES ('JOB-RFS-SELF', 'QT-RFS-SELF-002', 0, 'Cancelled', '2026-04-01T10:00:00Z')`
+  ).run();
+
+  db.prepare(
+    `INSERT OR REPLACE INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
+     VALUES ('JOB-RFS-PRICE', 'QT-RFS-PRICE-027', 0, 'Cancelled', '2026-04-01T10:00:00Z')`
+  ).run();
+
   const linesSub = JSON.stringify({
     products: [{ name: 'Roofing Premium', qty: 20, unitPrice: 5000 }],
     accessories: [],
     services: [],
   });
-  insQ.run('QT-RFS-SUB-001', 'CUS-001', 'John Doe', 100000, 'Finished', linesSub);
+  insQ.run('QT-RFS-SUB-001', 'CUS-001', 'John Doe', 100000, 100000, 'Paid', 'Finished', linesSub);
   db.prepare(
     `INSERT OR REPLACE INTO products (product_id, name, stock_level, unit, branch_id, gauge, colour, material_type)
      VALUES ('SUB-FG-TEST', 'Longspan economy', 0, 'm', 'BR-KD', '0.24mm', 'IV', 'Aluminium')`
@@ -416,5 +457,57 @@ describe('Refund Security & Substitution Logic', () => {
     });
     expect(create.status).toBe(400);
     expect(String(create.body.error || '')).toMatch(/delivered/i);
+  });
+
+  it('getEligibleRefundQuotations includes quotations with Cancelled production job', () => {
+    db.prepare(
+      `INSERT OR REPLACE INTO quotations (id, customer_id, customer_name, total_ngn, paid_ngn, status, lines_json)
+       VALUES ('QT-RFS-CANC-JOB','CUS-001','John Doe',50000,50000,'Finished','{}')`
+    ).run();
+    db.prepare(
+      `INSERT OR REPLACE INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
+       VALUES ('JOB-RFS-CANC','QT-RFS-CANC-JOB',0,'Cancelled','2026-04-01T10:00:00Z')`
+    ).run();
+    const rows = getEligibleRefundQuotations(db);
+    expect(rows.some((r) => r.id === 'QT-RFS-CANC-JOB')).toBe(true);
+  });
+
+  it('preview counts actual metres from Cancelled production jobs', async () => {
+    db.prepare(
+      `INSERT OR REPLACE INTO quotations (id, customer_id, customer_name, total_ngn, paid_ngn, status, lines_json)
+       VALUES ('QT-RFS-CANC-M','CUS-001','John Doe',100000,100000,'Finished','{"products":[{"name":"R","qty":10,"unitPrice":10000}],"accessories":[],"services":[]}')`
+    ).run();
+    db.prepare(
+      `INSERT OR REPLACE INTO sales_receipts (id, customer_id, customer_name, quotation_ref, amount_ngn, status, date_iso)
+       VALUES ('RCT-RFS-CM','CUS-001','John Doe','QT-RFS-CANC-M',100000,'Confirmed','2026-04-01')`
+    ).run();
+    db.prepare(
+      `INSERT OR REPLACE INTO production_jobs (job_id, quotation_ref, actual_meters, status, created_at_iso)
+       VALUES ('JOB-RFS-CM','QT-RFS-CANC-M',14.5,'Cancelled','2026-04-01T10:00:00Z')`
+    ).run();
+
+    const agent = request.agent(app);
+    await loginAs(agent, 'sales.staff', 'Sales@123');
+    const preview = await agent.post('/api/refunds/preview').send({ quotationRef: 'QT-RFS-CANC-M' });
+    expect(preview.status).toBe(200);
+    expect(preview.body.preview.actualMeters).toBeCloseTo(14.5, 5);
+  });
+
+  it('GET /api/refunds/intelligence includes dataQualityIssues array', async () => {
+    const agent = request.agent(app);
+    await loginAs(agent, 'sales.staff', 'Sales@123');
+    const res = await agent.get('/api/refunds/intelligence?quotationRef=QT-RFS-SUB-001');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(Array.isArray(res.body.dataQualityIssues)).toBe(true);
+  });
+
+  it('getEligibleRefundQuotations includes paid Void quotations without a production job', () => {
+    db.prepare(
+      `INSERT OR REPLACE INTO quotations (id, customer_id, customer_name, total_ngn, paid_ngn, status, archived, lines_json)
+       VALUES ('QT-RFS-VOID-PAID','CUS-001','John Doe',30000,30000,'Void',1,'{}')`
+    ).run();
+    const rows = getEligibleRefundQuotations(db);
+    expect(rows.some((r) => r.id === 'QT-RFS-VOID-PAID')).toBe(true);
   });
 });

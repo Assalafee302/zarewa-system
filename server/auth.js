@@ -51,6 +51,7 @@ export const ROLE_DEFINITIONS = {
     label: 'HR manager',
     permissions: [
       'dashboard.view',
+      'office.use',
       'reports.view',
       'hr.directory.view',
       'hr.staff.manage',
@@ -69,6 +70,7 @@ export const ROLE_DEFINITIONS = {
     label: 'HR officer',
     permissions: [
       'dashboard.view',
+      'office.use',
       'reports.view',
       'hr.directory.view',
       'hr.requests.hr_review',
@@ -82,6 +84,7 @@ export const ROLE_DEFINITIONS = {
     permissions: [
       'hq.view_all_branches',
       'dashboard.view',
+      'office.use',
       'reports.view',
       'sales.view',
       'procurement.view',
@@ -104,12 +107,13 @@ export const ROLE_DEFINITIONS = {
   ceo: {
     label: 'Chief Executive Officer',
     // Read-only executive: org aggregates only (see GET /api/exec/summary); no line-level modules.
-    permissions: ['hq.view_all_branches', 'exec.dashboard.view', 'dashboard.view'],
+    permissions: ['hq.view_all_branches', 'exec.dashboard.view', 'dashboard.view', 'office.use'],
   },
   finance_manager: {
     label: 'Finance manager',
     permissions: [
       'dashboard.view',
+      'office.use',
       'reports.view',
       'sales.view',
       'procurement.view',
@@ -130,6 +134,7 @@ export const ROLE_DEFINITIONS = {
     label: 'Cashier',
     permissions: [
       'dashboard.view',
+      'office.use',
       'sales.view',
       'customers.manage',
       'quotations.manage',
@@ -141,6 +146,7 @@ export const ROLE_DEFINITIONS = {
     label: 'Branch manager',
     permissions: [
       'dashboard.view',
+      'office.use',
       'reports.view',
       'sales.view',
       'sales.manage',
@@ -165,6 +171,7 @@ export const ROLE_DEFINITIONS = {
     label: 'Sales officer',
     permissions: [
       'dashboard.view',
+      'office.use',
       'sales.view',
       'customers.manage',
       'quotations.manage',
@@ -177,6 +184,7 @@ export const ROLE_DEFINITIONS = {
     label: 'Procurement officer',
     permissions: [
       'dashboard.view',
+      'office.use',
       'reports.view',
       'procurement.view',
       'procurement.manage',
@@ -188,6 +196,7 @@ export const ROLE_DEFINITIONS = {
     label: 'Operations officer',
     permissions: [
       'dashboard.view',
+      'office.use',
       'reports.view',
       'operations.view',
       'operations.manage',
@@ -676,6 +685,27 @@ function defaultBranchIdForDb(db) {
   }
 }
 
+/**
+ * HQ roles may pick any active branch. Other users may only select their HR-assigned branch when set,
+ * otherwise the organisation default branch (used when staff have no profile row yet).
+ */
+export function userMaySelectSessionWorkspaceBranch(db, user, branchId) {
+  const id = String(branchId || '').trim();
+  if (!id || !user) return false;
+  const br = db.prepare(`SELECT id, active FROM branches WHERE id = ?`).get(id);
+  if (!br || Number(br.active) !== 1) return false;
+  if (canUseAllBranchesRollup(user)) return true;
+  let assigned = '';
+  try {
+    const prof = db.prepare(`SELECT branch_id FROM hr_staff_profiles WHERE user_id = ?`).get(user.id);
+    assigned = String(prof?.branch_id || '').trim();
+  } catch {
+    /* older DBs */
+  }
+  if (assigned) return id === assigned;
+  return id === defaultBranchIdForDb(db);
+}
+
 export function attachAuthContext(db) {
   return (req, res, next) => {
     const cookies = parseCookies(req.headers.cookie || '');
@@ -710,7 +740,7 @@ export function attachAuthContext(db) {
     const viewAllBranches = rawViewAll && canUseAllBranchesRollup(user);
 
     // Pin normal users to their assigned branch (from HR staff profile) when available.
-    // Only HQ roles (admin/md/ceo) may change branch via session workspace.
+    // PATCH /api/session/workspace still persists a chosen branch when allowed by userMaySelectSessionWorkspaceBranch.
     if (!canUseAllBranchesRollup(user)) {
       try {
         const prof = db

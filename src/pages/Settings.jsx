@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { PageHeader, PageShell, MainPanel, PageTabs } from '../components/layout';
 import MasterDataWorkbench from '../components/settings/MasterDataWorkbench';
+import CoilRegisterImportPanel from '../components/settings/CoilRegisterImportPanel';
 import TeamAccessPanel from '../components/settings/TeamAccessPanel';
 import SettingsProfilePanel from '../components/settings/SettingsProfilePanel';
 import {
@@ -272,8 +273,59 @@ const Settings = () => {
   const showPeriodControls = Boolean(ws?.hasPermission?.('period.manage'));
   const showAuditExport = permissions.includes('*') || permissions.includes('audit.view');
   const showBranchAudit = permissions.includes('*') || permissions.includes('settings.view');
+  const showCuttingThresholdControl = permissions.includes('*') || permissions.includes('settings.view');
+  const showGovernanceLimitsControl = permissions.includes('*') || permissions.includes('settings.view');
   const governanceHasContent =
-    showPeriodControls || showAuditExport || showBranchAudit || auditLog.length > 0;
+    showPeriodControls ||
+    showAuditExport ||
+    showBranchAudit ||
+    showCuttingThresholdControl ||
+    showGovernanceLimitsControl ||
+    auditLog.length > 0;
+
+  const workspaceBranches = ws?.snapshot?.workspaceBranches ?? [];
+  const branchCuttingSig = workspaceBranches.map((b) => `${b.id}:${Number(b.cuttingListMinPaidFraction)}`).join(',');
+  const [cuttingDraftPct, setCuttingDraftPct] = useState({});
+  const [cuttingSaveBusy, setCuttingSaveBusy] = useState('');
+  const [govLimitsForm, setGovLimitsForm] = useState({
+    expenseExecutiveThresholdNgn: 200_000,
+    refundExecutiveThresholdNgn: 1_000_000,
+  });
+  const [govLimitsBusy, setGovLimitsBusy] = useState(false);
+
+  useEffect(() => {
+    const next = {};
+    for (const b of workspaceBranches) {
+      const f = Number(b.cuttingListMinPaidFraction);
+      const pct = Math.round((Number.isFinite(f) ? f : 0.7) * 100);
+      next[b.id] = String(Math.min(100, Math.max(5, pct)));
+    }
+    setCuttingDraftPct(next);
+  }, [branchCuttingSig]);
+
+  const saveBranchCuttingPct = async (branchId) => {
+    const bid = String(branchId || '').trim();
+    const n = Number(String(cuttingDraftPct[bid] ?? '').replace(/,/g, ''));
+    if (!Number.isFinite(n) || n < 5 || n > 100) {
+      showToast('Enter a whole percent between 5 and 100.', { variant: 'error' });
+      return;
+    }
+    setCuttingSaveBusy(bid);
+    try {
+      const { ok, data } = await apiFetch(`/api/branches/${encodeURIComponent(bid)}/cutting-threshold`, {
+        method: 'PATCH',
+        body: JSON.stringify({ cuttingListMinPaidFraction: n / 100 }),
+      });
+      if (!ok || !data?.ok) {
+        showToast(data?.error || 'Could not update cutting threshold.', { variant: 'error' });
+        return;
+      }
+      await ws?.refresh?.();
+      showToast('Cutting list payment gate saved for branch.');
+    } finally {
+      setCuttingSaveBusy('');
+    }
+  };
 
   const loadBranchAudit = useCallback(async () => {
     if (!showBranchAudit) return;
@@ -295,11 +347,50 @@ const Settings = () => {
     void loadBranchAudit();
   }, [governanceMatch, showBranchAudit, loadBranchAudit]);
 
+  useEffect(() => {
+    if (!governanceMatch || !showGovernanceLimitsControl) return;
+    let cancelled = false;
+    (async () => {
+      const { ok, data } = await apiFetch('/api/org/governance-limits');
+      if (cancelled) return;
+      if (ok && data?.ok && data.limits) {
+        setGovLimitsForm({
+          expenseExecutiveThresholdNgn: Number(data.limits.expenseExecutiveThresholdNgn) || 200_000,
+          refundExecutiveThresholdNgn: Number(data.limits.refundExecutiveThresholdNgn) || 1_000_000,
+        });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [governanceMatch, showGovernanceLimitsControl, ws?.refreshEpoch]);
+
+  const saveGovernanceLimits = async () => {
+    setGovLimitsBusy(true);
+    try {
+      const { ok, data } = await apiFetch('/api/org/governance-limits', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          expenseExecutiveThresholdNgn: Number(govLimitsForm.expenseExecutiveThresholdNgn),
+          refundExecutiveThresholdNgn: Number(govLimitsForm.refundExecutiveThresholdNgn),
+        }),
+      });
+      if (!ok || !data?.ok) {
+        showToast(data?.error || 'Could not save limits.', { variant: 'error' });
+        return;
+      }
+      showToast('Approval thresholds saved.');
+      await ws?.refresh?.();
+    } finally {
+      setGovLimitsBusy(false);
+    }
+  };
+
   return (
     <PageShell>
       <PageHeader
         title="Settings"
-        subtitle="Profile, security, preferences, team, catalog, governance, and guides. Deep links use the URL (e.g. /settings/security); HR employment records stay under HR."
+        subtitle="Profile, security, preferences, team, catalog, governance, and guides. Deep links use the URL (e.g. /settings/security)."
         tabs={
           <PageTabs
             tabs={settingsTabs}
@@ -579,6 +670,8 @@ const Settings = () => {
                     </p>
                   </section>
 
+                  <CoilRegisterImportPanel />
+
                   <section>
                     <header className="mb-3 px-0.5">
                       <h3 className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-500">
@@ -607,6 +700,63 @@ const Settings = () => {
                         ask an administrator.
                       </p>
                     </div>
+                  ) : null}
+
+                  {showGovernanceLimitsControl ? (
+                    <section className="rounded-3xl border border-slate-200/90 bg-white p-6 shadow-sm">
+                      <h3 className="z-section-title flex items-center gap-2">
+                        <Scale size={14} /> Office approval thresholds (NGN)
+                      </h3>
+                      <p className="text-xs text-gray-500 mb-4">
+                        Branch managers may approve payment requests at or below the expense threshold; amounts
+                        above require MD/CEO (or admin). Refunds above the refund threshold require executive
+                        sign-off. Changes are audited.
+                      </p>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div>
+                          <label className="z-field-label">Expense — branch manager max (NGN)</label>
+                          <input
+                            type="number"
+                            min={0}
+                            step={1000}
+                            className="z-input"
+                            value={govLimitsForm.expenseExecutiveThresholdNgn}
+                            onChange={(e) =>
+                              setGovLimitsForm((p) => ({
+                                ...p,
+                                expenseExecutiveThresholdNgn: Number(e.target.value),
+                              }))
+                            }
+                          />
+                        </div>
+                        <div>
+                          <label className="z-field-label">Refund — executive above (NGN)</label>
+                          <input
+                            type="number"
+                            min={0}
+                            step={1000}
+                            className="z-input"
+                            value={govLimitsForm.refundExecutiveThresholdNgn}
+                            onChange={(e) =>
+                              setGovLimitsForm((p) => ({
+                                ...p,
+                                refundExecutiveThresholdNgn: Number(e.target.value),
+                              }))
+                            }
+                          />
+                        </div>
+                      </div>
+                      <div className="mt-4">
+                        <button
+                          type="button"
+                          disabled={govLimitsBusy}
+                          onClick={() => void saveGovernanceLimits()}
+                          className="z-btn-primary justify-center"
+                        >
+                          {govLimitsBusy ? 'Saving…' : 'Save thresholds'}
+                        </button>
+                      </div>
+                    </section>
                   ) : null}
 
                   {showPeriodControls ? (
@@ -693,6 +843,59 @@ const Settings = () => {
                         Newline-delimited JSON for archiving, SIEM ingest, or offline review. Respects your
                         current session.
                       </p>
+                    </section>
+                  ) : null}
+
+                  {showCuttingThresholdControl ? (
+                    <section className="rounded-3xl border border-slate-200/90 bg-white p-6 shadow-sm">
+                      <h3 className="z-section-title flex items-center gap-2">
+                        <Factory size={14} /> Cutting list — minimum paid %
+                      </h3>
+                      <p className="mt-2 text-xs text-slate-500">
+                        Before a cutting list can be saved without manager production approval, the quotation must reach this paid fraction
+                        (ledger receipts plus advance applied). Enforced on the server per branch.
+                      </p>
+                      <div className="mt-4 space-y-3">
+                        {workspaceBranches.length === 0 ? (
+                          <p className="text-sm text-slate-500">No branches in workspace.</p>
+                        ) : (
+                          workspaceBranches.map((b) => (
+                            <div
+                              key={b.id}
+                              className="flex flex-col gap-2 rounded-2xl border border-slate-200 bg-slate-50/70 px-4 py-3 sm:flex-row sm:items-end sm:justify-between"
+                            >
+                              <div className="min-w-0">
+                                <p className="text-sm font-bold text-[#134e4a]">{b.name || b.code || b.id}</p>
+                                <p className="text-[10px] text-slate-500 font-mono">{b.id}</p>
+                              </div>
+                              <div className="flex flex-wrap items-end gap-2">
+                                <div>
+                                  <label className="z-field-label">Min paid (%)</label>
+                                  <input
+                                    type="number"
+                                    min={5}
+                                    max={100}
+                                    step={1}
+                                    value={cuttingDraftPct[b.id] ?? ''}
+                                    onChange={(e) =>
+                                      setCuttingDraftPct((prev) => ({ ...prev, [b.id]: e.target.value }))
+                                    }
+                                    className="z-input w-28"
+                                  />
+                                </div>
+                                <button
+                                  type="button"
+                                  disabled={cuttingSaveBusy === b.id}
+                                  onClick={() => saveBranchCuttingPct(b.id)}
+                                  className="z-btn-primary text-xs justify-center"
+                                >
+                                  {cuttingSaveBusy === b.id ? 'Saving…' : 'Save'}
+                                </button>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
                     </section>
                   ) : null}
 
@@ -802,7 +1005,7 @@ const Settings = () => {
                     right screens. Access still follows permissions; workspace department only shapes defaults and
                     shortcuts. Suggested roles for new accounts are exposed in the live bootstrap payload as{' '}
                     <code className="rounded bg-slate-100 px-1 py-0.5 text-[10px]">suggestedRoleByDepartment</code>{' '}
-                    for HR tooling.
+                    for workspace defaults.
                   </p>
                   <div className="space-y-4">
                     {DEPARTMENT_GUIDE.map((d) => {

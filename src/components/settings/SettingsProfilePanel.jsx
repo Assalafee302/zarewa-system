@@ -205,11 +205,6 @@ export default function SettingsProfilePanel() {
           ))}
         </div>
         <p className="mt-5 text-[11px] text-slate-500 leading-relaxed">
-          For payroll and HR compliance, use{' '}
-          <Link to="/hr" className="font-semibold text-[#134e4a] underline-offset-2 hover:underline">
-            HR
-          </Link>
-          .{' '}
           {showTeamTab ? (
             <>
               Manage app logins under{' '}

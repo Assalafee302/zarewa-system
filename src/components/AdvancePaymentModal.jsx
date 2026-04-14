@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { Link } from 'react-router-dom';
 import { X, Wallet, Save, Printer } from 'lucide-react';
 import { ModalFrame } from './layout/ModalFrame';
 import { useCustomers } from '../context/CustomersContext';
@@ -8,6 +9,7 @@ import { useWorkspace } from '../context/WorkspaceContext';
 import { recordAdvancePayment } from '../lib/customerLedgerStore';
 import { formatNgn } from '../Data/mockData';
 import { apiFetch } from '../lib/apiBase';
+import { guidanceForLedgerPostFailure, isVoucherDateInLockedPeriod } from '../lib/ledgerPostingGuidance';
 import { treasuryAccountsFromSnapshot } from '../lib/treasuryAccountsStore';
 import { AdvancePaymentPrintView } from './receipt/ReceiptPrintViews';
 
@@ -32,8 +34,14 @@ const AdvancePaymentModal = ({
   const [reference, setReference] = useState('');
   const [purpose, setPurpose] = useState('');
   const [showPrint, setShowPrint] = useState(false);
+  const [postingHint, setPostingHint] = useState(null);
 
   const treasuryList = useMemo(() => treasuryAccountsFromSnapshot(ws?.snapshot), [ws?.snapshot]);
+  const periodLocks = ws?.snapshot?.periodLocks ?? [];
+  const voucherInLockedPeriod = useMemo(
+    () => Boolean(useLedgerApi && isVoucherDateInLockedPeriod(dateISO, periodLocks)),
+    [useLedgerApi, dateISO, periodLocks]
+  );
 
    
   useEffect(() => {
@@ -46,6 +54,7 @@ const AdvancePaymentModal = ({
     setReference('');
     setPurpose('');
     setShowPrint(false);
+    setPostingHint(null);
   }, [isOpen, defaultCustomerID, treasuryList]);
    
 
@@ -98,9 +107,11 @@ const AdvancePaymentModal = ({
         }),
       });
       if (!ok || !data?.ok) {
+        setPostingHint(guidanceForLedgerPostFailure(data) || null);
         showToast(data?.error || 'Could not post advance to server.', { variant: 'error' });
         return;
       }
+      setPostingHint(null);
     } else {
       const res = recordAdvancePayment({
         customerID,
@@ -131,7 +142,7 @@ const AdvancePaymentModal = ({
   };
 
   return (
-    <ModalFrame isOpen={isOpen} onClose={onClose}>
+    <ModalFrame isOpen={isOpen} onClose={onClose} modal={!showPrint}>
       <>
       <form
         onSubmit={submit}
@@ -157,6 +168,39 @@ const AdvancePaymentModal = ({
             <X size={20} />
           </button>
         </div>
+
+        {useLedgerApi && voucherInLockedPeriod ? (
+          <div className="px-5 py-2.5 bg-amber-50 border-b border-amber-200 text-[10px] text-amber-950 space-y-1">
+            <p className="font-bold">Date is in a locked accounting period</p>
+            <p className="leading-snug">Choose an open month or ask finance to unlock the period.</p>
+            <Link to="/settings/governance" className="inline-flex font-semibold text-amber-900 underline underline-offset-2">
+              Period controls
+            </Link>
+          </div>
+        ) : null}
+
+        {postingHint ? (
+          <div className="px-5 py-3 bg-rose-50/90 border-b border-rose-200 text-[10px] text-rose-950 space-y-2">
+            <p className="text-[11px] font-bold">{postingHint.title}</p>
+            <p className="leading-snug opacity-95">{postingHint.detail}</p>
+            {postingHint.steps?.length ? (
+              <ol className="list-decimal pl-4 space-y-1">
+                {postingHint.steps.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ol>
+            ) : null}
+            {postingHint.links?.length ? (
+              <div className="flex flex-wrap gap-x-3 gap-y-1">
+                {postingHint.links.map((l) => (
+                  <Link key={l.to} to={l.to} className="font-semibold text-rose-900 underline underline-offset-2">
+                    {l.label}
+                  </Link>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="p-5 space-y-4 overflow-y-auto custom-scrollbar flex-1">
           <div>
@@ -279,12 +323,15 @@ const AdvancePaymentModal = ({
             <button
               type="button"
               aria-label="Close print preview"
-              className="no-print fixed inset-0 z-[10000] bg-black/50"
+              className="no-print fixed inset-0 z-[11060] bg-black/50"
               onClick={() => setShowPrint(false)}
             />
-            <div className="no-print fixed inset-0 z-[10001] overflow-y-auto p-4 sm:p-8 pointer-events-none">
-              <div className="pointer-events-auto mx-auto max-w-[148mm] pb-16">
-                <div className="receipt-print-root overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl print:rounded-none print:border-0 print:shadow-none">
+            <div
+              className="print-portal-scroll fixed inset-0 z-[11070] overflow-y-auto overscroll-y-contain p-4 sm:p-8"
+              onClick={() => setShowPrint(false)}
+            >
+              <div className="mx-auto max-w-4xl pb-16" onClick={(e) => e.stopPropagation()}>
+                <div className="quotation-print-root quotation-print-preview-mode rounded-lg border border-slate-200 bg-white shadow-2xl print:rounded-none print:border-0 print:shadow-none">
                   <AdvancePaymentPrintView
                     customerName={customerName || customerID || '—'}
                     amountNgn={Number(String(amount).replace(/,/g, '')) || 0}
@@ -295,7 +342,7 @@ const AdvancePaymentModal = ({
                     handledBy={handledByLabel}
                   />
                 </div>
-                <div className="mt-4 flex flex-wrap justify-center gap-2">
+                <div className="no-print mt-4 flex flex-wrap justify-center gap-2">
                   <button
                     type="button"
                     onClick={() => window.print()}

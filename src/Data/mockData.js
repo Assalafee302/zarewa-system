@@ -3,13 +3,13 @@
  * Not connected to a database — replace fetches with API calls when the backend is ready.
  */
 
-import { REFERENCE_STOCK_CALIBRATION } from './stockReference';
+import { REFERENCE_STOCK_CALIBRATION } from './stockReference.js';
 import {
   LAGACY_CUSTOMER,
   LAGACY_CUTTING_LIST,
   LAGACY_QUOTATION,
   LAGACY_RECEIPT,
-} from './lagacyCuttingListDemo';
+} from './lagacyCuttingListDemo.js';
 
 const { longspanThinQty, aluzinc028Kg, heavyCoilKg, tappingScrewCartons } =
   REFERENCE_STOCK_CALIBRATION;
@@ -1265,13 +1265,13 @@ export const DASHBOARD_ALERTS = [
     hint: 'Open Sales → Quotations',
   },
   {
-    id: 'alt-deliver',
-    type: 'delivery',
+    id: 'alt-maintenance',
+    type: 'ops',
     severity: 'info',
-    title: 'Deliveries scheduled',
-    detail: '2 shipments due within 48 hours',
+    title: 'Plant maintenance',
+    detail: 'Machines, PM plans, and open work orders',
     path: '/operations',
-    state: { focusOpsTab: 'deliveries' },
-    hint: 'Production → Deliveries tab',
+    state: { focusOpsTab: 'maintenance' },
+    hint: 'Operations → Maintenance tab',
   },
 ];

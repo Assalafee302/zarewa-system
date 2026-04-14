@@ -1,7 +1,7 @@
 import React from 'react';
 
 const tabBtn =
-  'px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-[0.1em] transition-all flex items-center gap-2 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/25 focus-visible:ring-offset-2 focus-visible:ring-offset-white';
+  'px-4 py-2.5 rounded-xl text-[11px] font-bold uppercase tracking-[0.08em] transition-all flex items-center gap-2 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/25 focus-visible:ring-offset-2 focus-visible:ring-offset-white';
 
 /**
  * Segmented control used across module pages for consistent UX.
@@ -12,7 +12,7 @@ export function PageTabs({ tabs, value, onChange }) {
     <div
       role="tablist"
       aria-label="Section"
-      className="inline-flex flex-wrap gap-1 p-1.5 rounded-2xl border border-white/80 bg-white/88 shadow-[0_16px_32px_-26px_rgba(15,23,42,0.35)] backdrop-blur-xl"
+      className="inline-flex w-full max-w-full min-w-0 flex-wrap gap-1 overflow-x-auto overscroll-x-contain p-1.5 [-webkit-overflow-scrolling:touch] rounded-2xl border border-white/80 bg-white/88 shadow-[0_16px_32px_-26px_rgba(15,23,42,0.35)] backdrop-blur-xl max-sm:flex-nowrap sm:overflow-x-visible"
     >
       {tabs.map((tab) => {
         const active = value === tab.id;

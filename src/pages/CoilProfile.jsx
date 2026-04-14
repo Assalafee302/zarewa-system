@@ -69,8 +69,7 @@ export default function CoilProfile() {
   const ws = useWorkspace();
   const [actionModal, setActionModal] = useState('');
   const [savingAction, setSavingAction] = useState(false);
-  const [splitForm, setSplitForm] = useState({ splitKg: '', newCoilNo: '', note: '' });
-  const [scrapForm, setScrapForm] = useState({ kg: '', reason: 'Damaged edge / offcut', note: '' });
+  const [scrapForm, setScrapForm] = useState({ kg: '', meters: '', bookRef: '', reason: 'Damaged edge / offcut', note: '' });
   const [returnForm, setReturnForm] = useState({ kg: '', reason: 'Unused from production', note: '' });
 
   const coil = useMemo(
@@ -197,32 +196,6 @@ export default function CoilProfile() {
   );
   const actionDateISO = new Date().toISOString().slice(0, 10);
 
-  const submitSplit = async (e) => {
-    e.preventDefault();
-    const splitKg = Number(splitForm.splitKg);
-    if (!Number.isFinite(splitKg) || splitKg <= 0) return showToast('Enter split kg.', { variant: 'error' });
-    if (!ws?.canMutate) return showToast('Workspace is read-only.', { variant: 'error' });
-    setSavingAction(true);
-    try {
-      const { ok, data } = await apiFetch(`/api/coil-lots/${encodeURIComponent(coil.coilNo)}/split`, {
-        method: 'POST',
-        body: JSON.stringify({
-          splitKg,
-          newCoilNo: splitForm.newCoilNo.trim() || undefined,
-          note: splitForm.note.trim(),
-          dateISO: actionDateISO,
-        }),
-      });
-      if (!ok || !data?.ok) return showToast(data?.error || 'Split failed.', { variant: 'error' });
-      await ws.refresh?.();
-      showToast(`Split OK — new coil ${data.newCoilNo} (${data.splitKg} kg).`);
-      setActionModal('');
-      setSplitForm({ splitKg: '', newCoilNo: '', note: '' });
-    } finally {
-      setSavingAction(false);
-    }
-  };
-
   const submitScrap = async (e) => {
     e.preventDefault();
     const kg = Number(scrapForm.kg);
@@ -230,6 +203,7 @@ export default function CoilProfile() {
     if (!ws?.canMutate) return showToast('Workspace is read-only.', { variant: 'error' });
     setSavingAction(true);
     try {
+      const meters = scrapForm.meters.trim() ? Number(scrapForm.meters) : undefined;
       const { ok, data } = await apiFetch(`/api/coil-lots/${encodeURIComponent(coil.coilNo)}/scrap`, {
         method: 'POST',
         body: JSON.stringify({
@@ -239,13 +213,15 @@ export default function CoilProfile() {
           dateISO: actionDateISO,
           creditScrapInventory: true,
           scrapProductID: 'SCRAP-COIL',
+          meters: Number.isFinite(meters) ? meters : undefined,
+          bookRef: scrapForm.bookRef.trim() || undefined,
         }),
       });
       if (!ok || !data?.ok) return showToast(data?.error || 'Scrap posting failed.', { variant: 'error' });
       await ws.refresh?.();
       showToast(`Scrap posted — ${kg} kg off ${coil.coilNo}.`);
       setActionModal('');
-      setScrapForm({ kg: '', reason: 'Damaged edge / offcut', note: '' });
+      setScrapForm({ kg: '', meters: '', bookRef: '', reason: 'Damaged edge / offcut', note: '' });
     } finally {
       setSavingAction(false);
     }
@@ -297,9 +273,13 @@ export default function CoilProfile() {
                 Supplier
               </Link>
             ) : null}
-            <button type="button" className="z-btn-secondary inline-flex" onClick={() => setActionModal('split')}>
-              Split
-            </button>
+            <Link
+              to="/operations"
+              state={{ focusOpsTab: 'coilControl' }}
+              className="z-btn-secondary inline-flex text-center no-underline"
+            >
+              Coil control
+            </Link>
             <button type="button" className="z-btn-secondary inline-flex" onClick={() => setActionModal('scrap')}>
               Scrap
             </button>
@@ -478,19 +458,12 @@ export default function CoilProfile() {
           </section>
         </MainPanel>
       </div>
-      <ModalFrame isOpen={actionModal === 'split'} onClose={() => !savingAction && setActionModal('')}>
-        <form onSubmit={submitSplit} className="space-y-3">
-          <h3 className="text-lg font-black text-[#134e4a]">Split coil {coil.coilNo}</h3>
-          <input className="z-input w-full" type="number" min="0.01" step="0.01" placeholder="Split kg" value={splitForm.splitKg} onChange={(e) => setSplitForm((s) => ({ ...s, splitKg: e.target.value }))} />
-          <input className="z-input w-full" placeholder="New coil no (optional)" value={splitForm.newCoilNo} onChange={(e) => setSplitForm((s) => ({ ...s, newCoilNo: e.target.value }))} />
-          <textarea className="z-input w-full min-h-20" placeholder="Note" value={splitForm.note} onChange={(e) => setSplitForm((s) => ({ ...s, note: e.target.value }))} />
-          <button className="z-btn-primary" type="submit" disabled={savingAction}>Post split</button>
-        </form>
-      </ModalFrame>
       <ModalFrame isOpen={actionModal === 'scrap'} onClose={() => !savingAction && setActionModal('')}>
         <form onSubmit={submitScrap} className="space-y-3">
           <h3 className="text-lg font-black text-[#134e4a]">Scrap from {coil.coilNo}</h3>
           <input className="z-input w-full" type="number" min="0.01" step="0.01" placeholder="Scrap kg" value={scrapForm.kg} onChange={(e) => setScrapForm((s) => ({ ...s, kg: e.target.value }))} />
+          <input className="z-input w-full" type="number" min="0" step="0.01" placeholder="Metres (optional)" value={scrapForm.meters} onChange={(e) => setScrapForm((s) => ({ ...s, meters: e.target.value }))} />
+          <input className="z-input w-full" placeholder="Book / offcut no. (optional)" value={scrapForm.bookRef} onChange={(e) => setScrapForm((s) => ({ ...s, bookRef: e.target.value }))} />
           <input className="z-input w-full" placeholder="Reason" value={scrapForm.reason} onChange={(e) => setScrapForm((s) => ({ ...s, reason: e.target.value }))} />
           <textarea className="z-input w-full min-h-20" placeholder="Note" value={scrapForm.note} onChange={(e) => setScrapForm((s) => ({ ...s, note: e.target.value }))} />
           <button className="z-btn-primary" type="submit" disabled={savingAction}>Post scrap</button>

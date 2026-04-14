@@ -11,11 +11,20 @@ import {
   ScrollText,
   Landmark,
   X,
+  Mail,
+  Phone,
+  MessageCircle,
+  Globe,
+  FileText,
+  Building2,
+  Users,
 } from 'lucide-react';
 import { PageHeader, PageShell, MainPanel, ModalFrame } from '../components/layout';
+import { ProcurementStatementPrintBlock } from '../components/procurement/ProcurementStatementPrintBlock';
 import { useInventory } from '../context/InventoryContext';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { PROCUREMENT_COIL_CATALOG, CONVERSION_FLAG_RATIO, formatNgn } from '../Data/mockData';
+import { apiUrl } from '../lib/apiBase';
 import { purchaseOrderOrderedValueNgn } from '../lib/liveAnalytics';
 import {
   poLineBenchmarkPriceNgn,
@@ -206,6 +215,12 @@ const SupplierProfile = () => {
     };
   }, [orders, stats.spend]);
 
+  const profile = supplier?.supplierProfile && typeof supplier.supplierProfile === 'object' ? supplier.supplierProfile : {};
+  const banks = Array.isArray(profile.bankAccounts) ? profile.bankAccounts : [];
+  const contacts = Array.isArray(profile.contacts) ? profile.contacts : [];
+  const agreements = Array.isArray(profile.agreements) ? profile.agreements : [];
+  const df = (v) => String(v ?? '').trim() || '—';
+
   const avgPeerPriceByGauge = useMemo(() => {
     const map = new Map();
     for (const po of purchaseOrders) {
@@ -243,7 +258,9 @@ const SupplierProfile = () => {
     <PageShell>
       <PageHeader
         title={supplier.name}
-        subtitle={`${supplier.supplierID} · ${supplier.city || '—'} · ${supplier.paymentTerms || '—'}`}
+        subtitle={`${supplier.supplierID} · ${supplier.city || '—'} · ${supplier.paymentTerms || '—'}${
+          profile.companyEmail ? ` · ${profile.companyEmail}` : ''
+        }`}
         actions={
           <Link to="/procurement" state={{ focusTab: 'suppliers' }} className="z-btn-secondary inline-flex">
             <ArrowLeft size={16} /> Suppliers
@@ -273,6 +290,12 @@ const SupplierProfile = () => {
         </aside>
 
         <MainPanel className="flex-1 min-w-0 !pt-0">
+          <ProcurementStatementPrintBlock
+            kind="supplier"
+            entityLabel={supplier.name}
+            supplierId={supplierId}
+            purchaseOrders={purchaseOrders}
+          />
           <section id="sp-overview" className="rounded-zarewa border border-gray-100 bg-white shadow-sm p-5 mb-8 scroll-mt-28">
             <h3 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest mb-4 flex items-center gap-2">
               <LayoutDashboard size={16} /> Overview
@@ -329,30 +352,231 @@ const SupplierProfile = () => {
             <p className="text-[10px] font-black text-[#134e4a] uppercase tracking-widest mb-3">
               Supplier profile
             </p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
-              <div className="flex items-start gap-2">
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+              <div className="flex items-start gap-2 rounded-xl border border-slate-200/70 bg-white/50 px-3 py-2.5">
                 <MapPin size={14} className="text-gray-400 shrink-0 mt-0.5" />
-                <div>
+                <div className="min-w-0">
                   <span className="text-[10px] font-bold text-gray-400 uppercase block">Region</span>
                   <span className="font-semibold text-gray-800">{supplier.city || '—'}</span>
                 </div>
               </div>
-              <div className="flex items-start gap-2">
+              <div className="flex items-start gap-2 rounded-xl border border-slate-200/70 bg-white/50 px-3 py-2.5">
                 <Landmark size={14} className="text-gray-400 shrink-0 mt-0.5" />
-                <div>
+                <div className="min-w-0">
                   <span className="text-[10px] font-bold text-gray-400 uppercase block">Payment terms</span>
                   <span className="font-semibold text-gray-800">{supplier.paymentTerms || '—'}</span>
                 </div>
               </div>
-              <div>
+              <div className="rounded-xl border border-slate-200/70 bg-white/50 px-3 py-2.5 sm:col-span-1">
                 <span className="text-[10px] font-bold text-gray-400 uppercase block">Quality score</span>
                 <span className="font-semibold text-gray-800">{supplier.qualityScore ?? '—'}</span>
               </div>
             </div>
-            <p className="text-xs leading-relaxed text-slate-600 mt-4 border-t border-gray-200/80 pt-4">
-              {supplier.notes || 'No supplier notes on file.'}
-            </p>
-            <div className="mt-4 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
+
+            <div className="mt-4 rounded-xl border border-slate-200/70 bg-white/40 p-4">
+              <p className="text-[9px] font-black text-gray-400 uppercase tracking-wider mb-3">Contact & online</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                <div className="flex items-start gap-2 min-w-0">
+                  <Mail size={14} className="text-gray-400 shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <span className="text-[10px] font-bold text-gray-400 uppercase block">Company email</span>
+                    <span className="font-semibold text-gray-800 break-all">{df(profile.companyEmail)}</span>
+                  </div>
+                </div>
+                <div className="flex items-start gap-2">
+                  <Phone size={14} className="text-gray-400 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="text-[10px] font-bold text-gray-400 uppercase block">Main phone</span>
+                    <span className="font-semibold text-gray-800">{df(profile.phoneMain)}</span>
+                  </div>
+                </div>
+                <div className="flex items-start gap-2">
+                  <MessageCircle size={14} className="text-gray-400 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="text-[10px] font-bold text-gray-400 uppercase block">WhatsApp</span>
+                    {profile.whatsapp && String(profile.whatsapp).trim() ? (
+                      <a
+                        href={`https://wa.me/${String(profile.whatsapp).replace(/\D/g, '')}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="font-semibold text-teal-700 underline"
+                      >
+                        {profile.whatsapp}
+                      </a>
+                    ) : (
+                      <span className="font-semibold text-gray-800">—</span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-start gap-2 min-w-0">
+                  <Globe size={14} className="text-gray-400 shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <span className="text-[10px] font-bold text-gray-400 uppercase block">Website</span>
+                    {profile.website && String(profile.website).trim() ? (
+                      <a
+                        href={
+                          profile.website.startsWith('http') ? profile.website : `https://${profile.website}`
+                        }
+                        target="_blank"
+                        rel="noreferrer"
+                        className="font-semibold text-teal-700 underline break-all"
+                      >
+                        {profile.website}
+                      </a>
+                    ) : (
+                      <span className="font-semibold text-gray-800">—</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-3 lg:items-start">
+              <div className="rounded-xl border border-slate-200/70 bg-white/40 p-4">
+                <p className="text-[9px] font-black text-gray-400 uppercase tracking-wider mb-3">Registration</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div className="flex items-start gap-2">
+                    <Building2 size={14} className="text-gray-400 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="text-[10px] font-bold text-gray-400 uppercase block">VAT / TIN</span>
+                      <span className="font-semibold text-gray-800">{df(profile.vatTin)}</span>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <FileText size={14} className="text-gray-400 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="text-[10px] font-bold text-gray-400 uppercase block">RC / CAC</span>
+                      <span className="font-semibold text-gray-800">{df(profile.rcNumber)}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="rounded-xl border border-slate-200/70 bg-white/40 p-4">
+                <p className="text-[9px] font-black text-gray-400 uppercase tracking-wider mb-3">Addresses</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                  <div>
+                    <span className="text-[10px] font-bold text-gray-400 uppercase block mb-1">Registered</span>
+                    <span className="font-semibold text-gray-800 whitespace-pre-wrap leading-snug">
+                      {df(profile.registeredAddress)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold text-gray-400 uppercase block mb-1">Billing</span>
+                    <span className="font-semibold text-gray-800 whitespace-pre-wrap leading-snug">
+                      {df(profile.billingAddress)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 border-t border-gray-200/80 pt-4">
+              <p className="text-[10px] font-bold text-gray-400 uppercase mb-2 flex items-center gap-1.5">
+                <Landmark size={12} /> Bank accounts ({banks.length})
+              </p>
+              {banks.length === 0 ? (
+                <p className="text-xs text-slate-500">—</p>
+              ) : (
+                <ul className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+                  {banks.map((b, i) => (
+                    <li key={i} className="rounded-lg border border-slate-200 bg-white/80 px-3 py-2">
+                      <span className="font-bold text-[#134e4a]">{df(b.bankName)}</span>
+                      <span className="text-slate-500"> · </span>
+                      <span>{df(b.accountName)}</span>
+                      <span className="block font-mono text-[11px] mt-0.5">{df(b.accountNumber)}</span>
+                      <div className="text-[10px] text-slate-500 mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5">
+                        <span>Sort: {df(b.sortCode)}</span>
+                        <span>Currency: {df(b.currency)}</span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            <div className="mt-4 border-t border-gray-200/80 pt-4">
+              <p className="text-[10px] font-bold text-gray-400 uppercase mb-2 flex items-center gap-1.5">
+                <Users size={12} /> Contacts ({contacts.length})
+              </p>
+              {contacts.length === 0 ? (
+                <p className="text-xs text-slate-500">—</p>
+              ) : (
+                <ul className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2 text-xs">
+                  {contacts.map((c, i) => (
+                    <li key={i} className="rounded-lg border border-slate-200 bg-white/80 px-3 py-2">
+                      <span className="font-bold text-[#134e4a]">{df(c.name)}</span>
+                      <span className="text-slate-500"> · </span>
+                      <span>{df(c.role)}</span>
+                      <div className="mt-1.5 grid grid-cols-1 min-[420px]:grid-cols-2 gap-x-3 gap-y-0.5 text-[11px] text-slate-600">
+                        <span className="min-w-0">
+                          <span className="text-slate-400 font-medium">Email </span>
+                          <span className="break-all">{df(c.email)}</span>
+                        </span>
+                        <span>
+                          <span className="text-slate-400 font-medium">Phone </span>
+                          {df(c.phone)}
+                        </span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            <div className="mt-4 border-t border-gray-200/80 pt-4">
+              <p className="text-[10px] font-bold text-gray-400 uppercase mb-2">Agreements & files</p>
+              {agreements.filter((a) => a && a.id).length === 0 ? (
+                <p className="text-xs text-slate-500">—</p>
+              ) : (
+                <ul className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                  {agreements
+                    .filter((a) => a && a.id)
+                    .map((a) => {
+                      const downloadable = a.hasFile === true;
+                      return (
+                        <li key={a.id} className="min-w-0">
+                          {downloadable ? (
+                            <a
+                              href={apiUrl(
+                                `/api/suppliers/${encodeURIComponent(supplier.supplierID)}/agreements/${encodeURIComponent(a.id)}/file`
+                              )}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex w-full min-h-[2.75rem] items-center justify-center gap-1 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 font-semibold text-teal-900 text-center hover:bg-teal-100 break-words"
+                            >
+                              {a.fileName || 'Download'}
+                            </a>
+                          ) : (
+                            <span className="flex min-h-[2.75rem] flex-col justify-center rounded-lg border border-slate-200 bg-white/80 px-3 py-2 text-slate-700">
+                              <span className="font-semibold break-words">{df(a.fileName)}</span>
+                              <span className="text-[10px] text-slate-500">No file on server (metadata only)</span>
+                            </span>
+                          )}
+                        </li>
+                      );
+                    })}
+                </ul>
+              )}
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-3 border-t border-gray-200/80 pt-4">
+              <p className="text-xs leading-relaxed text-slate-700 lg:mb-0">
+                <span className="font-bold text-[#134e4a] block text-[10px] uppercase tracking-wide mb-1">
+                  Commercial notes
+                </span>
+                {df(profile.notesCommercial)}
+              </p>
+              <p className="text-xs leading-relaxed text-slate-600 mt-3 border-t border-gray-200/70 pt-3 lg:mt-0 lg:border-t-0 lg:pt-0 lg:border-l lg:border-gray-200/80 lg:pl-4">
+                <span className="font-bold text-slate-500 block text-[10px] uppercase tracking-wide mb-1">
+                  Internal
+                </span>
+                {supplier.notes ? supplier.notes : 'No internal procurement notes on file.'}
+              </p>
+            </div>
+
+            <p className="text-[10px] font-bold text-gray-400 uppercase mt-5 mb-2">Orders by status</p>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6">
               {Object.entries(insights.byStatus).map(([k, v]) => (
                 <div key={k} className="rounded-lg border border-gray-200 bg-white px-2 py-2 text-center">
                   <p className="text-[9px] uppercase font-bold text-gray-400">{k}</p>

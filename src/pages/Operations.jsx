@@ -9,18 +9,20 @@ import {
   TrendingUp,
   Package,
   X,
-  Factory,
   Award,
   ChevronRight,
   Scale,
   Search,
+  Disc3,
 } from 'lucide-react';
 
 import { WorkspacePanelToolbar } from '../components/workspace';
 import { WORKSPACE_EMPTY_LIST_CLASS } from '../lib/workspaceListStyle';
 import { MainPanel, PageHeader, PageShell, PageTabs, ModalFrame } from '../components/layout';
+import { AiAskButton } from '../components/AiAskButton';
 import { LiveProductionMonitor } from '../components/LiveProductionMonitor';
-import ProductionDeliveriesTab from '../components/operations/ProductionDeliveriesTab';
+import OperationsCoilControlTab from '../components/operations/OperationsCoilControlTab';
+import { OperationsInventoryAttentionPanel } from '../components/operations/OperationsInventoryAttentionPanel';
 import { useInventory } from '../context/InventoryContext';
 import { useToast } from '../context/ToastContext';
 import { useWorkspace } from '../context/WorkspaceContext';
@@ -46,17 +48,94 @@ function liveCoilWeightKg(lot) {
   return Number.isFinite(q) ? Math.max(0, q) : 0;
 }
 
+/** Roll up conversion checks for one cutting list (multiple coils → one summary line). */
+function summarizeConversionChecksForCuttingList(checks, formatPct) {
+  if (!Array.isArray(checks) || !checks.length) return null;
+  const alertSeverityRank = (s) => {
+    const t = String(s || 'OK').toLowerCase();
+    if (t === 'high') return 4;
+    if (t === 'low') return 3;
+    if (t === 'watch') return 2;
+    return 1;
+  };
+  let worst = 'OK';
+  let worstR = 0;
+  for (const c of checks) {
+    const s = String(c.alertState || 'OK');
+    const r = alertSeverityRank(s);
+    if (r > worstR) {
+      worstR = r;
+      worst = String(c.alertState || 'OK');
+    }
+  }
+  const sorted = [...checks].sort((a, b) =>
+    String(b.checkedAtISO || '').localeCompare(String(a.checkedAtISO || ''))
+  );
+  const latest = sorted[0];
+  const v = latest.varianceSummary?.variances ?? {};
+  return {
+    count: checks.length,
+    worst,
+    deltaLabel: `Δ Std ${formatPct(v.standardPct)}`,
+  };
+}
+
+/** Lower score = needs attention first (active + closed production lists). */
+function productionAttentionScore(row) {
+  const completed = Boolean(row?.completed);
+  const pr = String(row?.priority || '');
+  if (completed || pr === 'Done' || pr === 'Cancelled') return 9;
+  if (row?.needsCoil) return 0;
+  if (row?.managerReviewRequired) return 1;
+  if (row?.overdue) return 2;
+  if (pr === 'High') return 3;
+  if (pr === 'Waiting' || pr === 'Wait') return 4;
+  return 5;
+}
+
+/**
+ * @param {'attention'|'id'|'customer'|'status'} sortKey
+ */
+function compareProductionQueueRows(a, b, sortKey) {
+  if (sortKey === 'attention') {
+    const pa = productionAttentionScore(a);
+    const pb = productionAttentionScore(b);
+    if (pa !== pb) return pa - pb;
+    return String(a.id || '').localeCompare(String(b.id || ''));
+  }
+  if (sortKey === 'customer') {
+    const c = String(a.customer || '').localeCompare(String(b.customer || ''), undefined, { sensitivity: 'base' });
+    if (c !== 0) return c;
+    return String(a.id || '').localeCompare(String(b.id || ''));
+  }
+  if (sortKey === 'status') {
+    const s = String(a.status || '').localeCompare(String(b.status || ''));
+    if (s !== 0) return s;
+    return String(a.id || '').localeCompare(String(b.id || ''));
+  }
+  return String(a.id || '').localeCompare(String(b.id || ''));
+}
+
 const PANEL_TITLE = {
-  inventory: 'Stock records',
   production: 'Production queue',
-  deliveries: 'Deliveries',
+  coilControl: 'Coil control',
 };
+
+/** Rows per page for production line lists (live jobs, closed queue, manager review). */
+const PRODUCTION_TABLE_PAGE_SIZE = 10;
+
+/** Coil / stone / accessory — single control for both receive and on-hand panels. */
+const STOCK_RECEIVE_KIND_TABS = [
+  { id: 'coil', label: 'Coil' },
+  { id: 'stone', label: 'Stone' },
+  { id: 'accessory', label: 'Accessories' },
+];
 
 /** Matches `confirmStoreReceipt` — POs store can post GRN against */
 const PO_RECEIVABLE_STATUSES = ['Approved', 'On loading', 'In Transit'];
 
 /** Default rows shown; search or sort surfaces older items. */
-const STOCK_SIDE_LIST_LIMIT = 20;
+const STOCK_SIDE_LIST_LIMIT = 15;
 
 function sortTransitPurchaseOrders(rows, sortKey) {
   const poCmp = (a, b) => String(a.poID || '').localeCompare(String(b.poID || ''));
@@ -160,22 +239,6 @@ const ADJUST_REASONS = [
   'Other',
 ];
 
-/** Reasons for coil scrap posting (kg off the physical roll). */
-const COIL_SCRAP_REASONS = [
-  'Off-cut removed',
-  'Damage',
-  'Production error / trim',
-  'Return — unusable',
-  'Other',
-];
-
-const COIL_RETURN_REASONS = [
-  'Weighbridge / count correction',
-  'Material returned from shop floor',
-  'Returned unused from job',
-  'Other',
-];
-
 const Operations = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -183,23 +246,27 @@ const Operations = () => {
   const {
     products: inventoryRows,
     purchaseOrders,
+    inTransitLoads,
     confirmStoreReceipt,
     adjustStock,
-    receiveFinishedGoods,
     coilLots,
-    wipByProduct,
   } = useInventory();
   const ws = useWorkspace();
 
-  const [activeTab, setActiveTab] = useState('inventory');
+  const [activeTab, setActiveTab] = useState('production');
   const [searchQuery, setSearchQuery] = useState('');
+  /** Closed-record list: all | completed | cancelled (in-progress jobs are above this list). */
   const [productionFilter, setProductionFilter] = useState('all');
-  const [deliveriesShellBlur, setDeliveriesShellBlur] = useState(false);
-
+  const [productionActiveSortKey, setProductionActiveSortKey] = useState('attention');
+  const [productionClosedSortKey, setProductionClosedSortKey] = useState('attention');
+  useEffect(() => {
+    if (!ws?.hasWorkspaceData) return;
+    const onlineFilters = new Set(['all', 'completed', 'cancelled']);
+    if (onlineFilters.has(productionFilter)) return;
+    setProductionFilter('all');
+  }, [ws?.hasWorkspaceData, productionFilter]);
   const [showStockAdjust, setShowStockAdjust] = useState(false);
-  const [showFinishedGoods, setShowFinishedGoods] = useState(false);
   const [showCoilRequest, setShowCoilRequest] = useState(false);
-  const [showCoilMaterial, setShowCoilMaterial] = useState(false);
   /** `job` = live API job row; `pending` = offline cutting list queue (no traceability). */
   const [productionTraceModal, setProductionTraceModal] = useState(null);
   const [completeChecklistModal, setCompleteChecklistModal] = useState(null);
@@ -248,14 +315,6 @@ const Operations = () => {
     setStockAdjustCoilCount(null);
   }, []);
 
-  const [finishedForm, setFinishedForm] = useState({
-    coilNo: '',
-    qty: '',
-    date: '',
-    spoolKg: '35',
-    wipSourceProductID: '',
-    wipQtyReleased: '',
-  });
   const [coilLiveSort, setCoilLiveSort] = useState('recent');
   const [transitSearch, setTransitSearch] = useState('');
   const [transitSort, setTransitSort] = useState('orderDesc');
@@ -270,32 +329,6 @@ const Operations = () => {
     APP_DATA_TABLE_PAGE_SIZE,
     productMovementModal?.productID
   );
-
-  const [coilMaterialTab, setCoilMaterialTab] = useState('split');
-  const [coilMaterialSaving, setCoilMaterialSaving] = useState(false);
-  const [coilSplitForm, setCoilSplitForm] = useState({
-    coilNo: '',
-    splitKg: '',
-    newCoilNo: '',
-    note: '',
-    date: '',
-  });
-  const [coilScrapForm, setCoilScrapForm] = useState({
-    coilNo: '',
-    kg: '',
-    reason: COIL_SCRAP_REASONS[0],
-    note: '',
-    creditScrapInventory: true,
-    scrapProductID: 'SCRAP-COIL',
-    date: '',
-  });
-  const [coilReturnForm, setCoilReturnForm] = useState({
-    coilNo: '',
-    kg: '',
-    reason: COIL_RETURN_REASONS[0],
-    note: '',
-    date: '',
-  });
 
   const inventoryStats = useMemo(() => {
     const activeCoils = coilLots.filter((c) => c.currentStatus !== 'Consumed');
@@ -405,7 +438,9 @@ const Operations = () => {
     const mapRegistered = (cl) => {
       const job = jobByCuttingListId.get(cl.id);
       const status = job?.status ?? 'Planned';
-      const completed = status === 'Completed';
+      const isCompleted = status === 'Completed';
+      const isCancelled = status === 'Cancelled';
+      const closedRecord = isCompleted || isCancelled;
       const jobID = job?.jobID;
       const nCoils = jobID ? coilCount(jobID) : 0;
       const specParts = [
@@ -419,14 +454,16 @@ const Operations = () => {
         id: cl.id,
         customer: cl.customer || '—',
         spec: specParts.length ? specParts.join(' · ') : '—',
-        quantity: completed
+        quantity: isCompleted
           ? `${actualM.toLocaleString()}m posted`
-          : `${plannedM.toLocaleString()}m planned`,
+          : isCancelled
+            ? 'Cancelled'
+            : `${plannedM.toLocaleString()}m planned`,
         status,
         coilCount: nCoils,
         coilLabel: !job
           ? 'Syncing production data…'
-          : completed
+          : closedRecord
             ? nCoils > 0
               ? `${nCoils} coil(s) on record`
               : null
@@ -437,25 +474,26 @@ const Operations = () => {
               : status === 'Running'
                 ? `Coils: ${nCoils} on line`
                 : null,
-        priority:
-          completed
-            ? 'Done'
-            : !job
-              ? 'Wait'
-              : nCoils === 0 && status === 'Planned'
+        priority: closedRecord
+          ? isCancelled
+            ? 'Cancelled'
+            : 'Done'
+          : !job
+            ? 'Wait'
+            : nCoils === 0 && status === 'Planned'
+              ? 'High'
+              : job.managerReviewRequired ||
+                  (job.endDateISO && job.endDateISO <= new Date().toISOString().slice(0, 10))
                 ? 'High'
-                : job.managerReviewRequired ||
-                    (job.endDateISO && job.endDateISO <= new Date().toISOString().slice(0, 10))
-                  ? 'High'
-                  : 'Normal',
+                : 'Normal',
         managerReviewRequired: Boolean(job?.managerReviewRequired),
-        needsCoil: !completed && status === 'Planned' && nCoils === 0,
+        needsCoil: !closedRecord && status === 'Planned' && nCoils === 0,
         dueDateISO: job?.endDateISO || null,
         overdue:
-          !completed &&
+          !closedRecord &&
           Boolean(job?.endDateISO) &&
           String(job.endDateISO) < new Date().toISOString().slice(0, 10),
-        completed,
+        completed: closedRecord,
         quotationRef: cl.quotationRef || '',
         cuttingListId: cl.id,
       };
@@ -463,13 +501,13 @@ const Operations = () => {
 
     const rows = registered.map(mapRegistered);
     const active = rows.filter((r) => !r.completed);
-    const done = rows.filter((r) => r.completed);
+    const closed = rows.filter((r) => r.completed);
 
     return {
       mode: 'online',
       sections: [
-        { key: 'active', title: 'On the line', rows: active.filter(matches) },
-        { key: 'completed', title: 'Completed — view record', rows: done.filter(matches) },
+        { key: 'active', title: 'In progress', rows: active.filter(matches) },
+        { key: 'closed', title: 'Completed or cancelled', rows: closed.filter(matches) },
       ],
     };
   }, [cuttingLists, productionJobCoils, ws?.hasWorkspaceData, searchQuery, jobByCuttingListId]);
@@ -495,38 +533,82 @@ const Operations = () => {
     [productionJobs]
   );
 
-  const recentConversionChecks = useMemo(() => {
-    if (!productionConversionChecks.length) return [];
-    return [...productionConversionChecks].slice(0, 8);
+  const conversionChecksByCuttingListId = useMemo(() => {
+    const m = new Map();
+    for (const c of productionConversionChecks) {
+      const id = String(c.cuttingListId || '').trim();
+      if (!id) continue;
+      const arr = m.get(id);
+      if (arr) arr.push(c);
+      else m.set(id, [c]);
+    }
+    return m;
   }, [productionConversionChecks]);
 
-  const productionQueueRows = useMemo(() => {
-    const rows = productionQueueModel.sections.flatMap((s) => s.rows || []);
-    const filtered = rows.filter((row) => {
-      if (productionFilter === 'waiting') {
-        return row.priority === 'Waiting' || row.priority === 'Wait' || row.status === 'Planned';
+  const productionActiveRows = useMemo(() => {
+    if (productionQueueModel.mode !== 'online') return [];
+    return productionQueueModel.sections.find((s) => s.key === 'active')?.rows || [];
+  }, [productionQueueModel]);
+
+  const productionActiveSorted = useMemo(
+    () => [...productionActiveRows].sort((a, b) => compareProductionQueueRows(a, b, productionActiveSortKey)),
+    [productionActiveRows, productionActiveSortKey]
+  );
+
+  /** Main table: closed jobs only (completed or cancelled). In-progress appears in the panel above. */
+  const productionClosedFiltered = useMemo(() => {
+    const rows =
+      productionQueueModel.mode === 'online'
+        ? productionQueueModel.sections.find((s) => s.key === 'closed')?.rows || []
+        : productionQueueModel.sections.flatMap((s) => s.rows || []);
+    return rows.filter((row) => {
+      if (productionQueueModel.mode !== 'online') {
+        if (productionFilter === 'waiting') {
+          return row.priority === 'Waiting' || row.priority === 'Wait' || row.status === 'Planned';
+        }
+        if (productionFilter === 'running') return row.status === 'Running';
+        if (productionFilter === 'needs_review') return Boolean(row.managerReviewRequired);
+        if (productionFilter === 'done') return Boolean(row.completed);
+        return true;
       }
-      if (productionFilter === 'running') return row.status === 'Running';
-      if (productionFilter === 'needs_review') return Boolean(row.managerReviewRequired);
-      if (productionFilter === 'done') return Boolean(row.completed);
+      if (productionFilter === 'completed') return row.status === 'Completed';
+      if (productionFilter === 'cancelled') return row.status === 'Cancelled';
+      if (productionFilter === 'done') return row.status === 'Completed';
       return true;
     });
-    const priorityScore = (row) => {
-      if (row.completed || row.priority === 'Done') return 9;
-      if (row.needsCoil) return 0;
-      if (row.managerReviewRequired) return 1;
-      if (row.overdue) return 2;
-      if (row.priority === 'High') return 3;
-      if (row.priority === 'Waiting' || row.priority === 'Wait') return 4;
-      return 5;
-    };
-    return [...filtered].sort((a, b) => {
-      const pa = priorityScore(a);
-      const pb = priorityScore(b);
-      if (pa !== pb) return pa - pb;
-      return String(a.id || '').localeCompare(String(b.id || ''));
-    });
-  }, [productionQueueModel.sections, productionFilter]);
+  }, [productionQueueModel, productionFilter]);
+
+  const productionQueueRows = useMemo(
+    () =>
+      [...productionClosedFiltered].sort((a, b) =>
+        compareProductionQueueRows(a, b, productionClosedSortKey)
+      ),
+    [productionClosedFiltered, productionClosedSortKey]
+  );
+
+  const productionActivePage = useAppTablePaging(
+    productionActiveSorted,
+    PRODUCTION_TABLE_PAGE_SIZE,
+    productionActiveSortKey,
+    searchQuery,
+    ws?.hasWorkspaceData
+  );
+
+  const productionClosedPage = useAppTablePaging(
+    productionQueueRows,
+    PRODUCTION_TABLE_PAGE_SIZE,
+    productionClosedSortKey,
+    productionFilter,
+    searchQuery,
+    ws?.hasWorkspaceData
+  );
+
+  const jobsReviewPage = useAppTablePaging(
+    jobsNeedingManagerReview,
+    PRODUCTION_TABLE_PAGE_SIZE,
+    jobsNeedingManagerReview.length,
+    searchQuery
+  );
 
   const productionQueueStats = useMemo(() => {
     const rows = productionQueueModel.sections.flatMap((s) => s.rows || []);
@@ -538,7 +620,26 @@ const Operations = () => {
       needsReview: active.filter((r) => r.managerReviewRequired).length,
       overdue: active.filter((r) => r.overdue).length,
     };
-  }, [productionQueueModel.sections]);
+  }, [productionQueueModel]);
+
+  const operationsInventoryAttention = ws?.snapshot?.operationsInventoryAttention;
+
+  const openAttentionProductionTrace = useCallback(
+    (cuttingListId) => {
+      const id = String(cuttingListId || '').trim();
+      if (!id) return;
+      if (!ws?.canMutate) {
+        showToast('Connect API to open production trace.', { variant: 'info' });
+        return;
+      }
+      setProductionTraceModal({ type: 'trace', cuttingListId: id, completed: false });
+    },
+    [ws?.canMutate, showToast]
+  );
+
+  const goProcurementFromAttention = useCallback(() => {
+    navigate('/procurement', { state: { focusTab: 'suppliers' } });
+  }, [navigate]);
 
   const formatVariancePct = (v) => {
     const n = Number(v);
@@ -551,7 +652,7 @@ const Operations = () => {
     () => [
       { id: 'inventory', icon: <Box size={16} />, label: 'Stock management' },
       { id: 'production', icon: <Scissors size={16} />, label: 'Production line' },
-      { id: 'deliveries', icon: <Package size={16} />, label: 'Deliveries' },
+      { id: 'coilControl', icon: <Disc3 size={16} />, label: 'Coil control' },
     ],
     []
   );
@@ -580,7 +681,18 @@ const Operations = () => {
       return;
     }
 
-    if (t !== 'deliveries' && t !== 'production') return;
+    if (t === 'coilControl') {
+      setActiveTab('coilControl');
+      navigate(location.pathname, { replace: true, state: {} });
+      return;
+    }
+
+    if (t === 'maintenance') {
+      setActiveTab('production');
+      navigate(location.pathname, { replace: true, state: {} });
+      return;
+    }
+    if (t !== 'production') return;
     setActiveTab(t);
     const highlightId = String(st.highlightCuttingListId || '').trim();
     if (t === 'production' && highlightId) setSearchQuery(highlightId);
@@ -739,7 +851,6 @@ const Operations = () => {
             gauge: l.gauge,
             remaining,
             qtyReceived: old?.qtyReceived ?? '',
-            weightKg: '',
             coilNo: '',
             grnKind: poKind,
           };
@@ -758,7 +869,6 @@ const Operations = () => {
             gauge: l.gauge,
             remaining,
             qtyReceived: old.qtyReceived,
-            weightKg: old.weightKg,
             coilNo: old.coilNo,
             grnKind: 'coil',
           };
@@ -772,7 +882,6 @@ const Operations = () => {
           gauge: l.gauge,
           remaining,
           qtyReceived: '',
-          weightKg: '',
           coilNo: `CL-${yy}-${String(nextSeq).padStart(4, '0')}`,
           grnKind: 'coil',
         };
@@ -787,14 +896,17 @@ const Operations = () => {
       return;
     }
     const entries = grnLines
-      .map((row) => ({
-        lineKey: row.lineKey,
-        productID: row.productID,
-        qtyReceived: Number(row.qtyReceived),
-        weightKg: row.grnKind === 'coil' ? row.weightKg : '',
-        coilNo: row.grnKind === 'coil' ? row.coilNo : '',
-        location: receiveDraft.location,
-      }))
+      .map((row) => {
+        const entry = {
+          lineKey: row.lineKey,
+          productID: row.productID,
+          qtyReceived: Number(row.qtyReceived),
+          coilNo: row.grnKind === 'coil' ? row.coilNo : '',
+          location: receiveDraft.location,
+        };
+        /* Omit weightKg — server treats missing weighbridge as “use qty”; avoids empty-string quirks in proxies. */
+        return entry;
+      })
       .filter((x) => x.qtyReceived > 0 && !Number.isNaN(x.qtyReceived));
     if (!entries.length) {
       showToast('Enter receive quantity for at least one open line.', { variant: 'error' });
@@ -855,60 +967,6 @@ const Operations = () => {
     showToast('Stock adjustment applied.');
   };
 
-  const submitFinishedGoods = async (e) => {
-    e.preventDefault();
-    const coilNo = finishedForm.coilNo.trim();
-    const sourceCoil = coilLots.find((c) => c.coilNo === coilNo);
-    if (!sourceCoil) {
-      showToast('Select a valid source coil number.', { variant: 'error' });
-      return;
-    }
-    const liveKg = liveCoilWeightKg(sourceCoil);
-    if (liveKg >= 100) {
-      showToast('Only near-finished coils below 100kg can be closed manually.', { variant: 'error' });
-      return;
-    }
-    const spoolKg = Number(finishedForm.spoolKg);
-    if (Number.isNaN(spoolKg) || spoolKg < 35 || spoolKg > 100) {
-      showToast('Spool weight must be between 35kg and 100kg.', { variant: 'error' });
-      return;
-    }
-    const wipId = finishedForm.wipSourceProductID.trim();
-    const wipQtyStr = String(finishedForm.wipQtyReleased ?? '').trim();
-    if ((wipId && !wipQtyStr) || (!wipId && wipQtyStr)) {
-      showToast('Link WIP: select both raw material and consumed qty, or leave both empty.', {
-        variant: 'error',
-      });
-      return;
-    }
-    const wipOpts = wipId
-      ? { wipSourceProductID: wipId, wipQtyReleased: wipQtyStr }
-      : null;
-    const res = await receiveFinishedGoods(
-      sourceCoil.productID,
-      finishedForm.qty,
-      0,
-      coilNo,
-      finishedForm.date,
-      wipOpts,
-      { spoolKg, sourceCoilNo: coilNo, markSourceCoilFinished: true }
-    );
-    if (!res.ok) {
-      showToast(res.error, { variant: 'error' });
-      return;
-    }
-    setFinishedForm({
-      coilNo: '',
-      qty: '',
-      date: '',
-      spoolKg: '35',
-      wipSourceProductID: '',
-      wipQtyReleased: '',
-    });
-    setShowFinishedGoods(false);
-    showToast('Manual finished-goods receipt posted — use Production traceability to close live jobs.');
-  };
-
   const submitCoilRequest = async (e) => {
     e.preventDefault();
     const rows = (coilRequestForm.rows || [])
@@ -964,9 +1022,7 @@ const Operations = () => {
 
   const isAnyModalOpen =
     showStockAdjust ||
-    showFinishedGoods ||
     showCoilRequest ||
-    showCoilMaterial ||
     completeChecklistModal != null ||
     productionTraceModal != null ||
     productMovementModal != null;
@@ -979,141 +1035,6 @@ const Operations = () => {
     }, 15000);
     return () => window.clearInterval(t);
   }, [activeTab, ws]);
-
-  useEffect(() => {
-    if (!showCoilMaterial) return;
-    const d = new Date().toISOString().slice(0, 10);
-    setCoilSplitForm((s) => ({ ...s, date: s.date || d }));
-    setCoilScrapForm((s) => ({ ...s, date: s.date || d }));
-    setCoilReturnForm((s) => ({ ...s, date: s.date || d }));
-  }, [showCoilMaterial]);
-
-  const submitCoilSplit = async (e) => {
-    e.preventDefault();
-    const coilNo = coilSplitForm.coilNo.trim();
-    const splitKg = Number(coilSplitForm.splitKg);
-    if (!coilNo) {
-      showToast('Select or enter a parent coil.', { variant: 'error' });
-      return;
-    }
-    if (!Number.isFinite(splitKg) || splitKg <= 0) {
-      showToast('Enter a positive split weight (kg).', { variant: 'error' });
-      return;
-    }
-    if (!ws?.canMutate) {
-      showToast('Reconnect to post coil moves — workspace is read-only.', { variant: 'error' });
-      return;
-    }
-    setCoilMaterialSaving(true);
-    try {
-      const { ok, data } = await apiFetch(`/api/coil-lots/${encodeURIComponent(coilNo)}/split`, {
-        method: 'POST',
-        body: JSON.stringify({
-          splitKg,
-          newCoilNo: coilSplitForm.newCoilNo.trim() || undefined,
-          note: coilSplitForm.note.trim(),
-          dateISO: coilSplitForm.date || new Date().toISOString().slice(0, 10),
-        }),
-      });
-      if (!ok || !data?.ok) {
-        showToast(data?.error || 'Split failed.', { variant: 'error' });
-        return;
-      }
-      await ws.refresh();
-      showToast(`Split OK — new coil ${data.newCoilNo} (${data.splitKg} kg).`);
-      setShowCoilMaterial(false);
-    } finally {
-      setCoilMaterialSaving(false);
-    }
-  };
-
-  const submitCoilScrap = async (e) => {
-    e.preventDefault();
-    const coilNo = coilScrapForm.coilNo.trim();
-    const kg = Number(coilScrapForm.kg);
-    if (!coilNo) {
-      showToast('Select a coil.', { variant: 'error' });
-      return;
-    }
-    if (!Number.isFinite(kg) || kg <= 0) {
-      showToast('Enter scrap weight (kg).', { variant: 'error' });
-      return;
-    }
-    if (coilScrapForm.reason === 'Other' && !coilScrapForm.note.trim()) {
-      showToast('Add a note for “Other”.', { variant: 'error' });
-      return;
-    }
-    if (!ws?.canMutate) {
-      showToast('Reconnect to post coil moves — workspace is read-only.', { variant: 'error' });
-      return;
-    }
-    setCoilMaterialSaving(true);
-    try {
-      const { ok, data } = await apiFetch(`/api/coil-lots/${encodeURIComponent(coilNo)}/scrap`, {
-        method: 'POST',
-        body: JSON.stringify({
-          kg,
-          reason: coilScrapForm.reason,
-          note: coilScrapForm.note.trim(),
-          dateISO: coilScrapForm.date || new Date().toISOString().slice(0, 10),
-          creditScrapInventory: Boolean(coilScrapForm.creditScrapInventory),
-          scrapProductID: coilScrapForm.scrapProductID.trim() || 'SCRAP-COIL',
-        }),
-      });
-      if (!ok || !data?.ok) {
-        showToast(data?.error || 'Scrap posting failed.', { variant: 'error' });
-        return;
-      }
-      await ws.refresh();
-      showToast(`Scrap posted — ${kg} kg off ${coilNo}.`);
-      setShowCoilMaterial(false);
-    } finally {
-      setCoilMaterialSaving(false);
-    }
-  };
-
-  const submitCoilReturn = async (e) => {
-    e.preventDefault();
-    const coilNo = coilReturnForm.coilNo.trim();
-    const kg = Number(coilReturnForm.kg);
-    if (!coilNo) {
-      showToast('Select a coil.', { variant: 'error' });
-      return;
-    }
-    if (!Number.isFinite(kg) || kg <= 0) {
-      showToast('Enter returned weight (kg).', { variant: 'error' });
-      return;
-    }
-    if (coilReturnForm.reason === 'Other' && !coilReturnForm.note.trim()) {
-      showToast('Add a note for “Other”.', { variant: 'error' });
-      return;
-    }
-    if (!ws?.canMutate) {
-      showToast('Reconnect to post coil moves — workspace is read-only.', { variant: 'error' });
-      return;
-    }
-    setCoilMaterialSaving(true);
-    try {
-      const { ok, data } = await apiFetch(`/api/coil-lots/${encodeURIComponent(coilNo)}/return-material`, {
-        method: 'POST',
-        body: JSON.stringify({
-          kg,
-          reason: coilReturnForm.reason,
-          note: coilReturnForm.note.trim(),
-          dateISO: coilReturnForm.date || new Date().toISOString().slice(0, 10),
-        }),
-      });
-      if (!ok || !data?.ok) {
-        showToast(data?.error || 'Return-to-stock failed.', { variant: 'error' });
-        return;
-      }
-      await ws.refresh();
-      showToast(`Return posted — ${kg} kg added back on ${coilNo}.`);
-      setShowCoilMaterial(false);
-    } finally {
-      setCoilMaterialSaving(false);
-    }
-  };
 
   const openProductionQueueRow = (item) => {
     if (ws?.canMutate) {
@@ -1168,61 +1089,79 @@ const Operations = () => {
   };
 
   return (
-    <PageShell blurred={isAnyModalOpen || deliveriesShellBlur}>
+    <PageShell blurred={isAnyModalOpen}>
       <PageHeader
         title="Store & production"
-        subtitle="Receive in-transit coils into stock, adjustments, finished goods & coil requests — aligned with Sales / Procurement."
+        subtitle="Receive in-transit coils into stock, adjustments & coil requests. Coil control posts ledger moves, scrap/offcut (metres + book refs), return inward to the offcut pool, and supplier defect logs."
         tabs={<PageTabs tabs={opsTabs} value={activeTab} onChange={handleOpsTab} />}
+        actions={
+          <AiAskButton
+            mode="operations"
+            prompt={
+              activeTab === 'inventory'
+                ? 'Summarize stock risk, in-transit receipts, and the most important store actions.'
+                : activeTab === 'production'
+                  ? 'Which production jobs or conversion checks need attention first, and why?'
+                  : activeTab === 'coilControl'
+                    ? 'Which coil ledger adjustments, scrap/offcut entries, return inward pool lines, or supplier defects need attention first?'
+                    : 'Summarize operational priorities for this workspace.'
+            }
+            pageContext={{
+              source: 'operations-page',
+              activeTab,
+              searchQuery,
+            }}
+            className="inline-flex items-center gap-2 rounded-xl border border-teal-100 bg-white px-3 py-2 text-[10px] font-black uppercase tracking-wide text-[#134e4a] shadow-sm transition hover:bg-teal-50"
+          >
+            Ask AI
+          </AiAskButton>
+        }
       />
+
+      <div className="mb-4 lg:mb-6">
+        <OperationsInventoryAttentionPanel
+          attention={operationsInventoryAttention}
+          hasWorkspaceData={Boolean(ws?.hasWorkspaceData)}
+          onOpenProductionTrace={openAttentionProductionTrace}
+          onGoProcurement={goProcurementFromAttention}
+        />
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 lg:gap-8">
         {activeTab === 'inventory' ? (
         <div className="col-span-full w-full order-2">
-          <div className="flex flex-col lg:flex-row gap-6 lg:gap-8 lg:items-start">
-            <section className="z-soft-panel overflow-hidden w-full lg:w-1/2 lg:flex-1 min-w-0 flex flex-col">
+          <div className="mb-2 rounded-lg border border-slate-200/80 bg-slate-50/80 px-2 py-2 sm:px-3">
+            <div role="tablist" aria-label="Stock category (receive and on-hand)" className="flex flex-wrap gap-1">
+              {STOCK_RECEIVE_KIND_TABS.map((t) => {
+                const active = stockReceiveKind === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => setStockReceiveKind(t.id)}
+                    className={`px-2.5 py-1 rounded-md text-[9px] font-semibold uppercase tracking-wide transition-colors ${
+                      active
+                        ? 'bg-[#134e4a] text-white shadow-sm'
+                        : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-3 lg:gap-8 lg:items-start">
+            <section className="z-soft-panel overflow-hidden w-full min-w-0 flex flex-col lg:col-span-1">
             <div className="h-1 bg-teal-500 shrink-0 opacity-80" />
-            <div className="p-4 sm:p-6 flex flex-col">
-              <h3 className="text-[10px] font-semibold text-slate-600 uppercase tracking-widest mb-1 flex items-center gap-2">
+            <div className="p-3 sm:p-4 flex flex-col">
+              <h3 className="text-[10px] font-bold text-slate-700 uppercase tracking-widest mb-2 flex items-center gap-2">
                 <Truck size={14} className="text-sky-700" />
                 Goods in transit — receive
               </h3>
-              <div
-                role="tablist"
-                aria-label="Purchase category"
-                className="flex flex-wrap gap-1 mb-2"
-              >
-                {[
-                  { id: 'coil', label: 'Coil' },
-                  { id: 'stone', label: 'Stone' },
-                  { id: 'accessory', label: 'Accessories' },
-                ].map((t) => {
-                  const active = stockReceiveKind === t.id;
-                  return (
-                    <button
-                      key={t.id}
-                      type="button"
-                      role="tab"
-                      aria-selected={active}
-                      onClick={() => setStockReceiveKind(t.id)}
-                      className={`px-2.5 py-1 rounded-md text-[9px] font-semibold uppercase tracking-wide transition-colors ${
-                        active
-                          ? 'bg-[#134e4a] text-white shadow-sm'
-                          : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
-                      }`}
-                    >
-                      {t.label}
-                    </button>
-                  );
-                })}
-              </div>
-              <p className="text-[10px] text-slate-500 leading-relaxed mb-3">
-                {stockReceiveKind === 'coil'
-                  ? 'Enter coil # and kg received; stock updates when you confirm.'
-                  : stockReceiveKind === 'stone'
-                    ? 'Enter metres received per line; stone stock is metre-based (no coil lots).'
-                    : 'Enter units received per line; accessory stock is count-based.'}
-              </p>
-              {!anyReceivablePo ? (
+              {!anyReceivablePo && inTransitLoads.length === 0 ? (
                 <p className="text-[10px] font-medium text-slate-400">Nothing on road or loading.</p>
               ) : transitOrdersSortedFiltered.length === 0 ? (
                 <p className="text-[10px] font-medium text-slate-400">
@@ -1232,8 +1171,8 @@ const Operations = () => {
                 </p>
               ) : (
                 <>
-                  <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-2 mb-2 shrink-0">
-                    <label className="relative flex-1 min-w-[140px]">
+                  <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-1.5 mb-1.5 shrink-0">
+                    <label className="relative min-w-0 w-full flex-1 sm:min-w-[140px]">
                       <Search
                         size={12}
                         className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
@@ -1243,8 +1182,8 @@ const Operations = () => {
                         type="search"
                         value={transitSearch}
                         onChange={(e) => setTransitSearch(e.target.value)}
-                        placeholder="Search PO, supplier, product…"
-                        className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-2 text-[10px] font-medium text-slate-800 placeholder:text-slate-400"
+                        placeholder="PO, supplier, product…"
+                        className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-2 text-[10px] font-semibold text-slate-800 placeholder:text-slate-400"
                       />
                     </label>
                     <div className="flex items-center gap-2 shrink-0">
@@ -1267,9 +1206,8 @@ const Operations = () => {
                     </div>
                   </div>
                   {transitOrdersTruncated ? (
-                    <p className="text-[9px] text-slate-500 mb-1.5">
-                      Showing {STOCK_SIDE_LIST_LIMIT} of {transitOrdersSortedFiltered.length}. Search or sort to find
-                      older POs.
+                    <p className="text-[8px] font-semibold text-slate-500 mb-1">
+                      +{transitOrdersSortedFiltered.length - STOCK_SIDE_LIST_LIMIT} more — search or sort
                     </p>
                   ) : null}
                   <ul className="space-y-1.5">
@@ -1293,13 +1231,13 @@ const Operations = () => {
                     return (
                     <li
                       key={p.poID}
-                      className="rounded-lg border border-slate-200/60 bg-white/40 py-1.5 px-2.5 shadow-sm backdrop-blur-md"
+                      className="rounded-lg border border-slate-200/60 bg-white/40 py-1 px-2 shadow-sm backdrop-blur-md"
                     >
                       <div className="min-w-0 leading-tight">
                         <div className="flex items-center justify-between gap-2 min-w-0">
-                          <p className="text-[11px] font-bold text-[#134e4a] truncate min-w-0">
+                          <p className="text-[11px] font-black text-[#134e4a] truncate min-w-0">
                             {p.poID}
-                            <span className="font-medium text-slate-600"> · {p.supplierName}</span>
+                            <span className="font-bold text-slate-700"> · {p.supplierName}</span>
                           </p>
                           {expandedReceivePoId !== p.poID ? (
                             <button
@@ -1327,49 +1265,66 @@ const Operations = () => {
                           )}
                         </div>
                         <p
-                          className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2"
+                          className="text-[9px] font-semibold text-slate-600 mt-0.5 leading-snug line-clamp-2"
                           title={meta2}
                         >
                           {meta2}
                         </p>
                       </div>
                       {expandedReceivePoId === p.poID ? (
-                        <form className="mt-2 space-y-3 border-t border-dashed border-slate-200 pt-2" onSubmit={applyTransitReceipt}>
-                          <div>
-                            <label className="text-[9px] font-bold text-slate-400 uppercase block mb-1">
-                              Location (optional)
-                            </label>
-                            <input
-                              value={receiveDraft.location}
-                              onChange={(e) =>
-                                setReceiveDraft((s) => ({ ...s, location: e.target.value }))
-                              }
-                              placeholder="Bay / rack"
-                              className="w-full rounded-lg border border-slate-200 py-2 px-2 text-xs font-medium"
-                            />
-                          </div>
+                        <form
+                          noValidate
+                          className="mt-1.5 space-y-2 border-t border-dashed border-slate-200 pt-1.5"
+                          onSubmit={applyTransitReceipt}
+                        >
+                          <input
+                            value={receiveDraft.location}
+                            onChange={(e) =>
+                              setReceiveDraft((s) => ({ ...s, location: e.target.value }))
+                            }
+                            placeholder="Location (optional)"
+                            aria-label="Storage location"
+                            className="w-full rounded-lg border border-slate-200 py-1.5 px-2 text-[11px] font-semibold text-slate-800"
+                          />
                           {grnLines.length === 0 ? (
                             <p className="text-[10px] text-amber-700">No open lines on this order.</p>
                           ) : (
-                            grnLines.map((row, idx) => (
+                            grnLines.map((row, idx) => {
+                              const maxU =
+                                row.grnKind === 'stone' ? 'm' : row.grnKind === 'accessory' ? 'units' : 'kg';
+                              const gaugeS = String(row.gauge ?? '').trim() || '—';
+                              const colourS = String(row.color ?? '').trim() || '—';
+                              return (
                               <div
                                 key={row.lineKey || idx}
-                                className="rounded-lg border border-slate-100 bg-slate-50/80 p-3 sm:p-4 space-y-2"
+                                className="rounded-md border border-slate-200/90 bg-white p-2 space-y-1.5"
                               >
-                                <p className="text-[10px] font-bold text-[#134e4a]">{row.productName}</p>
-                                <p className="text-[9px] text-slate-500">
-                                  Max {row.remaining.toLocaleString()}{' '}
-                                  {row.grnKind === 'stone' ? 'm' : row.grnKind === 'accessory' ? 'units' : 'kg'}
+                                <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 min-w-0">
+                                  <p className="text-[11px] font-black text-[#134e4a] leading-snug min-w-0 flex-1">
+                                    {row.productName}
+                                  </p>
+                                  <span
+                                    className="text-[10px] font-black tabular-nums text-slate-700 shrink-0"
+                                    title="Open on PO; you can post more if the delivery was heavier than ordered."
+                                  >
+                                    Open{' '}
+                                    {row.remaining.toLocaleString()}
+                                    {maxU === 'm' ? ' m' : maxU === 'units' ? ' u' : ' kg'}
+                                  </span>
+                                </div>
+                                <p className="text-[10px] font-bold text-slate-800 leading-tight">
+                                  <span className="font-black text-slate-950">{gaugeS}</span>
+                                  <span className="text-slate-400 font-semibold"> · </span>
+                                  <span className="font-black text-slate-950">{colourS}</span>
                                 </p>
                                 {row.grnKind === 'stone' || row.grnKind === 'accessory' ? (
                                   <div>
-                                    <label className="text-[8px] font-bold text-slate-400 uppercase block mb-0.5">
-                                      {row.grnKind === 'stone' ? 'Metres in' : 'Units in'}
+                                    <label className="sr-only">
+                                      {row.grnKind === 'stone' ? 'Metres received' : 'Units received'}
                                     </label>
                                     <input
                                       type="number"
                                       min="0"
-                                      max={row.remaining}
                                       step={row.grnKind === 'stone' ? '0.01' : '1'}
                                       value={row.qtyReceived}
                                       onChange={(e) => {
@@ -1378,19 +1333,17 @@ const Operations = () => {
                                           prev.map((r, i) => (i === idx ? { ...r, qtyReceived: v } : r))
                                         );
                                       }}
-                                      className="w-full rounded border border-slate-200 py-2 px-2 text-xs font-bold"
+                                      placeholder={row.grnKind === 'stone' ? 'Metres' : 'Units'}
+                                      className="w-full rounded border border-slate-200 py-1.5 px-2 text-xs font-black text-[#134e4a]"
                                     />
                                   </div>
                                 ) : (
-                                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
                                     <div>
-                                      <label className="text-[8px] font-bold text-slate-400 uppercase block mb-0.5">
-                                        Kg in
-                                      </label>
+                                      <label className="sr-only">Kilograms received</label>
                                       <input
                                         type="number"
                                         min="0"
-                                        max={row.remaining}
                                         value={row.qtyReceived}
                                         onChange={(e) => {
                                           const v = e.target.value;
@@ -1398,31 +1351,12 @@ const Operations = () => {
                                             prev.map((r, i) => (i === idx ? { ...r, qtyReceived: v } : r))
                                           );
                                         }}
-                                        className="w-full rounded border border-slate-200 py-2 px-2 text-xs font-bold"
+                                        placeholder="Kg"
+                                        className="w-full rounded border border-slate-200 py-1.5 px-2 text-xs font-black text-[#134e4a]"
                                       />
                                     </div>
                                     <div>
-                                      <label className="text-[8px] font-bold text-slate-400 uppercase block mb-0.5">
-                                        Wt kg
-                                      </label>
-                                      <input
-                                        type="number"
-                                        min="0"
-                                        step="0.01"
-                                        value={row.weightKg}
-                                        onChange={(e) => {
-                                          const v = e.target.value;
-                                          setGrnLines((prev) =>
-                                            prev.map((r, i) => (i === idx ? { ...r, weightKg: v } : r))
-                                          );
-                                        }}
-                                        className="w-full rounded border border-slate-200 py-2 px-2 text-xs font-bold"
-                                      />
-                                    </div>
-                                    <div>
-                                      <label className="text-[8px] font-bold text-slate-400 uppercase block mb-0.5">
-                                        Coil #
-                                      </label>
+                                      <label className="sr-only">Coil number</label>
                                       <input
                                         value={row.coilNo}
                                         onChange={(e) => {
@@ -1431,38 +1365,36 @@ const Operations = () => {
                                             prev.map((r, i) => (i === idx ? { ...r, coilNo: v } : r))
                                           );
                                         }}
-                                        placeholder="CL-YY-####"
-                                        title="Next free number suggested from existing coils; change if the shop-floor tag differs."
-                                        className="w-full rounded border border-slate-200 py-2 px-2 text-xs font-bold font-mono"
+                                        placeholder="Coil #"
+                                        title="Suggested from register; edit if tag differs."
+                                        className="w-full rounded border border-slate-200 py-1.5 px-2 text-xs font-black font-mono text-slate-900"
                                       />
                                     </div>
                                   </div>
                                 )}
                               </div>
-                            ))
+                              );
+                            })
                           )}
                           {grnLines.length > 0 &&
                           grnLines.some((r) => r.grnKind === 'coil') &&
                           ws?.hasPermission?.('purchase_orders.manage') ? (
-                            <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-amber-200 bg-amber-50/90 p-2.5 text-[10px] font-medium text-amber-950">
+                            <label className="flex cursor-pointer items-start gap-2 rounded-md border border-amber-200 bg-amber-50/90 p-2 text-[9px] font-bold text-amber-950">
                               <input
                                 type="checkbox"
                                 checked={grnConversionOverride}
                                 onChange={(e) => setGrnConversionOverride(e.target.checked)}
                                 className="mt-0.5 h-3.5 w-3.5 rounded border-amber-400"
                               />
-                              <span>
-                                Override GRN conversion checks (PO kg/m vs entry, weight vs metres×conversion). Use only
-                                with documented variance — logged to audit.
-                              </span>
+                              <span>Override conversion checks (audited).</span>
                             </label>
                           ) : null}
                           {grnLines.length > 0 ? (
                             <button
                               type="submit"
-                              className="w-full rounded-lg bg-[#134e4a] text-white text-[10px] font-bold uppercase tracking-wide py-2.5 hover:bg-[#0f3d39]"
+                              className="w-full rounded-lg bg-[#134e4a] text-white text-[10px] font-black uppercase tracking-wide py-2 hover:bg-[#0f3d39]"
                             >
-                              Confirm receipt → inventory
+                              Confirm receipt
                             </button>
                           ) : null}
                         </form>
@@ -1476,10 +1408,10 @@ const Operations = () => {
             </div>
           </section>
 
-            <section className="z-soft-panel overflow-hidden w-full lg:w-1/2 lg:flex-1 min-w-0 flex flex-col">
+            <section className="z-soft-panel overflow-hidden w-full min-w-0 flex flex-col lg:col-span-2">
               <div className="h-1 bg-[#134e4a] shrink-0 opacity-80" />
-              <div className="p-4 sm:p-6 flex flex-col">
-                <h3 className="text-[10px] font-semibold text-slate-600 uppercase tracking-widest mb-1 flex items-center gap-2">
+              <div className="p-3 sm:p-4 flex flex-col">
+                <h3 className="text-[10px] font-bold text-slate-700 uppercase tracking-widest mb-2 flex items-center gap-2">
                   <Scale size={14} className="text-[#134e4a]" />
                   {stockReceiveKind === 'coil'
                     ? 'Received coils — live weight'
@@ -1487,44 +1419,9 @@ const Operations = () => {
                       ? 'Received stone — live metres'
                       : 'Received accessories — live qty'}
                 </h3>
-                <div
-                  role="tablist"
-                  aria-label="Received stock category"
-                  className="flex flex-wrap gap-1 mb-2"
-                >
-                  {[
-                    { id: 'coil', label: 'Coil' },
-                    { id: 'stone', label: 'Stone' },
-                    { id: 'accessory', label: 'Accessories' },
-                  ].map((t) => {
-                    const active = stockReceiveKind === t.id;
-                    return (
-                      <button
-                        key={`rcvd-${t.id}`}
-                        type="button"
-                        role="tab"
-                        aria-selected={active}
-                        onClick={() => setStockReceiveKind(t.id)}
-                        className={`px-2.5 py-1 rounded-md text-[9px] font-semibold uppercase tracking-wide transition-colors ${
-                          active
-                            ? 'bg-[#134e4a] text-white shadow-sm'
-                            : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
-                        }`}
-                      >
-                        {t.label}
-                      </button>
-                    );
-                  })}
-                </div>
-                <p className="text-[10px] text-slate-500 leading-relaxed mb-3">
-                  {stockReceiveKind === 'coil'
-                    ? 'Every coil from store GRN. Current kg is the live weight left on the roll.'
-                    : stockReceiveKind === 'stone'
-                      ? 'Stone-coated SKUs (metres). Click a row for full in / out movement history.'
-                      : 'Accessory SKUs (units). Click a row for full in / out movement history.'}
-                </p>
                 {stockReceiveKind === 'coil' ? (
-                  coilLotsReceiptSorted.length === 0 ? (
+                  <>
+                    {coilLotsReceiptSorted.length === 0 ? (
                     <p className="text-[10px] font-medium text-slate-400">
                       No coils yet — confirm a receipt in the panel on the left.
                     </p>
@@ -1533,7 +1430,7 @@ const Operations = () => {
                   ) : (
                     <>
                       <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-2 mb-2 shrink-0">
-                        <label className="relative flex-1 min-w-[140px]">
+                        <label className="relative min-w-0 w-full flex-1 sm:min-w-[140px]">
                           <Search
                             size={12}
                             className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
@@ -1588,7 +1485,7 @@ const Operations = () => {
                               <button
                                 type="button"
                                 onClick={() => navigate(`/operations/coils/${encodeURIComponent(c.coilNo)}`)}
-                                className="w-full text-left rounded-lg border border-slate-200/60 bg-white/40 py-1.5 px-2.5 shadow-sm backdrop-blur-md hover:bg-white/70 transition-colors group"
+                                className="w-full text-left rounded-lg border border-slate-200/60 bg-white/40 py-1 px-2 shadow-sm backdrop-blur-md hover:bg-white/70 transition-colors group"
                               >
                                 <div className="min-w-0 leading-tight">
                                   <div className="flex items-center justify-between gap-2 min-w-0">
@@ -1601,7 +1498,7 @@ const Operations = () => {
                                     </span>
                                   </div>
                                   <p
-                                    className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2"
+                                    className="text-[9px] font-semibold text-slate-600 mt-0.5 leading-snug line-clamp-2"
                                     title={meta2}
                                   >
                                     {meta2}
@@ -1613,7 +1510,8 @@ const Operations = () => {
                         })}
                       </ul>
                     </>
-                  )
+                  )}
+                  </>
                 ) : skuProductsLiveSorted.length === 0 ? (
                   <p className="text-[10px] font-medium text-slate-400">
                     No {stockReceiveKind === 'stone' ? 'stone-coated' : 'accessory'} SKUs in catalog yet — create a PO
@@ -1624,7 +1522,7 @@ const Operations = () => {
                 ) : (
                   <>
                     <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-2 mb-2 shrink-0">
-                      <label className="relative flex-1 min-w-[140px]">
+                      <label className="relative min-w-0 w-full flex-1 sm:min-w-[140px]">
                         <Search
                           size={12}
                           className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
@@ -1707,20 +1605,6 @@ const Operations = () => {
             </button>
             <button
               type="button"
-              onClick={() => setShowFinishedGoods(true)}
-              className="z-btn-secondary"
-            >
-                  <Factory size={16} /> Finish coil
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowCoilMaterial(true)}
-              className="z-btn-secondary"
-            >
-              <Scissors size={16} /> Coil split / scrap / return
-            </button>
-            <button
-              type="button"
               onClick={() => setShowCoilRequest(true)}
               className="z-btn-primary"
             >
@@ -1732,7 +1616,7 @@ const Operations = () => {
 
         {activeTab === 'inventory' ? (
         <div className="col-span-full mb-2 order-1">
-          <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <div className="rounded-xl border border-slate-200 bg-white p-3">
               <p className="text-[9px] font-bold uppercase tracking-wide text-slate-500 flex items-center gap-1">
                 <Package size={12} /> Total stock
@@ -1794,56 +1678,193 @@ const Operations = () => {
                 onSearchChange={setSearchQuery}
                 searchPlaceholder="Search SKUs…"
               />
+            ) : activeTab === 'coilControl' ? (
+              <WorkspacePanelToolbar title={PANEL_TITLE.coilControl} />
             ) : null}
 
             <div className="space-y-4">
-              {activeTab === 'deliveries' ? (
-                <ProductionDeliveriesTab onShellBlur={setDeliveriesShellBlur} />
-              ) : null}
-
+              {activeTab === 'coilControl' ? <OperationsCoilControlTab /> : null}
 
               {activeTab === 'production' ? (
-                <p className="text-[11px] text-slate-500 -mt-3 mb-5 max-w-3xl leading-relaxed">
-                  Queue shows <strong className="font-semibold text-slate-600">cutting lists</strong> you have sent from
-                  Sales (<strong className="font-semibold text-slate-600">Send to production line</strong>). Click a row
-                  for traceability — coils, run log, and conversion checks.
-                </p>
-              ) : null}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:gap-6 items-start -mt-1">
+                  {/* Left 1/3 — in progress / need action */}
+                  <section className="space-y-4 lg:col-span-1 order-1 min-w-0 flex flex-col rounded-xl border border-slate-200/80 bg-slate-50/40 p-4">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <h3 className="text-sm font-black uppercase tracking-wide text-[#134e4a]">
+                          In progress · need action
+                        </h3>
+                        <p className="text-[10px] text-slate-600 mt-1 leading-relaxed">
+                          Planned or running jobs. Open trace to allocate coils, start, complete, or cancel (releases
+                          reservations when abandoned).
+                        </p>
+                      </div>
+                      <label className="flex shrink-0 items-center gap-1.5 text-[9px] font-bold uppercase tracking-wide text-slate-500">
+                        Sort
+                        <select
+                          value={productionActiveSortKey}
+                          onChange={(e) => setProductionActiveSortKey(e.target.value)}
+                          className="max-w-[9.5rem] rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold normal-case text-slate-800 outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/25"
+                        >
+                          <option value="attention">Attention</option>
+                          <option value="id">Cutting list ID</option>
+                          <option value="customer">Customer A–Z</option>
+                          <option value="status">Status A–Z</option>
+                        </select>
+                      </label>
+                    </div>
 
-              {activeTab === 'production' ? (
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:gap-6">
-                  <div className="space-y-4 lg:col-span-2 order-1">
-                    <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
-                      <div className="rounded-xl border border-slate-200 bg-white p-3">
-                        <p className="text-[9px] font-bold uppercase tracking-wide text-slate-500">Jobs waiting</p>
-                        <p className="mt-1 text-xl font-black text-[#134e4a] tabular-nums">{productionQueueStats.waiting}</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="rounded-lg border border-slate-200 bg-white p-2.5">
+                        <p className="text-[8px] font-bold uppercase tracking-wide text-slate-500">Jobs waiting</p>
+                        <p className="mt-0.5 text-lg font-black text-[#134e4a] tabular-nums">
+                          {productionQueueStats.waiting}
+                        </p>
                       </div>
-                      <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-3">
-                        <p className="text-[9px] font-bold uppercase tracking-wide text-amber-700">No coil assigned</p>
-                        <p className="mt-1 text-xl font-black text-amber-700 tabular-nums">{productionQueueStats.noCoil}</p>
+                      <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-2.5">
+                        <p className="text-[8px] font-bold uppercase tracking-wide text-amber-800">No coil</p>
+                        <p className="mt-0.5 text-lg font-black text-amber-800 tabular-nums">
+                          {productionQueueStats.noCoil}
+                        </p>
                       </div>
-                      <div className="rounded-xl border border-red-200 bg-red-50/40 p-3">
-                        <p className="text-[9px] font-bold uppercase tracking-wide text-red-700">Manager review</p>
-                        <p className="mt-1 text-xl font-black text-red-700 tabular-nums">{productionQueueStats.needsReview}</p>
+                      <div className="rounded-lg border border-red-200 bg-red-50/50 p-2.5">
+                        <p className="text-[8px] font-bold uppercase tracking-wide text-red-800">Mgr review</p>
+                        <p className="mt-0.5 text-lg font-black text-red-800 tabular-nums">
+                          {productionQueueStats.needsReview}
+                        </p>
                       </div>
-                      <div className="rounded-xl border border-rose-200 bg-rose-50/40 p-3">
-                        <p className="text-[9px] font-bold uppercase tracking-wide text-rose-700">Overdue &gt;24h</p>
-                        <p className="mt-1 text-xl font-black text-rose-700 tabular-nums">{productionQueueStats.overdue}</p>
+                      <div className="rounded-lg border border-rose-200 bg-rose-50/50 p-2.5">
+                        <p className="text-[8px] font-bold uppercase tracking-wide text-rose-800">Overdue</p>
+                        <p className="mt-0.5 text-lg font-black text-rose-800 tabular-nums">
+                          {productionQueueStats.overdue}
+                        </p>
                       </div>
                     </div>
 
+                    {ws?.hasWorkspaceData && jobsNeedingManagerReview.length > 0 ? (
+                      <div className="rounded-lg border border-red-200 bg-red-50/90 px-3 py-3 text-sm text-red-950 shadow-sm">
+                        <p className="text-[10px] font-black uppercase tracking-widest text-red-800 flex items-center gap-2">
+                          <AlertTriangle size={16} className="shrink-0" />
+                          Manager review queue
+                        </p>
+                        <p className="mt-2 text-[10px] text-red-900/90 leading-snug">
+                          Conversion outside agreed bands — resolve from traceability.
+                        </p>
+                        <ul className="mt-2 space-y-1 text-[10px] font-semibold">
+                          {jobsReviewPage.slice.map((j) => (
+                            <li key={j.jobID} className="font-mono text-red-950">
+                              {j.cuttingListId || j.jobID}
+                            </li>
+                          ))}
+                        </ul>
+                        <AppTablePager
+                          showingFrom={jobsReviewPage.showingFrom}
+                          showingTo={jobsReviewPage.showingTo}
+                          total={jobsReviewPage.total}
+                          hasPrev={jobsReviewPage.hasPrev}
+                          hasNext={jobsReviewPage.hasNext}
+                          onPrev={jobsReviewPage.goPrev}
+                          onNext={jobsReviewPage.goNext}
+                          pageSize={PRODUCTION_TABLE_PAGE_SIZE}
+                        />
+                      </div>
+                    ) : null}
+
+                    {ws?.hasWorkspaceData && productionActiveRows.length > 0 ? (
+                      <div className="rounded-xl border border-sky-200 bg-sky-50/50 p-3 shadow-sm flex flex-col">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-sky-900">Live jobs</p>
+                        <ul className="mt-2 space-y-1.5">
+                          {productionActivePage.slice.map((item) => (
+                            <li
+                              key={item.id}
+                              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-100 bg-white/90 px-2.5 py-2"
+                            >
+                              <div className="min-w-0">
+                                <p className="font-mono text-[11px] font-bold text-[#134e4a]">{item.id}</p>
+                                <p className="text-[9px] text-slate-600 truncate">
+                                  {item.customer} · {item.status || '—'}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  openTraceWithHint(item, 'Allocate coils, start, complete, or cancel from this panel.')
+                                }
+                                className="shrink-0 text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-sky-300 bg-white text-sky-900 hover:bg-sky-50"
+                              >
+                                Open trace
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                        <AppTablePager
+                          showingFrom={productionActivePage.showingFrom}
+                          showingTo={productionActivePage.showingTo}
+                          total={productionActivePage.total}
+                          hasPrev={productionActivePage.hasPrev}
+                          hasNext={productionActivePage.hasNext}
+                          onPrev={productionActivePage.goPrev}
+                          onNext={productionActivePage.goNext}
+                          pageSize={PRODUCTION_TABLE_PAGE_SIZE}
+                        />
+                      </div>
+                    ) : ws?.hasWorkspaceData ? (
+                      <p className="text-[10px] text-slate-500 leading-relaxed">
+                        No in-progress jobs in this workspace. Closed and finished records are on the right.
+                      </p>
+                    ) : (
+                      <p className="text-[10px] text-slate-500 leading-relaxed">
+                        Connect to the live workspace to see in-progress production jobs.
+                      </p>
+                    )}
+                  </section>
+
+                  {/* Right 2/3 — closed / finished / complete + reference-check detail */}
+                  <section className="space-y-4 lg:col-span-2 order-2 min-w-0 flex flex-col rounded-xl border border-slate-200/80 bg-white p-4 shadow-sm">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <h3 className="text-sm font-black uppercase tracking-wide text-[#134e4a]">
+                          Closed · finished · complete
+                        </h3>
+                        <p className="text-[10px] text-slate-600 mt-1 leading-relaxed">
+                          Completed and cancelled production records. Four-reference conversion summary appears on each
+                          row when checks exist for that cutting list (open trace for full coil breakdown).
+                        </p>
+                      </div>
+                      <label className="flex shrink-0 items-center gap-1.5 text-[9px] font-bold uppercase tracking-wide text-slate-500">
+                        Sort
+                        <select
+                          value={productionClosedSortKey}
+                          onChange={(e) => setProductionClosedSortKey(e.target.value)}
+                          className="max-w-[9.5rem] rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold normal-case text-slate-800 outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/25"
+                        >
+                          <option value="attention">Attention</option>
+                          <option value="id">Cutting list ID</option>
+                          <option value="customer">Customer A–Z</option>
+                          <option value="status">Status A–Z</option>
+                        </select>
+                      </label>
+                    </div>
+
                     <div
-                      className="inline-flex flex-wrap rounded-lg border border-slate-200 bg-slate-50/90 p-1 gap-1 mb-1"
+                      className="inline-flex flex-wrap rounded-lg border border-slate-200 bg-slate-50/90 p-1 gap-1"
                       role="group"
-                      aria-label="Filter production queue"
+                      aria-label="Filter closed production records"
                     >
-                      {[
-                        { id: 'all', label: 'All' },
-                        { id: 'waiting', label: 'Waiting' },
-                        { id: 'running', label: 'In progress' },
-                        { id: 'needs_review', label: 'Needs review' },
-                        { id: 'done', label: 'Done' },
-                      ].map((f) => (
+                      {(ws?.hasWorkspaceData
+                        ? [
+                            { id: 'all', label: 'All closed' },
+                            { id: 'completed', label: 'Completed' },
+                            { id: 'cancelled', label: 'Cancelled' },
+                          ]
+                        : [
+                            { id: 'all', label: 'All' },
+                            { id: 'waiting', label: 'Waiting' },
+                            { id: 'running', label: 'In progress' },
+                            { id: 'needs_review', label: 'Needs review' },
+                            { id: 'done', label: 'Done' },
+                          ]
+                      ).map((f) => (
                         <button
                           key={f.id}
                           type="button"
@@ -1869,12 +1890,15 @@ const Operations = () => {
                         <p className="text-sm text-slate-600 mt-3 max-w-lg mx-auto leading-relaxed">
                           {productionQueueModel.mode === 'offline'
                             ? 'Create a quotation, post a receipt (50%+ paid), then add a cutting list in Sales.'
-                            : 'Try clearing the search box or switching filter chips above.'}
+                            : productionActiveRows.length > 0
+                              ? 'No closed records match this filter — adjust chips or search, or check in-progress on the left.'
+                              : 'Try clearing the search box or switching filter chips above.'}
                         </p>
                       </div>
                     ) : (
-                      <ul className="space-y-1.5">
-                        {productionQueueRows.map((item) => {
+                      <div className="flex flex-col w-full">
+                        <ul className="space-y-1.5 pr-0.5">
+                          {productionClosedPage.slice.map((item) => {
                           const meta2 = [
                             item.spec,
                             item.quantity,
@@ -1895,9 +1919,11 @@ const Operations = () => {
                               ? 'border-red-200 bg-red-50 text-red-700'
                               : item.priority === 'Done'
                                 ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                                : item.priority === 'Waiting' || item.priority === 'Wait'
-                                  ? 'border-amber-200 bg-amber-50 text-amber-900'
-                                  : 'border-slate-200 bg-slate-50 text-slate-600';
+                                : item.priority === 'Cancelled'
+                                  ? 'border-slate-300 bg-slate-100 text-slate-700'
+                                  : item.priority === 'Waiting' || item.priority === 'Wait'
+                                    ? 'border-amber-200 bg-amber-50 text-amber-900'
+                                    : 'border-slate-200 bg-slate-50 text-slate-600';
                           return (
                             <li
                               key={`${item.queueKind}-${item.id}`}
@@ -1937,6 +1963,41 @@ const Operations = () => {
                                 >
                                   {meta2}
                                 </p>
+                                {ws?.hasWorkspaceData
+                                  ? (() => {
+                                      const clId = String(item.cuttingListId || item.id || '').trim();
+                                      const chk = clId ? conversionChecksByCuttingListId.get(clId) : null;
+                                      const sum = chk?.length
+                                        ? summarizeConversionChecksForCuttingList(chk, formatVariancePct)
+                                        : null;
+                                      if (!sum) return null;
+                                      const w = String(sum.worst || 'OK');
+                                      const alertTone =
+                                        w === 'High'
+                                          ? 'border-red-200 bg-red-50 text-red-800'
+                                          : w === 'Low'
+                                            ? 'border-amber-200 bg-amber-50 text-amber-900'
+                                            : w === 'Watch'
+                                              ? 'border-sky-200 bg-sky-50 text-sky-900'
+                                              : 'border-emerald-200 bg-emerald-50 text-emerald-800';
+                                      return (
+                                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5 border-t border-slate-100/90 pt-1.5">
+                                          <span className="text-[7px] font-bold uppercase tracking-wide text-slate-400">
+                                            4-ref
+                                          </span>
+                                          <span
+                                            className={`text-[7px] font-semibold uppercase px-1.5 py-0.5 rounded border ${alertTone}`}
+                                          >
+                                            {sum.worst}
+                                          </span>
+                                          <span className="text-[8px] text-slate-600 tabular-nums">{sum.deltaLabel}</span>
+                                          <span className="text-[8px] text-slate-500">
+                                            · {sum.count} coil line{sum.count === 1 ? '' : 's'}
+                                          </span>
+                                        </div>
+                                      );
+                                    })()
+                                  : null}
                               </div>
                               {!item.completed ? (
                                 <div className="flex flex-wrap gap-1.5 pt-1.5 mt-1 border-t border-dashed border-slate-200">
@@ -1976,78 +2037,19 @@ const Operations = () => {
                           );
                         })}
                       </ul>
+                      <AppTablePager
+                        showingFrom={productionClosedPage.showingFrom}
+                        showingTo={productionClosedPage.showingTo}
+                        total={productionClosedPage.total}
+                        hasPrev={productionClosedPage.hasPrev}
+                        hasNext={productionClosedPage.hasNext}
+                        onPrev={productionClosedPage.goPrev}
+                        onNext={productionClosedPage.goNext}
+                        pageSize={PRODUCTION_TABLE_PAGE_SIZE}
+                      />
+                      </div>
                     )}
-                  </div>
-
-                  <aside className="space-y-4 lg:col-span-1 order-2">
-                    {ws?.hasWorkspaceData && jobsNeedingManagerReview.length > 0 ? (
-                      <div className="rounded-lg border border-red-200 bg-red-50/90 px-3 py-3 text-sm text-red-950 shadow-sm">
-                        <p className="text-[10px] font-black uppercase tracking-widest text-red-800 flex items-center gap-2">
-                          <AlertTriangle size={16} className="shrink-0" />
-                          Manager review
-                        </p>
-                        <p className="mt-2 text-xs text-red-900/90">
-                          Conversion outside agreed bands. Review and resolve from queue/traceability.
-                        </p>
-                        <ul className="mt-3 space-y-1.5 text-xs font-semibold">
-                          {jobsNeedingManagerReview.map((j) => (
-                            <li key={j.jobID} className="font-mono text-red-950">
-                              {j.cuttingListId || j.jobID}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-
-                    {ws?.hasWorkspaceData && recentConversionChecks.length > 0 ? (
-                      <div className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md shadow-sm overflow-hidden">
-                        <div className="border-b border-slate-100/90 px-3 py-2">
-                          <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">
-                            Recent four-reference checks
-                          </p>
-                          <p className="text-[9px] text-slate-500 mt-0.5 leading-snug">
-                            Latest conversion variance checks.
-                          </p>
-                        </div>
-                        <ul className="p-2 space-y-1.5">
-                          {recentConversionChecks.map((c) => {
-                            const v = c.varianceSummary?.variances ?? {};
-                            const listId = c.cuttingListId || c.jobID;
-                            const alert = String(c.alertState || '—');
-                            const alertTone =
-                              alert === 'High'
-                                ? 'border-red-200 bg-red-50 text-red-800'
-                                : alert === 'Low'
-                                  ? 'border-amber-200 bg-amber-50 text-amber-900'
-                                  : alert === 'Watch'
-                                    ? 'border-sky-200 bg-sky-50 text-sky-900'
-                                    : 'border-emerald-200 bg-emerald-50 text-emerald-800';
-                            const meta2 = `Δ Std ${formatVariancePct(v.standardPct)}`;
-                            return (
-                              <li
-                                key={c.id}
-                                className="rounded-lg border border-slate-200/60 bg-white/50 py-1.5 px-2.5 shadow-sm"
-                              >
-                                <div className="flex items-center justify-between gap-2 min-w-0">
-                                  <p className="text-[11px] font-bold font-mono text-[#134e4a] truncate min-w-0">
-                                    {listId}
-                                  </p>
-                                  <span
-                                    className={`shrink-0 text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border ${alertTone}`}
-                                  >
-                                    {alert}
-                                  </span>
-                                </div>
-                                <p className="text-[8px] text-slate-500 mt-0.5 tabular-nums leading-snug" title={meta2}>
-                                  {meta2}
-                                </p>
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      </div>
-                    ) : null}
-                  </aside>
+                  </section>
                 </div>
               ) : null}
 
@@ -2093,7 +2095,7 @@ const Operations = () => {
                   ))}
                 </select>
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
                   <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
                     Adjustment type
@@ -2181,8 +2183,8 @@ const Operations = () => {
                       {stockAdjustCoilCount != null
                         ? `${stockAdjustCoilCount} coil lot(s)`
                         : 'coil lot(s)'}{' '}
-                      in this branch. Prefer <strong>Coil material</strong> (split / scrap / return) so tags match
-                      the floor.
+                      in this branch. Prefer <strong>Coil control</strong> (split / scrap / return) so tags match the
+                      floor.
                     </span>
                   </p>
                   <label className="flex items-start gap-2 cursor-pointer font-medium">
@@ -2200,449 +2202,6 @@ const Operations = () => {
                 Post adjustment
               </button>
             </form>
-        </div>
-      </ModalFrame>
-
-      <ModalFrame isOpen={showFinishedGoods} onClose={() => setShowFinishedGoods(false)}>
-        <div className="z-modal-panel max-w-lg p-8 overflow-y-auto">
-          <div className="flex justify-between items-center mb-6">
-            <h3 className="text-xl font-bold text-[#134e4a]">Manual coil finish</h3>
-            <button
-              type="button"
-              onClick={() => setShowFinishedGoods(false)}
-              className="p-2 text-gray-400 hover:text-red-500 rounded-xl"
-            >
-              <X size={22} />
-            </button>
-          </div>
-          <form className="space-y-4" onSubmit={submitFinishedGoods}>
-            <div>
-              <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                Source coil number
-              </label>
-              <input
-                required
-                list="ops-fg-coils"
-                value={finishedForm.coilNo}
-                onChange={(e) =>
-                  setFinishedForm((f) => ({ ...f, coilNo: e.target.value }))
-                }
-                className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                placeholder="e.g. COIL-26-0012"
-              />
-              <datalist id="ops-fg-coils">
-                {coilLots
-                  .filter((c) => c.currentStatus !== 'Consumed' && c.currentStatus !== 'Finished')
-                  .filter((c) => liveCoilWeightKg(c) < 100)
-                  .map((c) => (
-                    <option key={c.coilNo} value={c.coilNo} />
-                  ))}
-              </datalist>
-            </div>
-            <div>
-              <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                Finished output qty (metres)
-              </label>
-              <input
-                required
-                type="number"
-                min="1"
-                value={finishedForm.qty}
-                onChange={(e) => setFinishedForm((f) => ({ ...f, qty: e.target.value }))}
-                className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-              />
-            </div>
-            <p className="text-[10px] text-slate-500 -mt-1">
-              This finish entry is posted against the selected coil.
-            </p>
-            <div>
-              <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                Finish date
-              </label>
-              <input
-                type="date"
-                value={finishedForm.date}
-                onChange={(e) => setFinishedForm((f) => ({ ...f, date: e.target.value }))}
-                className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-              />
-            </div>
-            <div>
-              <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                Empty spool weight (kg)
-              </label>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={finishedForm.spoolKg}
-                onChange={(e) => setFinishedForm((f) => ({ ...f, spoolKg: e.target.value }))}
-                placeholder="Inner reel / holder mass"
-                className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-              />
-              <p className="text-[10px] text-gray-500 mt-1">
-                Weight of empty spool core. This is recorded for audit.
-              </p>
-            </div>
-            <div className="rounded-xl border border-teal-100/80 bg-teal-50/40 p-4 space-y-3">
-              <p className="text-[10px] font-black text-[#134e4a] uppercase tracking-wider">
-                WIP link (optional, if used)
-              </p>
-              <p className="text-[10px] text-gray-600 leading-snug">
-                Match released raw material so stock and WIP stay balanced.
-              </p>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                  WIP source item
-                </label>
-                <select
-                  value={finishedForm.wipSourceProductID}
-                  onChange={(e) =>
-                    setFinishedForm((f) => ({ ...f, wipSourceProductID: e.target.value }))
-                  }
-                  className="w-full bg-white border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                >
-                  <option value="">None</option>
-                  {inventoryRows
-                    .filter((r) => !r.productID.startsWith('FG-'))
-                    .map((r) => (
-                      <option key={r.productID} value={r.productID}>
-                        {r.productID} — WIP {wipByProduct[r.productID] ?? 0} {r.unit}
-                      </option>
-                    ))}
-                </select>
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                  WIP consumed (kg / units)
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={finishedForm.wipQtyReleased}
-                  onChange={(e) =>
-                    setFinishedForm((f) => ({ ...f, wipQtyReleased: e.target.value }))
-                  }
-                  placeholder="e.g. coil weight consumed"
-                  className="w-full bg-white border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                />
-              </div>
-            </div>
-            <button type="submit" className="z-btn-primary w-full justify-center py-3">
-              Post coil finish
-            </button>
-          </form>
-        </div>
-      </ModalFrame>
-
-      <ModalFrame isOpen={showCoilMaterial} onClose={() => !coilMaterialSaving && setShowCoilMaterial(false)}>
-        <div className="z-modal-panel max-w-lg max-h-[90vh] p-6 sm:p-8 overflow-y-auto">
-          <div className="flex justify-between items-center mb-4">
-            <h3 className="text-xl font-bold text-[#134e4a]">Coil material</h3>
-            <button
-              type="button"
-              disabled={coilMaterialSaving}
-              onClick={() => setShowCoilMaterial(false)}
-              className="p-2 text-gray-400 hover:text-red-500 rounded-xl disabled:opacity-40"
-            >
-              <X size={22} />
-            </button>
-          </div>
-          <p className="text-[11px] text-slate-600 mb-4 leading-relaxed">
-            <strong>Split</strong> moves unreserved kg to a new coil tag (off-cut roll).{' '}
-            <strong>Scrap</strong> removes kg from the coil and raw SKU stock; optionally credits{' '}
-            <span className="font-mono">SCRAP-COIL</span>. <strong>Return</strong> adds kg back onto a coil and raw
-            stock (corrections, unused return).
-          </p>
-          <div className="flex flex-wrap gap-1 mb-4">
-            {[
-              { id: 'split', label: 'Split' },
-              { id: 'scrap', label: 'Scrap' },
-              { id: 'return', label: 'Return' },
-            ].map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setCoilMaterialTab(t.id)}
-                className={`rounded-full px-3 py-1.5 text-[10px] font-black uppercase tracking-wide ${
-                  coilMaterialTab === t.id
-                    ? 'bg-[#134e4a] text-white'
-                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                }`}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
-
-          {coilMaterialTab === 'split' ? (
-            <form className="space-y-4" onSubmit={submitCoilSplit}>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">Parent coil</label>
-                <select
-                  required
-                  value={coilSplitForm.coilNo}
-                  onChange={(e) => setCoilSplitForm((s) => ({ ...s, coilNo: e.target.value }))}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                >
-                  <option value="">Select coil…</option>
-                  {[...coilLots]
-                    .sort((a, b) => String(a.coilNo).localeCompare(String(b.coilNo)))
-                    .map((c) => {
-                      const rem = liveCoilWeightKg(c);
-                      const res = Number(c.qtyReserved) || 0;
-                      const free = Math.max(0, rem - res);
-                      return (
-                        <option key={c.coilNo} value={c.coilNo}>
-                          {c.coilNo} · {rem.toFixed(0)} kg ({free.toFixed(0)} kg splittable)
-                          {c.parentCoilNo ? ` · from ${c.parentCoilNo}` : ''}
-                        </option>
-                      );
-                    })}
-                </select>
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                  Split weight (kg)
-                </label>
-                <input
-                  required
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  value={coilSplitForm.splitKg}
-                  onChange={(e) => setCoilSplitForm((s) => ({ ...s, splitKg: e.target.value }))}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                  New coil no (optional)
-                </label>
-                <input
-                  type="text"
-                  value={coilSplitForm.newCoilNo}
-                  onChange={(e) => setCoilSplitForm((s) => ({ ...s, newCoilNo: e.target.value }))}
-                  placeholder="Auto if empty"
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-mono outline-none"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">Note</label>
-                <textarea
-                  rows={2}
-                  value={coilSplitForm.note}
-                  onChange={(e) => setCoilSplitForm((s) => ({ ...s, note: e.target.value }))}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm outline-none resize-none"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">Date</label>
-                <input
-                  type="date"
-                  required
-                  value={coilSplitForm.date}
-                  onChange={(e) => setCoilSplitForm((s) => ({ ...s, date: e.target.value }))}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={coilMaterialSaving}
-                className="z-btn-primary w-full justify-center py-3 disabled:opacity-50"
-              >
-                {coilMaterialSaving ? 'Posting…' : 'Split coil'}
-              </button>
-            </form>
-          ) : null}
-
-          {coilMaterialTab === 'scrap' ? (
-            <form className="space-y-4" onSubmit={submitCoilScrap}>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">Coil</label>
-                <select
-                  required
-                  value={coilScrapForm.coilNo}
-                  onChange={(e) => setCoilScrapForm((s) => ({ ...s, coilNo: e.target.value }))}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                >
-                  <option value="">Select coil…</option>
-                  {[...coilLots]
-                    .sort((a, b) => String(a.coilNo).localeCompare(String(b.coilNo)))
-                    .map((c) => {
-                      const rem = liveCoilWeightKg(c);
-                      const res = Number(c.qtyReserved) || 0;
-                      const free = Math.max(0, rem - res);
-                      return (
-                        <option key={c.coilNo} value={c.coilNo}>
-                          {c.coilNo} · max scrap {free.toFixed(0)} kg
-                        </option>
-                      );
-                    })}
-                </select>
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">Scrap (kg)</label>
-                <input
-                  required
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  value={coilScrapForm.kg}
-                  onChange={(e) => setCoilScrapForm((s) => ({ ...s, kg: e.target.value }))}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">Reason</label>
-                <select
-                  value={coilScrapForm.reason}
-                  onChange={(e) => setCoilScrapForm((s) => ({ ...s, reason: e.target.value }))}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                >
-                  {COIL_SCRAP_REASONS.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">Note</label>
-                <textarea
-                  rows={2}
-                  value={coilScrapForm.note}
-                  onChange={(e) => setCoilScrapForm((s) => ({ ...s, note: e.target.value }))}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm outline-none resize-none"
-                />
-              </div>
-              <label className="flex items-center gap-2 text-sm font-semibold text-slate-700 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={coilScrapForm.creditScrapInventory}
-                  onChange={(e) =>
-                    setCoilScrapForm((s) => ({ ...s, creditScrapInventory: e.target.checked }))
-                  }
-                  className="rounded border-slate-300"
-                />
-                Credit scrap inventory SKU
-              </label>
-              {coilScrapForm.creditScrapInventory ? (
-                <div>
-                  <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                    Scrap product
-                  </label>
-                  <select
-                    value={coilScrapForm.scrapProductID}
-                    onChange={(e) =>
-                      setCoilScrapForm((s) => ({ ...s, scrapProductID: e.target.value }))
-                    }
-                    className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                  >
-                    {inventoryRows.map((r) => (
-                      <option key={r.productID} value={r.productID}>
-                        {r.productID} — {r.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              ) : null}
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">Date</label>
-                <input
-                  type="date"
-                  required
-                  value={coilScrapForm.date}
-                  onChange={(e) => setCoilScrapForm((s) => ({ ...s, date: e.target.value }))}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={coilMaterialSaving}
-                className="z-btn-primary w-full justify-center py-3 disabled:opacity-50"
-              >
-                {coilMaterialSaving ? 'Posting…' : 'Post scrap'}
-              </button>
-            </form>
-          ) : null}
-
-          {coilMaterialTab === 'return' ? (
-            <form className="space-y-4" onSubmit={submitCoilReturn}>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">Coil</label>
-                <select
-                  required
-                  value={coilReturnForm.coilNo}
-                  onChange={(e) => setCoilReturnForm((s) => ({ ...s, coilNo: e.target.value }))}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                >
-                  <option value="">Select coil…</option>
-                  {[...coilLots]
-                    .sort((a, b) => String(a.coilNo).localeCompare(String(b.coilNo)))
-                    .map((c) => (
-                      <option key={c.coilNo} value={c.coilNo}>
-                        {c.coilNo} · {liveCoilWeightKg(c).toFixed(0)} kg on roll
-                      </option>
-                    ))}
-                </select>
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                  Return weight (kg)
-                </label>
-                <input
-                  required
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  value={coilReturnForm.kg}
-                  onChange={(e) => setCoilReturnForm((s) => ({ ...s, kg: e.target.value }))}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">Reason</label>
-                <select
-                  value={coilReturnForm.reason}
-                  onChange={(e) => setCoilReturnForm((s) => ({ ...s, reason: e.target.value }))}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                >
-                  {COIL_RETURN_REASONS.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">Note</label>
-                <textarea
-                  rows={2}
-                  value={coilReturnForm.note}
-                  onChange={(e) => setCoilReturnForm((s) => ({ ...s, note: e.target.value }))}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm outline-none resize-none"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">Date</label>
-                <input
-                  type="date"
-                  required
-                  value={coilReturnForm.date}
-                  onChange={(e) => setCoilReturnForm((s) => ({ ...s, date: e.target.value }))}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={coilMaterialSaving}
-                className="z-btn-primary w-full justify-center py-3 disabled:opacity-50"
-              >
-                {coilMaterialSaving ? 'Posting…' : 'Post return to stock'}
-              </button>
-            </form>
-          ) : null}
         </div>
       </ModalFrame>
 
@@ -2666,7 +2225,7 @@ const Operations = () => {
               {coilRequestForm.rows.map((row, idx) => (
                 <div key={`rq-${idx}`} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 space-y-2">
                   <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Request line {idx + 1}</p>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                     <input
                       value={row.gauge}
                       onChange={(e) =>
@@ -2690,7 +2249,7 @@ const Operations = () => {
                       className="w-full bg-white border border-gray-100 rounded-xl py-2.5 px-3 text-sm font-bold outline-none"
                     />
                   </div>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                     <input
                       value={row.materialType}
                       onChange={(e) =>
@@ -2828,70 +2387,64 @@ const Operations = () => {
         isOpen={productionTraceModal != null}
         onClose={() => setProductionTraceModal(null)}
       >
-        <div className="z-modal-panel w-full max-w-[min(100%,1200px)] max-h-[min(92vh,920px)] flex flex-col p-0 overflow-hidden bg-white rounded-[28px] border border-slate-200 shadow-xl">
-          <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4 sm:px-6 shrink-0">
-            <div className="min-w-0">
-              <h3 className="text-lg font-bold text-[#134e4a]">
-                {productionTraceModal?.type === 'trace'
-                  ? productionTraceModal.completed
-                    ? 'Production record (completed)'
-                    : 'Production traceability'
-                  : 'Queued cutting list'}
-              </h3>
-              {productionTraceModal?.type === 'trace' ? (
-                <p className="mt-1 text-[11px] text-slate-500">
-                  <span className="font-mono font-semibold text-slate-700">
-                    {productionTraceModal.cuttingListId}
-                  </span>
-                  {productionTraceModal.completed ? (
-                    <span className="text-slate-400"> · read-only</span>
-                  ) : null}
-                </p>
-              ) : productionTraceModal?.type === 'pending' ? (
-                <p className="mt-1 text-[11px] text-slate-500">
-                  <span className="font-mono font-semibold text-slate-700">{productionTraceModal.id}</span> — connect
-                  the API to send this list to the production line from Sales.
-                </p>
-              ) : null}
-            </div>
-            <button
-              type="button"
-              onClick={() => setProductionTraceModal(null)}
-              className="p-2 text-gray-400 hover:text-red-500 rounded-xl shrink-0"
-              aria-label="Close"
-            >
-              <X size={22} />
-            </button>
-          </div>
-          <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6">
-            {productionTraceModal?.type === 'trace' ? (
-              <LiveProductionMonitor
-                focusCuttingListId={productionTraceModal.cuttingListId}
-                hideJobSidebar
-                inModal
-                viewOnly={Boolean(productionTraceModal.completed)}
-              />
-            ) : productionTraceModal?.type === 'pending' ? (
-              <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/70 px-5 py-6 text-sm text-slate-600 space-y-3">
-                <p>
-                  <span className="font-semibold text-slate-800">Customer:</span> {productionTraceModal.customer}
-                </p>
-                <p>
-                  <span className="font-semibold text-slate-800">Spec / ref:</span> {productionTraceModal.spec}
-                </p>
-                <p>
-                  <span className="font-semibold text-slate-800">Quantity:</span> {productionTraceModal.quantity}
-                </p>
-                <p>
-                  <span className="font-semibold text-slate-800">Priority:</span> {productionTraceModal.priority}
-                </p>
-                <p className="text-xs text-slate-500 pt-2 border-t border-slate-200">
-                  Connect the API server to register this list for production and use full coil allocation, run logging,
-                  and conversion checks in traceability.
-                </p>
+        <div className="z-modal-panel w-full min-w-0 max-w-[min(36rem,calc(100dvw-1.25rem))] sm:max-w-[min(40rem,calc(100dvw-2rem))] max-h-[min(92dvh,900px)] flex flex-col p-0 overflow-hidden bg-white rounded-2xl border border-slate-200 shadow-xl sm:rounded-[28px]">
+          {productionTraceModal?.type === 'trace' ? (
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+              <div className="min-h-0 min-w-0 flex-1 touch-pan-y overflow-y-auto overflow-x-hidden overscroll-y-contain p-2 sm:p-3">
+                <LiveProductionMonitor
+                  focusCuttingListId={productionTraceModal.cuttingListId}
+                  hideJobSidebar
+                  inModal
+                  viewOnly={Boolean(productionTraceModal.completed)}
+                  onModalClose={() => setProductionTraceModal(null)}
+                />
               </div>
-            ) : null}
-          </div>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4 sm:px-6 shrink-0">
+                <div className="min-w-0">
+                  <h3 className="text-lg font-bold text-[#134e4a]">Queued cutting list</h3>
+                  {productionTraceModal?.type === 'pending' ? (
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      <span className="font-mono font-semibold text-slate-700">{productionTraceModal.id}</span> — connect
+                      the API to send this list to the production line from Sales.
+                    </p>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setProductionTraceModal(null)}
+                  className="p-2 text-gray-400 hover:text-red-500 rounded-xl shrink-0"
+                  aria-label="Close"
+                >
+                  <X size={22} />
+                </button>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6">
+                {productionTraceModal?.type === 'pending' ? (
+                  <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/70 px-5 py-6 text-sm text-slate-600 space-y-3">
+                    <p>
+                      <span className="font-semibold text-slate-800">Customer:</span> {productionTraceModal.customer}
+                    </p>
+                    <p>
+                      <span className="font-semibold text-slate-800">Spec / ref:</span> {productionTraceModal.spec}
+                    </p>
+                    <p>
+                      <span className="font-semibold text-slate-800">Quantity:</span> {productionTraceModal.quantity}
+                    </p>
+                    <p>
+                      <span className="font-semibold text-slate-800">Priority:</span> {productionTraceModal.priority}
+                    </p>
+                    <p className="text-xs text-slate-500 pt-2 border-t border-slate-200">
+                      Connect the API server to register this list for production and use full coil allocation, run logging,
+                      and conversion checks in traceability.
+                    </p>
+                  </div>
+                ) : null}
+              </div>
+            </>
+          )}
         </div>
       </ModalFrame>
 

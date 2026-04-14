@@ -1,0 +1,18 @@
+{
+  "name": "Zarewa Industrial System",
+  "short_name": "Zarewa",
+  "description": "Aluminium and plastics operations, finance, and workspace",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#F8FAFC",
+  "theme_color": "#134e4a",
+  "icons": [
+    {
+      "src": "/zarewa-logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

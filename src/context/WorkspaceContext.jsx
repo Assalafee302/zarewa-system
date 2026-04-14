@@ -254,6 +254,14 @@ export function WorkspaceProvider({ children }) {
     [refresh]
   );
 
+  const getUnifiedWorkItemById = useCallback(
+    (workItemId) => {
+      const items = Array.isArray(snapshot?.unifiedWorkItems) ? snapshot.unifiedWorkItems : [];
+      return items.find((item) => item.id === workItemId || item.referenceNo === workItemId) ?? null;
+    },
+    [snapshot?.unifiedWorkItems]
+  );
+
   useEffect(() => {
     refresh();
   }, [refresh]);
@@ -343,6 +351,7 @@ export function WorkspaceProvider({ children }) {
       changePassword,
       updateProfile,
       updateWorkspace,
+      getUnifiedWorkItemById,
     }),
     [
       status,
@@ -368,6 +377,7 @@ export function WorkspaceProvider({ children }) {
       changePassword,
       updateProfile,
       updateWorkspace,
+      getUnifiedWorkItemById,
     ]
   );
 

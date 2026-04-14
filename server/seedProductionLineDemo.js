@@ -18,8 +18,67 @@ export function seedProductionLineDemo(db) {
   try {
     seedActiveJobForQuote003(db);
     seedCompletedJobForQuote007(db);
+    seedCompletedJobsForRefundEligibleSeededQuotes(db);
   } catch (e) {
     console.warn('[seed] production line demo:', e?.message || e);
+  }
+}
+
+/** So default quotations used in refund API tests satisfy POST /api/refunds eligibility (Completed/Cancelled job). */
+function seedCompletedJobsForRefundEligibleSeededQuotes(db) {
+  const targets = [
+    {
+      qref: 'QT-2026-001',
+      custId: 'CUS-001',
+      jobId: 'PRO-SEED-RF-001',
+    },
+    {
+      qref: 'QT-2026-002',
+      custId: 'CUS-002',
+      jobId: 'PRO-SEED-RF-002',
+    },
+  ];
+  for (const { qref, custId, jobId } of targets) {
+    const qok = db.prepare(`SELECT id FROM quotations WHERE id = ?`).get(qref);
+    if (!qok) continue;
+    const closed = db
+      .prepare(
+        `SELECT 1 FROM production_jobs WHERE quotation_ref = ? AND status IN ('Completed','Cancelled') LIMIT 1`
+      )
+      .get(qref);
+    if (closed) continue;
+
+    const cl = write.insertCuttingList(
+      db,
+      {
+        quotationRef: qref,
+        customerID: custId,
+        productID: 'FG-101',
+        productName: 'Longspan thin',
+        dateISO: '2026-03-28',
+        machineName: 'Seed',
+        handledBy: 'Seed',
+        lines: [{ sheets: 1, lengthM: 10 }],
+      },
+      DEFAULT_BRANCH_ID
+    );
+    if (!cl.ok) continue;
+
+    const job = write.insertProductionJob(
+      db,
+      {
+        jobID: jobId,
+        cuttingListId: cl.id,
+        productID: 'FG-101',
+        productName: 'Longspan thin',
+        plannedMeters: 10,
+        plannedSheets: 1,
+        machineName: 'Seed',
+      },
+      DEFAULT_BRANCH_ID
+    );
+    if (!job.ok) continue;
+    markJobCompletedDemo(db, job.jobID, cl.id, 10);
   }
 }
 

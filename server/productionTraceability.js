@@ -42,6 +42,9 @@ function clampNonNegative(value) {
   return Math.max(0, Number(value) || 0);
 }
 
+/** Closing weight below this (kg) may be paired with `finishCoil` to zero the roll off stock on completion. */
+const COIL_TAIL_FINISH_MAX_KG = 85;
+
 function parseGaugeMm(value) {
   const match = String(value ?? '')
     .replace(/,/g, '.')
@@ -497,6 +500,10 @@ export function saveProductionJobAllocations(db, jobID, allocations, opts = {}) 
   const status = job.status ?? 'Planned';
   const append = Boolean(opts.append);
 
+  if (status === 'Cancelled') {
+    return { ok: false, error: 'This production job was cancelled.' };
+  }
+
   if (append) {
     if (status !== 'Running') {
       return { ok: false, error: 'Supplemental coils can only be added while the job is running.' };
@@ -706,6 +713,9 @@ export function saveProductionJobAllocations(db, jobID, allocations, opts = {}) 
 export function startProductionJob(db, jobID, payload = {}, opts = {}) {
   const job = productionJobRow(db, jobID);
   if (!job) return { ok: false, error: 'Production job not found.' };
+  if ((job.status ?? 'Planned') === 'Cancelled') {
+    return { ok: false, error: 'Cancelled jobs cannot be started.' };
+  }
   if ((job.status ?? 'Planned') === 'Completed') {
     return { ok: false, error: 'Completed jobs cannot be started again.' };
   }
@@ -787,7 +797,8 @@ function buildVarianceSummaryPayload(row) {
  * @param {string} jobID
  * @param {{ allocations?: unknown[], completedAtISO?: string }} payload
  */
-export function computeCompletionConversionRows(db, jobID, payload = {}) {
+export function computeCompletionConversionRows(db, jobID, payload = {}, opts = {}) {
+  const requireFinishRollWhenTail = opts.requireFinishRollWhenTail !== false;
   const job = productionJobRow(db, jobID);
   if (!job) return { ok: false, error: 'Production job not found.' };
   if ((job.status ?? 'Planned') !== 'Running') {
@@ -817,8 +828,23 @@ export function computeCompletionConversionRows(db, jobID, payload = {}) {
       const openingWeightKg = safeNumber(allocation.opening_weight_kg);
       const closingWeightKg = safeNumber(submitted.closingWeightKg);
       const metersProduced = safeNumber(submitted.metersProduced);
+      const finishCoil = Boolean(submitted.finishCoil ?? submitted.finish_coil);
       if (closingWeightKg < 0 || closingWeightKg > openingWeightKg) {
         throw new Error(`Coil ${coilKey} closing kg must be between 0 and ${openingWeightKg}.`);
+      }
+      if (finishCoil && closingWeightKg >= COIL_TAIL_FINISH_MAX_KG) {
+        throw new Error(
+          `Coil ${coilKey}: “Finish roll” only applies when closing weight is below ${COIL_TAIL_FINISH_MAX_KG} kg.`
+        );
+      }
+      if (
+        requireFinishRollWhenTail &&
+        closingWeightKg < COIL_TAIL_FINISH_MAX_KG &&
+        !finishCoil
+      ) {
+        throw new Error(
+          `Coil ${coilKey}: closing weight is below ${COIL_TAIL_FINISH_MAX_KG} kg (typical core/spool tail). Confirm “Finish roll” to clear the remaining tail from coil stock when completing, or raise closing kg if usable steel is still on the roll.`
+        );
       }
       if (metersProduced <= 0) {
         throw new Error(`Coil ${coilKey} must produce a positive number of metres.`);
@@ -851,6 +877,7 @@ export function computeCompletionConversionRows(db, jobID, payload = {}) {
         alertState: alert.alertState,
         managerReviewRequired: alert.managerReviewRequired,
         note: String(submitted.note ?? '').trim(),
+        finishCoil,
       };
     });
     const totalMeters = conversionRows.reduce((sum, row) => sum + row.metersProduced, 0);
@@ -889,7 +916,7 @@ export function previewProductionConversion(db, jobID, payload = {}) {
       accessoryPlan: acc.plannedLines,
     };
   }
-  const r = computeCompletionConversionRows(db, jobID, payload);
+  const r = computeCompletionConversionRows(db, jobID, payload, { requireFinishRollWhenTail: false });
   if (!r.ok) return r;
   const acc = planAccessoryCompletion(db, jobRow, payload);
   if (!acc.ok) return { ok: false, error: acc.error };
@@ -909,6 +936,7 @@ export function previewProductionConversion(db, jobID, payload = {}) {
       variances: row.references.variances,
       alertState: row.alertState,
       managerReviewRequired: Boolean(row.managerReviewRequired),
+      finishCoil: Boolean(row.finishCoil),
     })),
     aggregatedAlertState: r.aggregatedAlertState,
     managerReviewRequired: r.managerReviewRequired,
@@ -1018,6 +1046,9 @@ function completeProductionJobStone(db, job, jobID, payload = {}, opts = {}) {
 export function completeProductionJob(db, jobID, payload = {}, opts = {}) {
   const job = productionJobRow(db, jobID);
   if (!job) return { ok: false, error: 'Production job not found.' };
+  if (String(job.status ?? '') === 'Cancelled') {
+    return { ok: false, error: 'This production job was cancelled.' };
+  }
   if (jobIsStoneMeter(db, job)) {
     return completeProductionJobStone(db, job, jobID, payload, opts);
   }
@@ -1101,6 +1132,35 @@ export function completeProductionJob(db, jobID, payload = {}, opts = {}) {
         });
         /** Keep `products.stock_level` aligned with coil draw-down (GRN increases this SKU; completion must decrease). */
         adjustProductStockTx(db, row.productID, -row.consumedWeightKg);
+        const tailBookedKg = row.finishCoil ? qtyRemaining : 0;
+        if (tailBookedKg > 1e-6) {
+          db.prepare(
+            `UPDATE coil_lots SET qty_remaining = 0, qty_reserved = 0, current_weight_kg = 0 WHERE coil_no = ?`
+          ).run(row.coilNo);
+          updateCoilDerivedStateTx(db, row.coilNo);
+          const tailCogs = uc > 0 ? Math.round(tailBookedKg * uc) : null;
+          adjustProductStockTx(db, row.productID, -tailBookedKg);
+          appendStockMovementTx(db, {
+            atISO: completedAtISO,
+            type: 'COIL_CONSUMPTION',
+            ref: jobID,
+            productID: row.productID,
+            qty: -tailBookedKg,
+            detail: `${row.coilNo} roll finished — tail ${tailBookedKg.toFixed(2)} kg removed from yard stock (${jobID})`,
+            unitPriceNgn: uc || null,
+            valueNgn: tailCogs,
+          });
+          appendAuditLog(db, {
+            actor: opts.actor,
+            action: 'production.finish_coil_tail',
+            entityKind: 'coil_lot',
+            entityId: row.coilNo,
+            status: 'success',
+            note: `${tailBookedKg.toFixed(2)} kg tail cleared on completion`,
+            details: { jobID, allocationId: row.allocationId, closingWeightKg: row.closingWeightKg },
+          });
+          if (tailCogs != null && tailCogs > 0) totalCogsForGl += tailCogs;
+        }
       }
       if (job.product_id) {
         adjustProductStockTx(db, job.product_id, totalMeters);
@@ -1245,6 +1305,94 @@ export function signOffProductionManagerReview(db, jobID, payload = {}, opts = {
  * Undo "start" only: job goes back to Planned so coils can be re-saved. Does not delete allocations.
  * Reserved kg on coils is unchanged. Requires audit reason.
  */
+function releaseProductionJobCoilReservationsTx(db, jobId) {
+  const coilRows = listJobCoilsForJob(db, jobId);
+  for (const row of coilRows) {
+    const coilNo = String(row.coil_no ?? '').trim();
+    const opening = safeNumber(row.opening_weight_kg);
+    if (!coilNo || opening <= 0) continue;
+    const coil = coilRow(db, coilNo);
+    if (!coil) continue;
+    const qtyReserved = clampNonNegative(safeNumber(coil.qty_reserved) - opening);
+    db.prepare(`UPDATE coil_lots SET qty_reserved = ? WHERE coil_no = ?`).run(qtyReserved, coilNo);
+    updateCoilDerivedStateTx(db, coilNo);
+  }
+  db.prepare(`DELETE FROM production_job_coils WHERE job_id = ?`).run(jobId);
+  refreshJobCoilSpecFlagsTx(db, jobId);
+}
+
+/**
+ * Cancel before completion: clears run readings if needed, releases coil reservations, deletes allocations, sets job Cancelled.
+ * Allowed from Planned or Running only.
+ */
+export function cancelProductionJob(db, jobID, payload = {}, opts = {}) {
+  const jobId = String(jobID ?? '').trim();
+  if (!jobId) return { ok: false, error: 'Job ID required.' };
+  const job = productionJobRow(db, jobId);
+  if (!job) return { ok: false, error: 'Production job not found.' };
+  const st = String(job.status ?? 'Planned');
+  if (st === 'Completed') {
+    return { ok: false, error: 'Completed jobs cannot be cancelled.' };
+  }
+  if (st === 'Cancelled') {
+    return { ok: false, error: 'This job is already cancelled.' };
+  }
+  if (st !== 'Planned' && st !== 'Running') {
+    return { ok: false, error: 'Only planned or running jobs can be cancelled.' };
+  }
+  const reason = String(payload.reason ?? payload.note ?? '').trim();
+  if (reason.length < 8) {
+    return { ok: false, error: 'Enter a reason (at least 8 characters) for the audit trail.' };
+  }
+  const refIso = job.start_date_iso || job.created_at_iso || nowIso();
+  try {
+    assertPeriodOpen(db, refIso, 'Production cancel date');
+    db.transaction(() => {
+      if (st === 'Running') {
+        db.prepare(
+          `UPDATE production_job_coils
+           SET closing_weight_kg = 0, consumed_weight_kg = 0, meters_produced = 0,
+               actual_conversion_kg_per_m = NULL, allocation_status = 'Allocated'
+           WHERE job_id = ?`
+        ).run(jobId);
+      }
+      releaseProductionJobCoilReservationsTx(db, jobId);
+      const at = nowIso();
+      db.prepare(
+        `UPDATE production_jobs
+         SET status = 'Cancelled',
+             start_date_iso = NULL,
+             completed_at_iso = ?,
+             actual_meters = 0,
+             actual_weight_kg = 0,
+             conversion_alert_state = 'Pending',
+             manager_review_required = 0,
+             coil_spec_mismatch_pending = 0
+         WHERE job_id = ?`
+      ).run(at, jobId);
+      if (job.cutting_list_id) {
+        /** Release queue registration so Sales can edit the cutting list again and a new job may be opened. */
+        db.prepare(
+          `UPDATE cutting_lists
+           SET status = 'Waiting', production_registered = 0, production_register_ref = NULL
+           WHERE id = ?`
+        ).run(job.cutting_list_id);
+      }
+      appendAuditLog(db, {
+        actor: opts.actor,
+        action: 'production.cancel',
+        entityKind: 'production_job',
+        entityId: jobId,
+        note: reason.length > 240 ? `${reason.slice(0, 237)}…` : reason,
+        details: { cuttingListId: job.cutting_list_id ?? null, priorStatus: st },
+      });
+    })();
+    return { ok: true, jobID: jobId };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+}
+
 export function returnProductionJobToPlanned(db, jobID, payload = {}, opts = {}) {
   const jobId = String(jobID ?? '').trim();
   if (!jobId) return { ok: false, error: 'Job ID required.' };

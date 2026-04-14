@@ -1,13 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity,
   AlertTriangle,
   BarChart3,
   CheckCircle2,
   ClipboardList,
   FileWarning,
   Gauge,
-  Link2,
+  Info,
   ListOrdered,
   Play,
   Plus,
@@ -15,6 +14,9 @@ import {
   Sparkles,
   Trash2,
   Undo2,
+  Ban,
+  X,
+  ChevronDown,
 } from 'lucide-react';
 import { apiFetch } from '../lib/apiBase';
 import { APP_DATA_TABLE_PAGE_SIZE, useAppTablePaging } from '../lib/appDataTable';
@@ -29,6 +31,9 @@ import { useToast } from '../context/ToastContext';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { EditSecondApprovalInline } from './EditSecondApprovalInline';
 
+/** Matches server: closing below this (kg) may use “Finish roll” on completion to clear the tail from stock. */
+const COIL_TAIL_FINISH_MAX_KG = 85;
+
 function createDraftLine(row = {}) {
   const hasPersistedId = row.id != null && row.id !== '';
   return {
@@ -42,6 +47,7 @@ function createDraftLine(row = {}) {
       row.metersProduced != null && row.metersProduced !== 0 ? String(row.metersProduced) : '',
     note: row.note || '',
     specMismatch: Boolean(row.specMismatch),
+    finishCoil: Boolean(row.finishCoil),
   };
 }
 
@@ -64,6 +70,63 @@ function formatKgPerM(value) {
 function formatKgPerMCompact(value) {
   const next = Number(value);
   return Number.isFinite(next) && next > 0 ? next.toFixed(4) : '—';
+}
+
+/** Metres implied by free kg using supplier conversion, else scaled from supplier nominal length vs received kg. */
+function estimatedMetresFromFreeKg(coil, freeKg) {
+  const kg = Number(freeKg);
+  if (!Number.isFinite(kg) || kg <= 0) return null;
+  const conv = Number(coil?.supplierConversionKgPerM);
+  if (Number.isFinite(conv) && conv > 0) {
+    const m = kg / conv;
+    return Number.isFinite(m) && m > 0 ? m : null;
+  }
+  const sem = Number(coil?.supplierExpectedMeters);
+  const recv = Number(coil?.qtyReceived);
+  if (Number.isFinite(sem) && sem > 0 && Number.isFinite(recv) && recv > 0) {
+    const m = sem * (kg / recv);
+    return Number.isFinite(m) && m > 0 ? m : null;
+  }
+  return null;
+}
+
+function supplierNominalMetres(coil) {
+  const sem = Number(coil?.supplierExpectedMeters);
+  return Number.isFinite(sem) && sem > 0 ? sem : null;
+}
+
+/** Lower sorts earlier: best match to planned metres when estimate exists. */
+function coilMetresPickSortKey(estimatedM, plannedM) {
+  if (estimatedM == null || !Number.isFinite(estimatedM)) return 3000;
+  if (!Number.isFinite(plannedM) || plannedM <= 0) return 1000;
+  const diff = estimatedM - plannedM;
+  if (diff >= 0) return 1000 + diff;
+  return 2000 - diff;
+}
+
+/** One-line label for coil `<option>`s: material, spec, estimated metres vs free kg, optional job plan hint. */
+function coilPickerOptionText(coil, freeKg, plannedJobM) {
+  const mat = String(coil?.materialTypeName || '').trim();
+  const matPrefix = mat ? `${mat} · ` : '';
+  const colour = coil?.colour || '—';
+  const gauge = coil?.gaugeLabel || '—';
+  const est = estimatedMetresFromFreeKg(coil, freeKg);
+  const nominal = supplierNominalMetres(coil);
+  let metresPart = '';
+  if (est != null) {
+    metresPart = `≈${est.toFixed(1)} m est`;
+    if (Number.isFinite(plannedJobM) && plannedJobM > 0) {
+      metresPart += ` · plan ${plannedJobM.toFixed(1)} m`;
+    }
+  } else if (nominal != null) {
+    metresPart = `supplier ~${nominal.toFixed(0)} m roll`;
+    if (Number.isFinite(plannedJobM) && plannedJobM > 0) {
+      metresPart += ` · plan ${plannedJobM.toFixed(1)} m`;
+    }
+  } else {
+    metresPart = 'm est n/a';
+  }
+  return `${coil.coilNo} — ${matPrefix}${colour} ${gauge} · ${metresPart} · free ${freeKg.toFixed(1)} kg`;
 }
 
 function formatPct(value) {
@@ -104,6 +167,8 @@ function statusTone(status) {
   switch (status) {
     case 'Completed':
       return 'bg-emerald-100 text-emerald-800';
+    case 'Cancelled':
+      return 'bg-slate-200 text-slate-700';
     case 'Running':
       return 'bg-sky-100 text-sky-800';
     default:
@@ -122,6 +187,9 @@ function completionLineFromDraft(row) {
     metersProduced: Number(row.metersProduced),
     note: row.note.trim(),
   };
+  if (row.finishCoil) {
+    line.finishCoil = true;
+  }
   if (!isDraftAllocationRow(row) && row.id != null && row.id !== '') {
     return { ...line, allocationId: row.id };
   }
@@ -129,13 +197,14 @@ function completionLineFromDraft(row) {
 }
 
 /**
- * @param {{ focusCuttingListId?: string | null; hideJobSidebar?: boolean; inModal?: boolean; viewOnly?: boolean }} [props]
+ * @param {{ focusCuttingListId?: string | null; hideJobSidebar?: boolean; inModal?: boolean; viewOnly?: boolean; onModalClose?: () => void }} [props]
  */
 export function LiveProductionMonitor({
   focusCuttingListId = null,
   hideJobSidebar = false,
   inModal = false,
   viewOnly = false,
+  onModalClose = null,
 } = {}) {
   const ws = useWorkspace();
   const { show: showToast } = useToast();
@@ -148,6 +217,9 @@ export function LiveProductionMonitor({
   const [returnModalOpen, setReturnModalOpen] = useState(false);
   const [returnReason, setReturnReason] = useState('');
   const [returnSaving, setReturnSaving] = useState(false);
+  const [cancelModalOpen, setCancelModalOpen] = useState(false);
+  const [cancelReason, setCancelReason] = useState('');
+  const [cancelSaving, setCancelSaving] = useState(false);
   const [fgAdjDelta, setFgAdjDelta] = useState('');
   const [fgAdjNote, setFgAdjNote] = useState('');
   const [fgAdjSaving, setFgAdjSaving] = useState(false);
@@ -195,7 +267,7 @@ export function LiveProductionMonitor({
   }, [jobCoils]);
 
   const sortedJobs = useMemo(() => {
-    const order = { Running: 0, Planned: 1, Completed: 2 };
+    const order = { Running: 0, Planned: 1, Completed: 2, Cancelled: 3 };
     return [...productionJobs].sort((a, b) => {
       const byStatus = (order[a.status] ?? 99) - (order[b.status] ?? 99);
       if (byStatus !== 0) return byStatus;
@@ -251,6 +323,7 @@ export function LiveProductionMonitor({
     () => buildExpectedCoilSpecFromQuotation(linkedQuotation, jobProductAttrs),
     [linkedQuotation, jobProductAttrs]
   );
+  const plannedMetersValue = Number(selectedJob?.plannedMeters || 0);
   const coilByNo = useMemo(
     () => Object.fromEntries(coilLots.map((lot) => [lot.coilNo, lot])),
     [coilLots]
@@ -271,14 +344,41 @@ export function LiveProductionMonitor({
   const availableCoils = useMemo(() => {
     const selectedCoils = new Set(selectedJobAllocations.map((row) => row.coilNo));
     return coilLots
-      .filter((coil) => coil.currentStatus !== 'Consumed' || selectedCoils.has(coil.coilNo))
+      .filter((coil) => {
+        const rem = Number(coil.qtyRemaining ?? coil.currentWeightKg ?? 0);
+        const empty = !Number.isFinite(rem) || rem <= 0.0001;
+        if (empty && !selectedCoils.has(coil.coilNo)) return false;
+        return coil.currentStatus !== 'Consumed' || selectedCoils.has(coil.coilNo);
+      })
       .sort((a, b) => String(a.coilNo || '').localeCompare(String(b.coilNo || '')));
   }, [coilLots, selectedJobAllocations]);
-  const recommendedCoils = useMemo(
-    () =>
-      availableCoils.filter((coil) => coilMatchesQuotationSpec(coil, linkedQuotation, jobProductAttrs)),
-    [availableCoils, linkedQuotation, jobProductAttrs]
-  );
+  const recommendedCoils = useMemo(() => {
+    const filtered = availableCoils.filter((coil) =>
+      coilMatchesQuotationSpec(coil, linkedQuotation, jobProductAttrs)
+    );
+    const planOk = Number.isFinite(plannedMetersValue) && plannedMetersValue > 0;
+    if (!planOk) {
+      return filtered.slice().sort((a, b) => String(a.coilNo || '').localeCompare(String(b.coilNo || '')));
+    }
+    return filtered.slice().sort((a, b) => {
+      const addA = savedOpeningKgByCoil.get(a.coilNo) ?? 0;
+      const addB = savedOpeningKgByCoil.get(b.coilNo) ?? 0;
+      const freeA = Math.max(0, Number(a.qtyRemaining || 0) - Number(a.qtyReserved || 0) + addA);
+      const freeB = Math.max(0, Number(b.qtyRemaining || 0) - Number(b.qtyReserved || 0) + addB);
+      const estA = estimatedMetresFromFreeKg(a, freeA);
+      const estB = estimatedMetresFromFreeKg(b, freeB);
+      const skA = coilMetresPickSortKey(estA, plannedMetersValue);
+      const skB = coilMetresPickSortKey(estB, plannedMetersValue);
+      if (skA !== skB) return skA - skB;
+      return String(a.coilNo || '').localeCompare(String(b.coilNo || ''));
+    });
+  }, [
+    availableCoils,
+    linkedQuotation,
+    jobProductAttrs,
+    plannedMetersValue,
+    savedOpeningKgByCoil,
+  ]);
   const recommendedCoilNoSet = useMemo(
     () => new Set(recommendedCoils.map((c) => c.coilNo)),
     [recommendedCoils]
@@ -388,6 +488,8 @@ export function LiveProductionMonitor({
     setSignoffRemark('');
     setReturnModalOpen(false);
     setReturnReason('');
+    setCancelModalOpen(false);
+    setCancelReason('');
     setFgAdjDelta('');
     setFgAdjNote('');
     setStoneMetersConsumed('');
@@ -534,7 +636,8 @@ export function LiveProductionMonitor({
     };
   }, [conversionPreviewKey, selectedJob?.jobID]);
 
-  const readOnly = Boolean(viewOnly) || selectedJob?.status === 'Completed';
+  const readOnly =
+    Boolean(viewOnly) || selectedJob?.status === 'Completed' || selectedJob?.status === 'Cancelled';
   const canEditPlannedAllocations = selectedJob?.status === 'Planned' && !readOnly;
   const canAddSupplementalCoil = selectedJob?.status === 'Running' && !readOnly && !isStoneMeterQuote;
   const canCaptureRun = selectedJob?.status === 'Running' && !readOnly;
@@ -566,6 +669,20 @@ export function LiveProductionMonitor({
       if (coil) {
         if (seenCoils.has(coil)) errors.push(`${label}: duplicate coil ${coil}.`);
         seenCoils.add(coil);
+      }
+      if (
+        coil &&
+        Number.isFinite(opening) &&
+        opening > 0 &&
+        Number.isFinite(closing) &&
+        closing >= 0 &&
+        closing < COIL_TAIL_FINISH_MAX_KG &&
+        closing <= opening &&
+        !row.finishCoil
+      ) {
+        errors.push(
+          `${label}: closing is under ${COIL_TAIL_FINISH_MAX_KG} kg — tick “Roll finished” to clear the tail from coil stock when you complete (or increase closing kg if steel remains on the roll).`
+        );
       }
       if (
         coil &&
@@ -608,11 +725,65 @@ export function LiveProductionMonitor({
   /** Finished-goods metre corrections after completion — manager / release only (not plain production.manage). */
   const canPostFgCompletionAdjustment =
     Boolean(ws?.hasPermission?.('production.release')) || Boolean(ws?.hasPermission?.('operations.manage'));
-  const plannedMetersValue = Number(selectedJob?.plannedMeters || 0);
   const hasPlannedMeters = Number.isFinite(plannedMetersValue) && plannedMetersValue > 0;
   const overProducedMeters =
     hasPlannedMeters && Number.isFinite(recordedMeters) ? recordedMeters - plannedMetersValue : 0;
   const requiresManagerOverrunApproval = overProducedMeters > 0.01;
+
+  /** Unique rolls in the draft: summed est. metres from free kg (same coil on two rows counted once). */
+  const allocationUniqueRollCapacityInsight = useMemo(() => {
+    if (isStoneMeterQuote) return null;
+    const seen = new Set();
+    let sumEst = 0;
+    let anyUnknown = false;
+    for (const row of draftAllocations) {
+      const cn = String(row.coilNo || '').trim();
+      if (!cn || seen.has(cn)) continue;
+      seen.add(cn);
+      const lot = coilByNo[cn];
+      if (!lot) {
+        anyUnknown = true;
+        continue;
+      }
+      const addBack = savedOpeningKgByCoil.get(cn) ?? 0;
+      const freeKg = Math.max(0, Number(lot.qtyRemaining || 0) - Number(lot.qtyReserved || 0) + addBack);
+      const est = estimatedMetresFromFreeKg(lot, freeKg);
+      if (est == null) anyUnknown = true;
+      else sumEst += est;
+    }
+    if (seen.size === 0) return { rollCount: 0, sumEst: null, anyUnknown: false };
+    return {
+      rollCount: seen.size,
+      sumEst: sumEst > 0 ? sumEst : null,
+      anyUnknown,
+    };
+  }, [isStoneMeterQuote, draftAllocations, coilByNo, savedOpeningKgByCoil]);
+
+  const productionNextStepHint = useMemo(() => {
+    if (readOnly) return null;
+    if (selectedJob?.status === 'Planned') {
+      if (isStoneMeterQuote) return 'Save & start to begin stone run';
+      if (!plannedAllocSaveReady) return 'Assign coil + opening kg on each line';
+      return 'Save & start when allocation is correct';
+    }
+    if (selectedJob?.status === 'Running') {
+      if (isStoneMeterQuote) return 'Enter metres consumed, then Complete';
+      if (!completionValidation.canComplete) {
+        return completionValidation.errors[0] || 'Complete run log on each line';
+      }
+      if (requiresManagerOverrunApproval) return 'Over plan — manager note required to Complete';
+      return 'Review conversion preview, then Complete';
+    }
+    return null;
+  }, [
+    readOnly,
+    selectedJob?.status,
+    isStoneMeterQuote,
+    plannedAllocSaveReady,
+    completionValidation.canComplete,
+    completionValidation.errors,
+    requiresManagerOverrunApproval,
+  ]);
 
   const planProgressPct = useMemo(() => {
     if (!hasPlannedMeters) return null;
@@ -620,7 +791,14 @@ export function LiveProductionMonitor({
     return Math.min(200, Math.round(pct * 10) / 10);
   }, [hasPlannedMeters, recordedMeters, plannedMetersValue]);
 
-  const workflowStep = selectedJob?.status === 'Planned' ? 0 : selectedJob?.status === 'Running' ? 1 : 2;
+  const workflowStep =
+    selectedJob?.status === 'Planned'
+      ? 0
+      : selectedJob?.status === 'Running'
+        ? 1
+        : selectedJob?.status === 'Cancelled'
+          ? 2
+          : 2;
   const postedOutputM = Number(selectedJob?.actualMeters ?? 0);
   const fgAdjTotalM = Number(selectedJob?.fgAdjustmentMetersTotal ?? 0);
   const effectiveOutputM = Number(
@@ -663,6 +841,39 @@ export function LiveProductionMonitor({
       showToast(e?.message || 'Network error — could not reach server.', { variant: 'error' });
     } finally {
       setSignoffSaving(false);
+    }
+  };
+
+  const submitCancelJob = async () => {
+    if (!selectedJob?.jobID) return;
+    const reason = cancelReason.trim();
+    if (reason.length < 8) {
+      showToast('Enter a reason (at least 8 characters) for the audit trail.', { variant: 'error' });
+      return;
+    }
+    if (!ws?.canMutate) {
+      showToast('Reconnect to apply changes — workspace is read-only.', { variant: 'error' });
+      return;
+    }
+    const path = `/api/production-jobs/${encodeURIComponent(selectedJob.jobID)}/cancel`;
+    setCancelSaving(true);
+    try {
+      const { ok, data } = await apiFetch(path, {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      });
+      if (!ok || !data?.ok) {
+        showToast(data?.error || 'Could not cancel this job.', { variant: 'error' });
+        return;
+      }
+      setCancelModalOpen(false);
+      setCancelReason('');
+      await ws.refresh();
+      showToast('Job cancelled — coil reservations released; cutting list set to Waiting.');
+    } catch (e) {
+      showToast(e?.message || 'Network error.', { variant: 'error' });
+    } finally {
+      setCancelSaving(false);
     }
   };
 
@@ -716,7 +927,7 @@ export function LiveProductionMonitor({
       return;
     }
     const okConfirm = window.confirm(
-      `Post finished-goods adjustment of ${delta >= 0 ? '+' : ''}${delta.toFixed(2)} m to ${selectedJob.productID || 'SKU'}? This is logged and updates stock — it does not rewrite the original completion.`
+      `Post output-product stock correction of ${delta >= 0 ? '+' : ''}${delta.toFixed(2)} m to ${selectedJob.productID || 'SKU'}? This is logged and updates warehouse stock — it does not change the original completion record.`
     );
     if (!okConfirm) return;
     const path = `/api/production-jobs/${encodeURIComponent(selectedJob.jobID)}/completion-adjustments`;
@@ -742,7 +953,36 @@ export function LiveProductionMonitor({
   };
 
   const updateDraftRow = (id, patch) => {
-    setDraftAllocations((prev) => prev.map((row) => (row.id === id ? { ...row, ...patch } : row)));
+    setDraftAllocations((prev) =>
+      prev.map((row) => {
+        if (row.id !== id) return row;
+        const next = { ...row, ...patch };
+        if (Object.prototype.hasOwnProperty.call(patch, 'closingWeightKg')) {
+          const cl = Number(next.closingWeightKg);
+          if (!Number.isFinite(cl) || cl < 0 || cl >= COIL_TAIL_FINISH_MAX_KG) {
+            next.finishCoil = false;
+          }
+        }
+        if (
+          Object.prototype.hasOwnProperty.call(patch, 'coilNo') &&
+          !Object.prototype.hasOwnProperty.call(patch, 'openingWeightKg')
+        ) {
+          const newCoil = String(patch.coilNo ?? '').trim();
+          if (newCoil) {
+            const lot = coilByNo[newCoil];
+            if (lot) {
+              const addBack = savedOpeningKgByCoil.get(newCoil) ?? 0;
+              const free = Number(lot.qtyRemaining || 0) - Number(lot.qtyReserved || 0) + addBack;
+              if (Number.isFinite(free) && free > 0) {
+                const suggested = Math.max(0.01, Math.round(free * 0.995 * 1000) / 1000);
+                next.openingWeightKg = String(suggested);
+              }
+            }
+          }
+        }
+        return next;
+      })
+    );
   };
 
   const addDraftRow = () => {
@@ -794,18 +1034,35 @@ export function LiveProductionMonitor({
     setSavingAction(type);
     let path = '';
     let body = {};
-    if (type === 'allocations') {
+    const alsoStartAfterAlloc = type === 'allocationsAndStart';
+
+    if (type === 'allocations' || type === 'allocationsAndStart') {
       path = `${jobApi}/allocations`;
       if (isStoneMeterQuote && selectedJob.status === 'Planned') {
-        setSavingAction('');
         const res = await apiFetch(path, { method: 'POST', body: JSON.stringify({ allocations: [] }) });
         if (!res.ok || !res.data?.ok) {
+          setSavingAction('');
           showToast(res.data?.error || 'Could not save stone job allocation.', { variant: 'error' });
           return;
         }
         await ws.refresh();
+        const startRes = await apiFetch(`${jobApi}/start`, {
+          method: 'POST',
+          body: JSON.stringify({ startedAtISO: new Date().toISOString().slice(0, 10) }),
+        });
+        setSavingAction('');
+        if (!startRes.ok || !startRes.data?.ok) {
+          showToast(
+            startRes.data?.error ||
+              'Stone step saved, but production could not be started (e.g. price-list approval). Fix the issue, then use Save & start again.',
+            { variant: 'error' }
+          );
+          await ws.refresh();
+          return;
+        }
         setStoneAllocAck(true);
-        showToast(`Stone-coated job ready to start (${listLabel}).`);
+        await ws.refresh();
+        showToast(`Stone-coated job saved and production started for ${listLabel}.`);
         return;
       }
       const buildAllocBody = (withAck) => {
@@ -852,19 +1109,41 @@ export function LiveProductionMonitor({
           .map((m) => `${m.coilNo}: ${m.detail}`)
           .join('\n');
         const go = window.confirm(
-          `These coils do not match the quotation material specification (gauge / colour / material):\n\n${detail}\n\nSave anyway and flag the branch manager for review?`
+          `These coils do not match the quotation material specification (gauge / colour / material):\n\n${detail}\n\nSave anyway and flag the branch manager for review${
+            alsoStartAfterAlloc ? ', then start production' : ''
+          }?`
         );
         if (go) {
           const second = buildAllocBody(true);
           if (second) res = await apiFetch(path, { method: 'POST', body: JSON.stringify(second) });
         }
       }
-      setSavingAction('');
       if (!res.ok || !res.data?.ok) {
+        setSavingAction('');
         showToast(res.data?.error || 'Could not update production.', { variant: 'error' });
         return;
       }
       await ws.refresh();
+      if (alsoStartAfterAlloc && selectedJob.status === 'Planned') {
+        const startRes = await apiFetch(`${jobApi}/start`, {
+          method: 'POST',
+          body: JSON.stringify({ startedAtISO: new Date().toISOString().slice(0, 10) }),
+        });
+        setSavingAction('');
+        if (!startRes.ok || !startRes.data?.ok) {
+          showToast(
+            startRes.data?.error ||
+              'Coils saved, but production could not be started (e.g. price-list MD approval). Fix the issue, then use Save & start again.',
+            { variant: 'error' }
+          );
+          await ws.refresh();
+          return;
+        }
+        await ws.refresh();
+        showToast(`Coils saved and production started for ${listLabel}.`);
+        return;
+      }
+      setSavingAction('');
       showToast(
         selectedJob.status === 'Running'
           ? `Supplemental coil(s) saved on ${listLabel}.`
@@ -996,7 +1275,7 @@ export function LiveProductionMonitor({
   return (
     <div
       className={`${
-        inModal ? 'mb-0' : 'mb-6'
+        inModal ? 'mb-0 min-w-0 max-w-full' : 'mb-6'
       } rounded-xl border border-slate-200/80 bg-slate-50/50 overflow-hidden shadow-sm`}
     >
       {/* Header: title, workflow stepper, actions */}
@@ -1005,26 +1284,86 @@ export function LiveProductionMonitor({
           inModal ? 'px-2.5 py-2 sm:px-3 sticky top-0 z-20 backdrop-blur-md bg-white/90' : 'px-3 py-2 sm:px-4'
         }`}
       >
-        <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+        <div
+          className={`flex flex-col gap-2 ${
+            inModal
+              ? 'xl:flex-row xl:items-center xl:justify-between'
+              : 'lg:flex-row lg:items-center lg:justify-between'
+          }`}
+        >
           <div className="flex min-w-0 items-start gap-2">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#134e4a] to-teal-700 text-white shadow-sm">
               <Gauge size={18} strokeWidth={2} />
             </div>
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-1.5">
-                <h3 className="text-sm font-bold tracking-tight text-slate-900">Production record</h3>
-                <span className="inline-flex items-center gap-0.5 rounded-full bg-teal-100/90 px-1.5 py-px text-[9px] font-semibold text-teal-900">
-                  <Sparkles size={10} className="shrink-0" aria-hidden />
-                  Live
-                </span>
+                <h3 className="text-sm font-bold tracking-tight text-slate-900">
+                  {inModal
+                    ? viewOnly
+                      ? 'Production record (completed)'
+                      : 'Production traceability'
+                    : 'Production record'}
+                </h3>
+                {(!inModal || !viewOnly) && (
+                  <span className="inline-flex items-center gap-0.5 rounded-full bg-teal-100/90 px-1.5 py-px text-[9px] font-semibold text-teal-900">
+                    <Sparkles size={10} className="shrink-0" aria-hidden />
+                    Live
+                  </span>
+                )}
+                <details className="relative shrink-0">
+                  <summary
+                    className="list-none cursor-pointer rounded-full p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/25 [&::-webkit-details-marker]:hidden"
+                    aria-label="Production workflow tips and stock behaviour"
+                  >
+                    <Info className="size-3.5" strokeWidth={2.25} aria-hidden />
+                  </summary>
+                  <div
+                    role="note"
+                    className="absolute left-0 top-full z-30 mt-1.5 w-[min(calc(100vw-2rem),22rem)] rounded-lg border border-slate-200 bg-white p-2.5 text-[10px] leading-snug text-slate-700 shadow-lg ring-1 ring-black/5 sm:left-auto sm:right-0"
+                  >
+                    <p>
+                      Mistakes before start: use Save &amp; start again with the corrected coils. Wrong coil after start:
+                      Return to plan (reason required). Order cancelled: Cancel job (releases reservations, audit reason).
+                      After completion:
+                      record stays; wrong output metres in stock use manager stock correction. Conversion alerts:
+                      manager sign-off.
+                    </p>
+                    <p className="mt-2 border-t border-slate-100 pt-2">
+                      <strong className="font-semibold text-slate-800">Changing coils:</strong> while{' '}
+                      <strong className="font-semibold">Planned</strong>, pick coils and opening kg, then{' '}
+                      <strong className="font-semibold">Save &amp; start</strong> — the server stores the plan and moves
+                      the job to <strong className="font-semibold">Running</strong> in one step (each save replaces the
+                      whole allocation set). After the job is running, use <strong className="font-semibold">Return to plan</strong>{' '}
+                      (reason) to edit primary coils, or <strong className="font-semibold">Save extra coil</strong> to add
+                      another roll mid-run. Completed run logs are locked; wrong metres on the FG SKU use{' '}
+                      <strong className="font-semibold">Post stock correction</strong> (manager). High conversion: review
+                      checks, then <strong className="font-semibold">Record manager sign-off</strong> — that does not
+                      rewrite coil readings; contact support for rare posted-coil corrections.
+                    </p>
+                    <p className="mt-2 border-t border-slate-100 pt-2">
+                      {selectedJob.status === 'Cancelled' ? (
+                        <>
+                          <strong className="font-semibold text-slate-800">Cancelled:</strong> reservations were released
+                          when the job was cancelled; no output was posted from this run.
+                        </>
+                      ) : (
+                        <>
+                          <strong className="font-semibold text-slate-800">Stock logic:</strong> reserved kg stays on
+                          the coil until you complete; only consumed kg is deducted. One coil can back several jobs.
+                        </>
+                      )}
+                    </p>
+                  </div>
+                </details>
               </div>
-              <p className="mt-0.5 hidden max-w-2xl text-[11px] leading-snug text-slate-500 md:block">
-                Mistakes before start: save allocation again. Wrong coil after start: Return to plan (reason required).
-                After completion: original record stays; FG metre fixes use manager adjustment. Conversion alerts:
-                manager sign-off.
-              </p>
+              {inModal && focusClTrim ? (
+                <p className="mt-0.5 text-[11px] text-slate-500">
+                  <span className="font-mono font-semibold text-slate-700">{focusClTrim}</span>
+                  {viewOnly ? <span className="text-slate-400"> · read-only</span> : null}
+                </p>
+              ) : null}
               {/* Stepper */}
-              <div className="mt-1.5 flex flex-wrap items-center gap-1" role="list" aria-label="Workflow steps">
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5" role="list" aria-label="Workflow steps">
                 {['Allocate coils', 'Run & log', 'Review'].map((label, i) => (
                   <React.Fragment key={label}>
                     {i > 0 ? (
@@ -1047,57 +1386,71 @@ export function LiveProductionMonitor({
                     </span>
                   </React.Fragment>
                 ))}
+                {productionNextStepHint ? (
+                  <span
+                    className="hidden min-w-0 max-w-[min(100%,20rem)] truncate rounded-md border border-teal-200/80 bg-teal-50/90 px-2 py-0.5 text-[9px] font-semibold text-teal-950 sm:inline-block"
+                    title={productionNextStepHint}
+                  >
+                    Next: {productionNextStepHint}
+                  </span>
+                ) : null}
               </div>
+              {productionNextStepHint ? (
+                <p className="mt-1 line-clamp-2 text-[9px] font-semibold leading-snug text-teal-950/95 sm:hidden">
+                  Next: {productionNextStepHint}
+                </p>
+              ) : null}
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-1.5 lg:justify-end">
+          <div
+            className={`flex flex-wrap items-stretch gap-1.5 ${
+              inModal ? 'w-full xl:w-auto xl:justify-end' : 'lg:justify-end'
+            }`}
+          >
             {readOnly ? (
               <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-medium text-slate-600">
                 View only
               </span>
             ) : (
-              <div className="flex flex-wrap gap-1 rounded-lg border border-slate-200/80 bg-white p-0.5">
-                <button
-                  type="button"
-                  onClick={() => void persist('allocations')}
-                  disabled={
-                    savingAction !== '' ||
-                    (selectedJob.status === 'Planned' && (!canEditPlannedAllocations || !plannedAllocSaveReady)) ||
-                    (selectedJob.status === 'Running' && (!canAddSupplementalCoil || !appendSaveReady))
-                  }
-                  className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold transition-colors disabled:opacity-45 ${
-                    savingAction === 'allocations'
-                      ? 'bg-slate-100 text-slate-500'
-                      : 'bg-slate-100 text-slate-800 hover:bg-slate-200'
-                  }`}
-                >
-                  <Save size={15} />
-                  {savingAction === 'allocations'
-                    ? 'Saving…'
-                    : selectedJob.status === 'Running'
-                      ? 'Save extra coil'
-                      : 'Save allocation'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void persist('start')}
-                  disabled={
-                    selectedJob.status !== 'Planned' ||
-                    savingAction !== '' ||
-                    (!hasPersistedCoilAllocations && !(isStoneMeterQuote && stoneAllocAck))
-                  }
-                  title={
-                    !hasPersistedCoilAllocations && !(isStoneMeterQuote && stoneAllocAck)
-                      ? isStoneMeterQuote
-                        ? 'Save allocations (stone job) before starting.'
-                        : 'Save at least one coil with opening kg before starting.'
-                      : undefined
-                  }
-                  className="inline-flex items-center gap-1 rounded-md bg-sky-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-sky-700 disabled:opacity-45"
-                >
-                  <Play size={13} />
-                  {savingAction === 'start' ? 'Starting…' : 'Start'}
-                </button>
+              <div
+                className={`rounded-lg border border-slate-200/80 bg-white p-0.5 ${
+                  inModal
+                    ? 'grid w-full grid-cols-2 gap-1.5 sm:flex sm:w-auto sm:flex-wrap sm:gap-1 [&_button]:min-h-10 [&_button]:justify-center [&_button]:px-2.5 [&_button]:py-2'
+                    : 'flex flex-wrap gap-1'
+                }`}
+              >
+                {selectedJob.status === 'Planned' ? (
+                  <button
+                    type="button"
+                    onClick={() => void persist('allocationsAndStart')}
+                    disabled={savingAction !== '' || !canEditPlannedAllocations || !plannedAllocSaveReady}
+                    title="Writes coil allocation to the server and starts the run in one step."
+                    className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold transition-colors disabled:opacity-45 ${
+                      savingAction === 'allocationsAndStart'
+                        ? 'bg-sky-100 text-sky-800'
+                        : 'bg-sky-600 text-white hover:bg-sky-700'
+                    }`}
+                  >
+                    <Save size={14} />
+                    <Play size={13} />
+                    {savingAction === 'allocationsAndStart' ? 'Saving & starting…' : 'Save & start'}
+                  </button>
+                ) : null}
+                {selectedJob.status === 'Running' ? (
+                  <button
+                    type="button"
+                    onClick={() => void persist('allocations')}
+                    disabled={savingAction !== '' || !canAddSupplementalCoil || !appendSaveReady}
+                    className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold transition-colors disabled:opacity-45 ${
+                      savingAction === 'allocations'
+                        ? 'bg-slate-100 text-slate-500'
+                        : 'bg-slate-100 text-slate-800 hover:bg-slate-200'
+                    }`}
+                  >
+                    <Save size={15} />
+                    {savingAction === 'allocations' ? 'Saving…' : 'Save extra coil'}
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   onClick={() => void persist('complete')}
@@ -1124,90 +1477,184 @@ export function LiveProductionMonitor({
                     Return to plan
                   </button>
                 ) : null}
+                {selectedJob.status === 'Planned' || selectedJob.status === 'Running' ? (
+                  <button
+                    type="button"
+                    onClick={() => setCancelModalOpen(true)}
+                    disabled={savingAction !== '' || cancelSaving || returnSaving}
+                    title="Cancel this job: releases coil reservations and marks production cancelled (order cancellation / refund path)."
+                    className="inline-flex items-center gap-1 rounded-md border border-rose-300 bg-rose-50 px-2 py-1 text-[11px] font-semibold text-rose-950 hover:bg-rose-100 disabled:opacity-45"
+                  >
+                    <Ban size={13} />
+                    Cancel job
+                  </button>
+                ) : null}
               </div>
             )}
+            {inModal && typeof onModalClose === 'function' ? (
+              <button
+                type="button"
+                onClick={onModalClose}
+                className="inline-flex min-h-10 min-w-10 shrink-0 items-center justify-center self-start rounded-xl p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/25 sm:min-h-0 sm:min-w-0"
+                aria-label="Close"
+              >
+                <X size={20} strokeWidth={2} aria-hidden />
+              </button>
+            ) : null}
           </div>
         </div>
       </div>
 
       {/* Smart alerts — compact chips */}
-      <div className="border-b border-slate-100 bg-slate-50/70 px-2 py-1 sm:px-3">
-        <div className="flex flex-wrap gap-1.5">
-          {readOnly ? (
-            <span className="inline-flex max-w-full items-start gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600">
-              <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-emerald-600" />
-              Finished run — review conversion below; actions are off.
-              {Math.abs(fgAdjTotalM) > 1e-6 ? (
-                <span className="block w-full pt-0.5 text-slate-500">
-                  Effective output {formatMeters(effectiveOutputM)} m (posted {formatMeters(postedOutputM)} m + adjustments{' '}
-                  {fgAdjTotalM >= 0 ? '+' : ''}
-                  {formatMeters(fgAdjTotalM)} m).
-                </span>
-              ) : null}
+      {inModal && !readOnly ? (
+        <details className="group border-b border-slate-100 bg-slate-50/80 [&_summary::-webkit-details-marker]:hidden">
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-2 py-2 text-[10px] font-bold text-slate-600 sm:min-h-0 sm:px-2.5 sm:py-1.5">
+            <span className="inline-flex items-center gap-1.5">
+              <ClipboardList size={14} className="shrink-0 text-slate-500" aria-hidden />
+              Status, tips &amp; validation
             </span>
-          ) : null}
-          {!readOnly ? (
-            <span className="inline-flex max-w-full items-start gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600">
-              <ClipboardList size={14} className="mt-0.5 shrink-0 text-slate-500" />
-              <span>
-                <strong className="text-slate-700">Designed for real teams:</strong> easy steps, spec hints, and
-                guarded corrections (reasons + permissions) so honest errors are fixable without hiding audit history.
+            <ChevronDown
+              size={14}
+              className="shrink-0 text-slate-400 transition-transform group-open:rotate-180"
+              aria-hidden
+            />
+          </summary>
+          <div className="flex flex-wrap gap-1 px-2 pb-1.5 pt-0 sm:px-2.5">
+            {canEditPlannedAllocations && !hasPersistedCoilAllocations && !isStoneMeterQuote ? (
+              <span className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-950">
+                <AlertTriangle size={14} className="shrink-0" />
+                Save coil + opening kg, then Save &amp; start.
               </span>
-            </span>
-          ) : null}
-          {canEditPlannedAllocations && !hasPersistedCoilAllocations && !isStoneMeterQuote ? (
-            <span className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-950">
-              <AlertTriangle size={14} className="shrink-0" />
-              Save coil + opening kg before start.
-            </span>
-          ) : null}
-          {canEditPlannedAllocations && isStoneMeterQuote && !stoneAllocAck ? (
-            <span className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-950">
-              <AlertTriangle size={14} className="shrink-0" />
-              Stone-coated: save allocation once (no coils), then start.
-            </span>
-          ) : null}
-          {canAddSupplementalCoil ? (
-            <span className="inline-flex items-center gap-1 rounded-md border border-sky-200 bg-sky-50 px-2 py-1 text-[10px] text-sky-950">
-              <Plus size={14} className="shrink-0" />
-              Mid-run: <strong className="font-semibold">Add coil</strong> if one roll is not enough.
-            </span>
-          ) : null}
-          {selectedJob?.coilSpecMismatchPending ? (
-            <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11px] font-medium text-amber-950">
-              <AlertTriangle size={14} className="shrink-0" />
-              Spec exception logged — manager flag active.
-            </span>
-          ) : null}
-          {canCaptureRun && !completionValidation.canComplete ? (
-            <span className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[10px] font-medium text-red-900">
-              <AlertTriangle size={14} className="shrink-0" />
-              {completionValidation.errors[0] || 'Complete all coil rows to finish.'}
-            </span>
-          ) : null}
-          {canCaptureRun && requiresManagerOverrunApproval ? (
-            <span className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-950">
-              <BarChart3 size={14} className="shrink-0" />
-              +{overProducedMeters.toFixed(2)}m over plan — manager remark needed to complete.
-            </span>
-          ) : null}
-          {!readOnly &&
-          canCaptureRun &&
-          completionValidation.canComplete &&
-          !requiresManagerOverrunApproval &&
-          hasPlannedMeters ? (
-            <span className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-900">
-              <Sparkles size={14} className="shrink-0" />
-              {planProgressPct != null
-                ? `${planProgressPct}% of planned metres logged — preview updates as you type.`
-                : 'Ready to preview conversion when all fields are valid.'}
-            </span>
-          ) : null}
+            ) : null}
+            {canEditPlannedAllocations && isStoneMeterQuote && !stoneAllocAck ? (
+              <span className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-950">
+                <AlertTriangle size={14} className="shrink-0" />
+                Stone: Save &amp; start (no coils) to begin.
+              </span>
+            ) : null}
+            {canAddSupplementalCoil ? (
+              <span className="inline-flex items-center gap-1 rounded-md border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] text-sky-950">
+                <Plus size={14} className="shrink-0" />
+                Mid-run: <strong className="font-semibold">Add coil</strong> if one roll is not enough.
+              </span>
+            ) : null}
+            {selectedJob?.coilSpecMismatchPending ? (
+              <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-950">
+                <AlertTriangle size={14} className="shrink-0" />
+                Spec exception — manager flag active.
+              </span>
+            ) : null}
+            {canCaptureRun && !completionValidation.canComplete ? (
+              <span className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] font-medium text-red-900">
+                <AlertTriangle size={14} className="shrink-0" />
+                {completionValidation.errors[0] || 'Complete all coil rows to finish.'}
+              </span>
+            ) : null}
+            {canCaptureRun && requiresManagerOverrunApproval ? (
+              <span className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] text-amber-950">
+                <BarChart3 size={14} className="shrink-0" />
+                +{overProducedMeters.toFixed(2)}m over plan — manager remark to complete.
+              </span>
+            ) : null}
+            {!readOnly &&
+            canCaptureRun &&
+            completionValidation.canComplete &&
+            !requiresManagerOverrunApproval &&
+            hasPlannedMeters ? (
+              <span className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-900">
+                <Sparkles size={14} className="shrink-0" />
+                {planProgressPct != null
+                  ? `${planProgressPct}% of plan logged — preview updates as you type.`
+                  : 'Ready to preview conversion when inputs are valid.'}
+              </span>
+            ) : null}
+          </div>
+        </details>
+      ) : (
+        <div className={`border-b border-slate-100 bg-slate-50/70 ${inModal ? 'px-2 py-0.5 sm:px-2.5' : 'px-2 py-1 sm:px-3'}`}>
+          <div className={`flex flex-wrap ${inModal ? 'gap-1' : 'gap-1.5'}`}>
+            {readOnly && selectedJob?.status === 'Cancelled' ? (
+              <span className="inline-flex max-w-full items-start gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600">
+                <Ban size={14} className="mt-0.5 shrink-0 text-slate-600" />
+                Job cancelled — no further production actions; record kept for refunds / audit.
+              </span>
+            ) : null}
+            {readOnly && selectedJob?.status !== 'Cancelled' ? (
+              <span className="inline-flex max-w-full items-start gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600">
+                <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-emerald-600" />
+                Finished run — review conversion below; actions are off.
+                {Math.abs(fgAdjTotalM) > 1e-6 ? (
+                  <span className="block w-full pt-0.5 text-slate-500">
+                    Effective output {formatMeters(effectiveOutputM)} (posted {formatMeters(postedOutputM)} + adjustments{' '}
+                    {fgAdjTotalM >= 0 ? '+' : ''}
+                    {formatMeters(fgAdjTotalM)}).
+                  </span>
+                ) : null}
+              </span>
+            ) : null}
+            {!readOnly && !inModal ? (
+              <span className="inline-flex max-w-full items-start gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600">
+                <ClipboardList size={14} className="mt-0.5 shrink-0 text-slate-500" />
+                <span>
+                  <strong className="text-slate-700">Designed for real teams:</strong> easy steps, spec hints, and
+                  guarded corrections (reasons + permissions) so honest errors are fixable without hiding audit history.
+                </span>
+              </span>
+            ) : null}
+            {canEditPlannedAllocations && !hasPersistedCoilAllocations && !isStoneMeterQuote ? (
+              <span className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-950">
+                <AlertTriangle size={14} className="shrink-0" />
+                Save coil + opening kg, then use Save & start.
+              </span>
+            ) : null}
+            {canEditPlannedAllocations && isStoneMeterQuote && !stoneAllocAck ? (
+              <span className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-950">
+                <AlertTriangle size={14} className="shrink-0" />
+                Stone-coated: use Save & start (no coils) to begin the run.
+              </span>
+            ) : null}
+            {canAddSupplementalCoil ? (
+              <span className="inline-flex items-center gap-1 rounded-md border border-sky-200 bg-sky-50 px-2 py-1 text-[10px] text-sky-950">
+                <Plus size={14} className="shrink-0" />
+                Mid-run: <strong className="font-semibold">Add coil</strong> if one roll is not enough.
+              </span>
+            ) : null}
+            {selectedJob?.coilSpecMismatchPending ? (
+              <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11px] font-medium text-amber-950">
+                <AlertTriangle size={14} className="shrink-0" />
+                Spec exception logged — manager flag active.
+              </span>
+            ) : null}
+            {canCaptureRun && !completionValidation.canComplete ? (
+              <span className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[10px] font-medium text-red-900">
+                <AlertTriangle size={14} className="shrink-0" />
+                {completionValidation.errors[0] || 'Complete all coil rows to finish.'}
+              </span>
+            ) : null}
+            {canCaptureRun && requiresManagerOverrunApproval ? (
+              <span className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-950">
+                <BarChart3 size={14} className="shrink-0" />
+                +{overProducedMeters.toFixed(2)}m over plan — manager remark needed to complete.
+              </span>
+            ) : null}
+            {!readOnly &&
+            canCaptureRun &&
+            completionValidation.canComplete &&
+            !requiresManagerOverrunApproval &&
+            hasPlannedMeters ? (
+              <span className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-900">
+                <Sparkles size={14} className="shrink-0" />
+                {planProgressPct != null
+                  ? `${planProgressPct}% of planned metres logged — preview updates as you type.`
+                  : 'Ready to preview conversion when all fields are valid.'}
+              </span>
+            ) : null}
+          </div>
         </div>
-      </div>
+      )}
 
       <div
-        className={`grid ${inModal ? 'gap-2 p-2 sm:p-3' : 'gap-3 p-3 sm:p-3.5'} ${
+        className={`grid ${inModal ? 'gap-1.5 p-1.5 sm:p-2' : 'gap-3 p-3 sm:p-3.5'} ${
           hideJobSidebar ? '' : 'lg:grid-cols-[minmax(0,11.5rem)_minmax(0,1fr)] xl:grid-cols-[minmax(0,12.5rem)_minmax(0,1fr)]'
         }`}
       >
@@ -1227,6 +1674,7 @@ export function LiveProductionMonitor({
                   <button
                     key={job.jobID}
                     type="button"
+                    data-testid={`production-queue-job-${job.jobID}`}
                     onClick={() => setSelectedJobId(job.jobID)}
                     className={`w-full rounded-lg border p-1.5 text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/30 ${
                       active
@@ -1241,7 +1689,13 @@ export function LiveProductionMonitor({
                       <span
                         className={`shrink-0 rounded-md px-1.5 py-0.5 text-[8px] font-bold uppercase ${statusTone(job.status)}`}
                       >
-                        {job.status === 'Running' ? 'Run' : job.status === 'Planned' ? 'Plan' : 'Done'}
+                        {job.status === 'Running'
+                          ? 'Run'
+                          : job.status === 'Planned'
+                            ? 'Plan'
+                            : job.status === 'Cancelled'
+                              ? 'Off'
+                              : 'Done'}
                       </span>
                     </div>
                     <p className="mt-0.5 truncate text-[10px] font-semibold text-slate-700">{job.customerName || '—'}</p>
@@ -1267,103 +1721,216 @@ export function LiveProductionMonitor({
         <div className={`min-w-0 ${inModal ? 'space-y-2' : 'space-y-2.5'}`}>
           {/* Mission control — single dense card */}
           <div className="overflow-hidden rounded-lg border border-slate-200/90 bg-white shadow-sm">
-            <div className="flex flex-col gap-2 border-b border-slate-100 bg-gradient-to-br from-slate-50/80 to-white p-2 sm:flex-row sm:items-center sm:justify-between sm:p-2.5">
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <p className="font-mono text-sm font-bold tracking-tight text-[#134e4a]">
-                    {selectedJob.cuttingListId || '—'}
-                  </p>
-                  <span
-                    className={`rounded-md px-1.5 py-px text-[9px] font-bold uppercase ${statusTone(selectedJob.status)}`}
-                  >
-                    {selectedJob.status}
-                  </span>
-                </div>
-                <p className="mt-0.5 text-xs font-semibold text-slate-800">{selectedJob.customerName || '—'}</p>
-                <p className="text-[11px] leading-tight text-slate-600">{selectedJob.productName || selectedJob.productID || '—'}</p>
-                <div className="mt-1 flex flex-wrap gap-1">
-                  {selectedJob.quotationRef ? (
-                    <span className="inline-flex items-center rounded bg-slate-100 px-1.5 py-px text-[9px] font-medium text-slate-700">
-                      Q <span className="ml-0.5 font-mono">{selectedJob.quotationRef}</span>
+            <div
+              className={`bg-gradient-to-br from-slate-50/95 via-white to-teal-50/35 ${
+                inModal ? 'space-y-2 p-2 sm:p-2.5' : 'space-y-3 p-2.5 sm:p-3'
+              }`}
+            >
+              <div className="flex items-center gap-2 border-b border-slate-200/50 pb-2">
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-[#134e4a] text-[10px] font-bold text-white">
+                  A
+                </span>
+                <p className="text-[10px] font-semibold uppercase tracking-widest text-[#134e4a]">Job &amp; target</p>
+              </div>
+              <div
+                className={`flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4 ${
+                  inModal ? 'min-w-0' : ''
+                }`}
+              >
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="font-mono text-base font-black tracking-tight text-[#134e4a] sm:text-[1.05rem]">
+                      {selectedJob.cuttingListId || '—'}
+                    </p>
+                    <span
+                      className={`rounded-md border border-black/5 px-2 py-0.5 text-[9px] font-bold uppercase shadow-sm ${statusTone(selectedJob.status)}`}
+                    >
+                      {selectedJob.status}
                     </span>
-                  ) : null}
-                  <span className="inline-flex items-center rounded bg-slate-100 px-1.5 py-px text-[9px] font-medium text-slate-700">
-                    {selectedJob.machineName || 'Line'}
-                  </span>
+                  </div>
+                  <p className="text-sm font-semibold leading-snug text-slate-900">{selectedJob.customerName || '—'}</p>
+                  <p className="text-[11px] font-medium leading-snug text-slate-600">
+                    {selectedJob.productName || selectedJob.productID || '—'}
+                  </p>
+                  <div className="flex flex-wrap gap-1.5 pt-0.5">
+                    {selectedJob.quotationRef ? (
+                      <span className="inline-flex items-center rounded-md border border-slate-200/80 bg-white/90 px-2 py-0.5 text-[9px] font-semibold text-slate-700 shadow-sm">
+                        Quote{' '}
+                        <span className="ml-0.5 font-mono text-[#134e4a]">{selectedJob.quotationRef}</span>
+                      </span>
+                    ) : null}
+                    <span className="inline-flex items-center rounded-md border border-slate-200/80 bg-white/90 px-2 py-0.5 text-[9px] font-semibold text-slate-700 shadow-sm">
+                      {selectedJob.machineName || 'Line'}
+                    </span>
+                  </div>
+                </div>
+                <div
+                  className={`grid w-full shrink-0 gap-1.5 sm:w-auto sm:min-w-0 ${
+                    inModal ? 'grid-cols-3 max-w-full sm:min-w-[12rem]' : 'grid-cols-3 sm:min-w-[14.5rem]'
+                  }`}
+                  aria-label="Live coil weights and output"
+                >
+                  <div
+                    className="rounded-lg border border-teal-200/80 bg-white/95 px-2 py-1.5 text-center shadow-sm ring-1 ring-teal-500/10"
+                    title="Reserved kg"
+                  >
+                    <p className="text-[7px] font-bold uppercase tracking-wider text-teal-800/90">Rsvd</p>
+                    <p className="mt-0.5 text-sm font-black tabular-nums leading-none text-[#134e4a]">
+                      {formatKg(reservedKg)}
+                    </p>
+                  </div>
+                  <div
+                    className="rounded-lg border border-teal-200/80 bg-white/95 px-2 py-1.5 text-center shadow-sm ring-1 ring-teal-500/10"
+                    title="Output metres"
+                  >
+                    <p className="text-[7px] font-bold uppercase tracking-wider text-teal-800/90">Out</p>
+                    <p className="mt-0.5 text-sm font-black tabular-nums leading-none text-[#134e4a]">
+                      {formatMeters(recordedMeters)}
+                    </p>
+                  </div>
+                  <div
+                    className="rounded-lg border border-slate-200/90 bg-white/95 px-2 py-1.5 text-center shadow-sm"
+                    title="Consumed kg"
+                  >
+                    <p className="text-[7px] font-bold uppercase tracking-wider text-slate-500">Used</p>
+                    <p className="mt-0.5 text-sm font-black tabular-nums leading-none text-slate-900">
+                      {formatKg(recordedConsumedKg)}
+                    </p>
+                  </div>
                 </div>
               </div>
-              <div className="grid w-full shrink-0 grid-cols-3 gap-1 sm:w-auto sm:min-w-[13rem]">
-                <div className="rounded-md border border-teal-100 bg-teal-50/60 px-1.5 py-1 text-center" title="Reserved kg">
-                  <p className="text-[8px] font-bold uppercase tracking-wide text-teal-800/80">Rsvd</p>
-                  <p className="text-xs font-bold tabular-nums text-[#134e4a]">{formatKg(reservedKg)}</p>
-                </div>
-                <div className="rounded-md border border-teal-100 bg-teal-50/60 px-1.5 py-1 text-center" title="Output metres">
-                  <p className="text-[8px] font-bold uppercase tracking-wide text-teal-800/80">Out</p>
-                  <p className="text-xs font-bold tabular-nums text-[#134e4a]">
-                    {formatMeters(recordedMeters)}
-                  </p>
-                </div>
-                <div className="rounded-md border border-slate-200 bg-slate-50/80 px-1.5 py-1 text-center" title="Consumed kg">
-                  <p className="text-[8px] font-bold uppercase tracking-wide text-slate-500">Used</p>
-                  <p className="text-xs font-bold tabular-nums text-slate-800">
-                    {formatKg(recordedConsumedKg)}
-                  </p>
-                </div>
-              </div>
-            </div>
-            {hasPlannedMeters && (selectedJob.status === 'Running' || selectedJob.status === 'Planned') ? (
-              <div className="border-b border-slate-100 px-2 py-1 sm:px-2.5">
-                <div className="flex items-center justify-between gap-2 text-[9px] font-medium text-slate-600">
-                  <span>vs plan</span>
-                  <span className="tabular-nums">
-                    {formatMeters(recordedMeters)} / {formatMeters(plannedMetersValue)}
-                    {planProgressPct != null ? (
-                      <span className="ml-1 text-[#134e4a]">({planProgressPct}%)</span>
+
+              {allocationUniqueRollCapacityInsight &&
+              allocationUniqueRollCapacityInsight.rollCount > 0 &&
+              !isStoneMeterQuote &&
+              !readOnly ? (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#134e4a]/20 bg-[#134e4a]/[0.07] px-2 py-1.5 text-[10px] text-slate-800">
+                  <span className="min-w-0 font-semibold leading-tight">
+                    <span className="text-[#134e4a]">{allocationUniqueRollCapacityInsight.rollCount} roll(s)</span>
+                    {allocationUniqueRollCapacityInsight.sumEst != null ? (
+                      <>
+                        {' '}
+                        · free est.{' '}
+                        <span className="font-mono font-black tabular-nums">
+                          {allocationUniqueRollCapacityInsight.sumEst.toFixed(1)} m
+                        </span>
+                        {hasPlannedMeters ? (
+                          <>
+                            {' '}
+                            vs plan{' '}
+                            <span className="font-mono font-bold tabular-nums">{plannedMetersValue.toFixed(1)} m</span>
+                          </>
+                        ) : null}
+                      </>
+                    ) : allocationUniqueRollCapacityInsight.anyUnknown ? (
+                      <span className="text-slate-600">
+                        {' '}
+                        · metre estimate unavailable — add supplier kg/m or expected metres on coil receipts.
+                      </span>
                     ) : null}
                   </span>
+                  {hasPlannedMeters && allocationUniqueRollCapacityInsight.sumEst != null ? (
+                    <span
+                      className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wide ${
+                        allocationUniqueRollCapacityInsight.sumEst + 0.25 >= plannedMetersValue
+                          ? 'bg-emerald-100 text-emerald-900'
+                          : 'bg-amber-100 text-amber-950'
+                      }`}
+                    >
+                      {allocationUniqueRollCapacityInsight.sumEst + 0.25 >= plannedMetersValue
+                        ? 'Capacity OK'
+                        : 'Tight vs plan'}
+                    </span>
+                  ) : null}
                 </div>
-                <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-200/80">
-                  <div
-                    className={`h-full rounded-full transition-all duration-300 ${
-                      planProgressPct != null && planProgressPct > 100 ? 'bg-amber-500' : 'bg-gradient-to-r from-teal-500 to-[#134e4a]'
-                    }`}
-                    style={{
-                      width: `${Math.min(100, planProgressPct != null ? planProgressPct : 0)}%`,
-                    }}
-                  />
-                </div>
-              </div>
-            ) : null}
-            <div className="p-2 sm:p-2.5">
-              <p className="text-[9px] font-bold uppercase tracking-wide text-[#134e4a]/90">Target spec</p>
-              <div className="mt-1 flex flex-wrap gap-1">
-                {[
-                  ['Gauge', quotationMaterialSpec.gauge],
-                  ['Colour', quotationMaterialSpec.colour],
-                  ['Material', quotationMaterialSpec.materialType],
-                  ['Design', quotationMaterialSpec.design],
-                ].map(([k, v]) => (
-                  <div
-                    key={k}
-                    className="min-w-0 flex-1 rounded border border-slate-100 bg-slate-50/80 px-1.5 py-1 sm:max-w-[7rem] sm:flex-none"
-                  >
-                    <p className="text-[8px] font-semibold uppercase tracking-wide text-slate-400">{k}</p>
-                    <p className="truncate text-[11px] font-bold text-slate-800">{v || '—'}</p>
-                  </div>
-                ))}
-              </div>
-              {recommendedCoils.length > 0 ? (
-                <p className="mt-1 flex items-start gap-1 text-[10px] font-medium text-teal-800">
-                  <Sparkles size={14} className="mt-0.5 shrink-0" />
-                  {recommendedCoils.length} matching coil{recommendedCoils.length === 1 ? '' : 's'} in stock — shown first
-                  in the picker.
-                </p>
-              ) : linkedQuotation || jobProductAttrs ? (
-                <p className="mt-1 flex items-start gap-1 text-[10px] font-medium text-amber-800">
-                  <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-                  No perfect stock match — choose closest coil or save with acknowledgement.
-                </p>
               ) : null}
+
+              {hasPlannedMeters && (selectedJob.status === 'Running' || selectedJob.status === 'Planned') ? (
+                <div className="rounded-md border border-slate-200/60 bg-white/60 px-2 py-1.5">
+                  <div className="flex items-center justify-between gap-2 text-[9px] font-semibold text-slate-600">
+                    <span className="uppercase tracking-wide text-slate-500">vs plan</span>
+                    <span className="tabular-nums text-slate-800">
+                      {formatMeters(recordedMeters)} / {formatMeters(plannedMetersValue)}
+                      {planProgressPct != null ? (
+                        <span className="ml-1 font-bold text-[#134e4a]">({planProgressPct}%)</span>
+                      ) : null}
+                    </span>
+                  </div>
+                  <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-slate-200/90">
+                    <div
+                      className={`h-full rounded-full transition-all duration-300 ${
+                        planProgressPct != null && planProgressPct > 100 ? 'bg-amber-500' : 'bg-gradient-to-r from-teal-500 to-[#134e4a]'
+                      }`}
+                      style={{
+                        width: `${Math.min(100, planProgressPct != null ? planProgressPct : 0)}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              ) : null}
+
+              <div
+                className={`rounded-lg border border-slate-200/70 bg-white/85 shadow-sm ring-1 ring-slate-900/[0.04] ${
+                  inModal ? 'p-2' : 'p-2.5 sm:p-3'
+                }`}
+              >
+                <p className="text-[8px] font-bold uppercase tracking-[0.12em] text-[#134e4a]">Target spec</p>
+                <div
+                  className={`mt-2 grid grid-cols-1 gap-x-4 gap-y-1.5 text-[11px] leading-snug sm:grid-cols-2 lg:grid-cols-4 ${
+                    inModal ? 'text-[10px]' : ''
+                  }`}
+                >
+                  {[
+                    ['Gauge', quotationMaterialSpec.gauge],
+                    ['Colour', quotationMaterialSpec.colour],
+                    ['Material', quotationMaterialSpec.materialType],
+                    ['Design', quotationMaterialSpec.design],
+                  ].map(([k, v]) => (
+                    <p key={k} className="min-w-0 border-l-2 border-teal-200/80 pl-2">
+                      <span className="text-[9px] font-bold uppercase tracking-wide text-slate-500">{k}</span>
+                      <span className="mt-0.5 block truncate font-semibold text-slate-900">{v || '—'}</span>
+                    </p>
+                  ))}
+                </div>
+                {recommendedCoils.length > 0 ? (
+                  <p className="mt-2 flex items-start gap-2 rounded-md border border-teal-200/60 bg-teal-50/50 px-2 py-1.5 text-[10px] font-medium leading-snug text-teal-900">
+                    <Sparkles size={14} className="mt-0.5 shrink-0 text-teal-600" aria-hidden />
+                    <span>
+                      <span className="font-bold text-teal-950">Stock tip</span>{' '}
+                      {recommendedCoils.length} matching coil{recommendedCoils.length === 1 ? '' : 's'} — listed first in
+                      the picker
+                      {hasPlannedMeters
+                        ? ', ordered by fit to planned metres (from supplier kg/m or roll length).'
+                        : '.'}
+                    </span>
+                  </p>
+                ) : linkedQuotation || jobProductAttrs ? (
+                  <p className="mt-2 flex items-start gap-2 rounded-md border border-amber-200/70 bg-amber-50/50 px-2 py-1.5 text-[10px] font-medium leading-snug text-amber-950">
+                    <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-600" aria-hidden />
+                    <span>
+                      <span className="font-bold">Match</span> — no perfect stock hit; pick the closest coil or save with
+                      acknowledgement.
+                    </span>
+                  </p>
+                ) : null}
+                <div className="mt-2.5 flex flex-col gap-2 border-t border-slate-200/70 pt-2.5 sm:flex-row sm:flex-wrap sm:items-stretch sm:gap-2">
+                  {[
+                    ['Planned', formatMeters(selectedJob.plannedMeters), 'text-[#134e4a]'],
+                    ['Actual', formatMeters(selectedJob.actualMeters), 'text-[#134e4a]'],
+                    ['Alert', selectedJob.conversionAlertState || 'Pending', 'text-slate-900'],
+                  ].map(([label, value, valueClass]) => (
+                    <div
+                      key={label}
+                      className="flex min-w-0 flex-1 flex-col justify-center rounded-md border border-slate-200/80 bg-gradient-to-b from-white to-slate-50/90 px-2 py-1.5 text-center shadow-sm sm:min-w-[5.5rem] sm:text-left sm:px-2.5"
+                    >
+                      <p className="text-[8px] font-bold uppercase tracking-wider text-slate-500">{label}</p>
+                      <p className={`mt-0.5 truncate text-sm font-black tabular-nums leading-none ${valueClass}`}>
+                        {value}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -1376,8 +1943,8 @@ export function LiveProductionMonitor({
                 Ordered on the quote vs already posted from other completed jobs. Adjust &ldquo;This job&rdquo; to match
                 what leaves stock; shortfalls can be refunded under Accessory shortfall.
               </p>
-              <div className="rounded-lg border border-slate-200 bg-white">
-                <div className="overflow-x-auto">
+              <div className="min-w-0 max-w-full rounded-lg border border-slate-200 bg-white">
+                <div className="z-scroll-x min-w-0 max-w-full overflow-x-auto overscroll-x-contain [-webkit-overflow-scrolling:touch]">
                   <table className="w-full min-w-[520px] border-collapse text-left text-sm">
                     <thead className="border-b border-slate-200 bg-slate-50 text-xs font-bold uppercase tracking-wide text-slate-600">
                       <tr>
@@ -1490,26 +2057,31 @@ export function LiveProductionMonitor({
           {readOnly && selectedJob.status === 'Completed' && selectedJob.productID ? (
             <div className="rounded-lg border border-indigo-200/90 bg-indigo-50/60 p-2.5 sm:p-3 space-y-2">
               <p className="text-[9px] font-black uppercase tracking-widest text-indigo-900/90">
-                Finished-goods metres (after completion)
+                Output product stock (after completion)
               </p>
               <p className="text-[11px] leading-snug text-indigo-950/90">
-                Posted <span className="font-mono font-bold">{formatMeters(postedOutputM)}</span> m on this job
+                When you hit <strong className="font-semibold">Complete</strong>, the system credits the{' '}
+                <strong className="font-semibold">finished product SKU</strong> (e.g. roofing sheet metres in the
+                warehouse), not the coil lines. That first credit is{' '}
+                <span className="font-mono font-bold">{formatMeters(postedOutputM)}</span> on this job
                 {Math.abs(fgAdjTotalM) > 1e-6 ? (
                   <>
                     {' '}
-                    · Adjustments{' '}
+                    · Later corrections{' '}
                     <span className="font-mono font-bold">
                       {fgAdjTotalM >= 0 ? '+' : ''}
                       {formatMeters(fgAdjTotalM)}
                     </span>{' '}
-                    · Effective{' '}
-                    <span className="font-mono font-bold">{formatMeters(effectiveOutputM)}</span> m
+                    · Stock today{' '}
+                    <span className="font-mono font-bold">{formatMeters(effectiveOutputM)}</span>
                   </>
                 ) : (
-                  <> · No FG adjustments yet</>
+                  <> · no stock corrections yet</>
                 )}
-                . Original completion and coil conversion table below are <strong className="font-semibold">not</strong>{' '}
-                rewritten — corrections are separate audit rows + stock movements.
+                . The coil run log and conversion table below stay as the <strong className="font-semibold">historical</strong>{' '}
+                record; if metres in the warehouse were wrong (offcut, recount, data entry), a manager posts a{' '}
+                <strong className="font-semibold">separate</strong> adjustment so stock matches reality without erasing
+                the original completion.
               </p>
               {selectedJobAdjustments.length > 0 ? (
                 <ul className="space-y-1 rounded-md border border-indigo-100 bg-white/90 px-2 py-1.5 text-[10px] text-slate-800">
@@ -1529,26 +2101,28 @@ export function LiveProductionMonitor({
               ) : null}
               {canPostFgCompletionAdjustment ? (
                 <div className="rounded-md border border-indigo-200 bg-white/95 p-2 space-y-1.5">
-                  <p className="text-[10px] font-semibold text-indigo-950">Post adjustment (manager / release)</p>
+                  <p className="text-[10px] font-semibold text-indigo-950">
+                    Correct <span className="font-mono">{selectedJob.productID}</span> metres in stock (manager)
+                  </p>
                   <div className="flex flex-wrap gap-2">
                     <label className="flex min-w-[8rem] flex-1 flex-col gap-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-500">
-                      Δ metres (FG)
+                      Add or remove metres
                       <input
                         type="text"
                         inputMode="decimal"
                         value={fgAdjDelta}
                         onChange={(e) => setFgAdjDelta(e.target.value)}
-                        placeholder="e.g. -2.5 or 1"
+                        placeholder="e.g. -2.5 or +10"
                         className="rounded-md border border-slate-200 px-2 py-1 font-mono text-[11px] text-slate-900"
                       />
                     </label>
                     <label className="flex min-w-[12rem] flex-[2] flex-col gap-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-500">
-                      Note (≥12 chars)
+                      Reason (≥12 characters)
                       <input
                         type="text"
                         value={fgAdjNote}
                         onChange={(e) => setFgAdjNote(e.target.value)}
-                        placeholder="Physical recount / scanner error / …"
+                        placeholder="e.g. Offcut — yard count 10 m less than system"
                         className="rounded-md border border-slate-200 px-2 py-1 text-[11px] text-slate-900"
                       />
                     </label>
@@ -1559,14 +2133,14 @@ export function LiveProductionMonitor({
                     onClick={() => void submitFgAdjustment()}
                     className="inline-flex items-center justify-center gap-1 rounded-md bg-indigo-700 px-2.5 py-1.5 text-[11px] font-bold text-white hover:bg-indigo-800 disabled:opacity-45"
                   >
-                    {fgAdjSaving ? 'Posting…' : 'Post FG adjustment'}
+                    {fgAdjSaving ? 'Posting…' : 'Post stock correction'}
                   </button>
                 </div>
               ) : (
                 <p className="text-[10px] text-indigo-900/80">
-                  FG metre corrections require <strong className="font-semibold">Production release</strong> or{' '}
-                  <strong className="font-semibold">Operations manager</strong> (so line staff cannot silently change
-                  stock after completion).
+                  Changing credited output metres requires <strong className="font-semibold">Production release</strong>{' '}
+                  or <strong className="font-semibold">Operations manager</strong> (line operators cannot edit warehouse
+                  stock alone after the job is closed).
                 </p>
               )}
             </div>
@@ -1624,24 +2198,28 @@ export function LiveProductionMonitor({
           ) : null}
 
           <div className="overflow-hidden rounded-lg border border-slate-200/90 bg-white shadow-sm">
-            <div className="flex flex-col gap-1.5 border-b border-slate-100 bg-slate-50/50 px-2 py-2 sm:flex-row sm:items-center sm:justify-between sm:px-2.5">
+            <div
+              className={`flex flex-col gap-1.5 border-b border-slate-100 bg-slate-50/50 sm:flex-row sm:items-center sm:justify-between ${
+                inModal ? 'px-2 py-1.5 sm:px-2' : 'px-2 py-2 sm:px-2.5'
+              }`}
+            >
               <div className="flex min-w-0 items-start gap-2">
-                <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#134e4a]/10 text-[#134e4a]">
-                  <ClipboardList size={15} />
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#134e4a] text-[10px] font-bold text-white">
+                  B
                 </span>
                 <div className="min-w-0">
-                  <p className="text-xs font-bold text-slate-900">
-                    {isStoneMeterQuote ? 'Stone-coated run' : 'Coils & run log'}
+                  <p className="text-[10px] font-semibold uppercase tracking-widest text-[#134e4a]">
+                    {isStoneMeterQuote ? 'Stone-coated run' : 'Coils &amp; run log'}
                   </p>
                   <p className="mt-px max-w-prose text-[10px] leading-tight text-slate-600 line-clamp-2">
                     {isStoneMeterQuote
-                      ? 'Save allocation → Start → enter metres consumed from stone stock → Complete.'
+                      ? 'Save & start → enter metres consumed from stone stock → Complete.'
                       : canEditPlannedAllocations
-                        ? 'Coil + opening kg → Save → Start; then closing kg & metres.'
+                        ? 'Coil + opening kg → Save & start; then closing kg & metres. Planned: remove row or change coil and Save & start again to swap.'
                         : canAddSupplementalCoil
                           ? 'Extra coil: new rows only until saved.'
                           : canCaptureRun
-                            ? 'Closing weight & metres each row → Complete.'
+                            ? `Closing & metres each row → Complete. If closing is under ${COIL_TAIL_FINISH_MAX_KG} kg, tick Finish roll to clear the tail from stock.`
                             : 'Closed — read-only.'}
                   </p>
                 </div>
@@ -1663,7 +2241,7 @@ export function LiveProductionMonitor({
                 <div className="rounded-lg border border-teal-100 bg-teal-50/50 p-3 text-[11px] text-slate-700 space-y-2">
                   <p>
                     <strong className="text-[#134e4a]">Stone-coated</strong> stock is tracked in metres (no coil
-                    numbers). Use <strong>Save allocation</strong> once, then <strong>Start</strong>.
+                    numbers). Use <strong>Save &amp; start</strong> once to begin the run.
                   </p>
                   {selectedJob.status === 'Running' ? (
                     <label className="block text-[10px] font-bold uppercase tracking-wide text-slate-500">
@@ -1700,8 +2278,21 @@ export function LiveProductionMonitor({
                 const showRemove =
                   canEditPlannedAllocations ||
                   (canAddSupplementalCoil && draftRow && draftAllocations.length > 1);
+                const lotEst = lot ? estimatedMetresFromFreeKg(lot, freeKg) : null;
+                const lotNom = lot ? supplierNominalMetres(lot) : null;
+                const lotMat = lot ? String(lot.materialTypeName || '').trim() : '';
+                const planHint =
+                  hasPlannedMeters && plannedMetersValue > 0 ? ` · job plan ${plannedMetersValue.toFixed(1)} m` : '';
                 const coilSelectTitle = lot
-                  ? `Remaining ${formatKg(lot.qtyRemaining)}${lot.productID ? ` · ${lot.productID}` : ''} · free ${formatKg(freeKg)}`
+                  ? `Remaining ${formatKg(lot.qtyRemaining)}${lot.productID ? ` · ${lot.productID}` : ''}${
+                      lotMat ? ` · ${lotMat}` : ''
+                    } · free ${formatKg(freeKg)}${
+                      lotEst != null
+                        ? ` · ≈${lotEst.toFixed(1)} m est from free kg`
+                        : lotNom != null
+                          ? ` · supplier ~${lotNom.toFixed(0)} m roll`
+                          : ''
+                    }${planHint}`
                   : 'Choose a received coil from stock.';
                 return (
                   <div
@@ -1710,22 +2301,34 @@ export function LiveProductionMonitor({
                       inModal ? 'p-1.5' : 'p-2'
                     }`}
                   >
-                    <div className="flex min-w-0 flex-nowrap items-end gap-1.5 overflow-x-auto pb-0.5 [scrollbar-width:thin]">
+                    <div
+                      className={`min-w-0 flex flex-col gap-2 pb-1 lg:grid lg:items-end lg:gap-x-2 lg:overflow-visible lg:pb-0 ${
+                        inModal
+                          ? 'lg:grid-cols-[1.75rem_3.25rem_minmax(0,1fr)_minmax(3.25rem,1fr)_minmax(3.25rem,1fr)_minmax(3.25rem,1fr)_minmax(0,1fr)_2.25rem_2rem] lg:gap-x-1.5'
+                          : 'lg:grid-cols-[2rem_4rem_minmax(0,1.1fr)_4rem_4rem_4rem_minmax(0,1fr)_2.75rem_2rem]'
+                      }`}
+                    >
                       <span
-                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[#134e4a] text-[9px] font-black text-white"
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[#134e4a] text-[9px] font-black text-white lg:h-7 lg:w-7"
                         title={`Coil line ${index + 1}`}
                       >
                         {index + 1}
                       </span>
                       {lot ? (
                         <span
-                          className="hidden max-w-[4.5rem] shrink-0 truncate text-[9px] leading-tight text-slate-500 xl:block"
-                          title={`${lot.productID} · free ${formatKg(freeKg)}`}
+                          className="max-w-full truncate text-[9px] leading-tight text-slate-500 lg:max-w-[4.5rem] lg:shrink-0"
+                          title={
+                            lotMat
+                              ? `${lot.productID} · ${lotMat} · free ${formatKg(freeKg)}`
+                              : `${lot.productID} · free ${formatKg(freeKg)}`
+                          }
                         >
                           {lot.productID}
                         </span>
-                      ) : null}
-                      <div className="flex min-w-[10rem] shrink-0 flex-col gap-px">
+                      ) : (
+                        <span className="hidden min-w-0 lg:block" aria-hidden />
+                      )}
+                      <div className="flex min-w-0 flex-1 flex-col gap-px">
                         <label className="whitespace-nowrap text-[8px] font-bold uppercase tracking-wide text-slate-500">
                           Coil
                         </label>
@@ -1734,7 +2337,7 @@ export function LiveProductionMonitor({
                           title={coilSelectTitle}
                           value={row.coilNo}
                           onChange={(e) => updateDraftRow(row.id, { coilNo: e.target.value })}
-                          className="min-w-[10rem] max-w-[16rem] rounded-md border border-slate-200 bg-white py-1.5 px-2 text-[11px] font-bold text-[#134e4a] outline-none transition-all focus:border-[#134e4a]/40 focus:ring-1 focus:ring-[#134e4a]/20 disabled:opacity-60"
+                          className="min-h-11 w-full min-w-0 max-w-full rounded-md border border-slate-200 bg-white py-2 px-2 text-[11px] font-bold text-[#134e4a] outline-none transition-all focus:border-[#134e4a]/40 focus:ring-1 focus:ring-[#134e4a]/20 disabled:opacity-60 lg:min-h-0 lg:py-1.5"
                         >
                           <option value="">Select coil...</option>
                           {recommendedCoils.length > 0 ? (
@@ -1747,8 +2350,7 @@ export function LiveProductionMonitor({
                                 );
                                 return (
                                   <option key={coil.coilNo} value={coil.coilNo}>
-                                    {coil.coilNo} — {coil.colour || '—'} {coil.gaugeLabel || '—'} · free{' '}
-                                    {optFree.toFixed(1)} kg
+                                    {coilPickerOptionText(coil, optFree, plannedMetersValue)}
                                   </option>
                                 );
                               })}
@@ -1766,8 +2368,7 @@ export function LiveProductionMonitor({
                                 );
                                 return (
                                   <option key={coil.coilNo} value={coil.coilNo}>
-                                    {coil.coilNo} — {coil.colour || '—'} {coil.gaugeLabel || '—'} · free{' '}
-                                    {optFree.toFixed(1)} kg
+                                    {coilPickerOptionText(coil, optFree, plannedMetersValue)}
                                   </option>
                                 );
                               })}
@@ -1776,52 +2377,54 @@ export function LiveProductionMonitor({
                         </select>
                       </div>
 
-                      <div className="flex w-[4.25rem] shrink-0 flex-col gap-px">
-                        <label className="whitespace-nowrap text-[8px] font-bold uppercase tracking-wide text-slate-500">
-                          Open kg
-                        </label>
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          disabled={!canPickCoilAndOpening}
-                          value={row.openingWeightKg}
-                          onChange={(e) => updateDraftRow(row.id, { openingWeightKg: e.target.value })}
-                          className="w-full rounded-md border border-slate-200 bg-white py-1.5 px-1.5 text-xs font-bold tabular-nums text-[#134e4a] outline-none transition-all focus:border-[#134e4a]/40 focus:ring-1 focus:ring-[#134e4a]/20 disabled:opacity-60"
-                        />
+                      <div className="grid min-w-0 grid-cols-3 gap-2 lg:contents">
+                        <div className="flex min-w-0 flex-col gap-px lg:w-[4.25rem] lg:shrink-0">
+                          <label className="whitespace-nowrap text-[8px] font-bold uppercase tracking-wide text-slate-500">
+                            Open kg
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            disabled={!canPickCoilAndOpening}
+                            value={row.openingWeightKg}
+                            onChange={(e) => updateDraftRow(row.id, { openingWeightKg: e.target.value })}
+                            className="min-h-10 w-full rounded-md border border-slate-200 bg-white py-2 px-1.5 text-xs font-bold tabular-nums text-[#134e4a] outline-none transition-all focus:border-[#134e4a]/40 focus:ring-1 focus:ring-[#134e4a]/20 disabled:opacity-60 lg:min-h-0 lg:py-1.5"
+                          />
+                        </div>
+
+                        <div className="flex min-w-0 flex-col gap-px lg:w-[4.25rem] lg:shrink-0">
+                          <label className="whitespace-nowrap text-[8px] font-bold uppercase tracking-wide text-slate-500">
+                            Close kg
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            disabled={!canCaptureRun}
+                            value={row.closingWeightKg}
+                            onChange={(e) => updateDraftRow(row.id, { closingWeightKg: e.target.value })}
+                            className="min-h-10 w-full rounded-md border border-slate-200 bg-white py-2 px-1.5 text-xs font-bold tabular-nums text-[#134e4a] outline-none transition-all focus:border-[#134e4a]/40 focus:ring-1 focus:ring-[#134e4a]/20 disabled:opacity-60 lg:min-h-0 lg:py-1.5"
+                          />
+                        </div>
+
+                        <div className="flex min-w-0 flex-col gap-px lg:w-[4.25rem] lg:shrink-0">
+                          <label className="whitespace-nowrap text-[8px] font-bold uppercase tracking-wide text-slate-500">
+                            Metres
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            disabled={!canCaptureRun}
+                            value={row.metersProduced}
+                            onChange={(e) => updateDraftRow(row.id, { metersProduced: e.target.value })}
+                            className="min-h-10 w-full rounded-md border border-slate-200 bg-white py-2 px-1.5 text-xs font-bold tabular-nums text-[#134e4a] outline-none transition-all focus:border-[#134e4a]/40 focus:ring-1 focus:ring-[#134e4a]/20 disabled:opacity-60 lg:min-h-0 lg:py-1.5"
+                          />
+                        </div>
                       </div>
 
-                      <div className="flex w-[4.25rem] shrink-0 flex-col gap-px">
-                        <label className="whitespace-nowrap text-[8px] font-bold uppercase tracking-wide text-slate-500">
-                          Close kg
-                        </label>
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          disabled={!canCaptureRun}
-                          value={row.closingWeightKg}
-                          onChange={(e) => updateDraftRow(row.id, { closingWeightKg: e.target.value })}
-                          className="w-full rounded-md border border-slate-200 bg-white py-1.5 px-1.5 text-xs font-bold tabular-nums text-[#134e4a] outline-none transition-all focus:border-[#134e4a]/40 focus:ring-1 focus:ring-[#134e4a]/20 disabled:opacity-60"
-                        />
-                      </div>
-
-                      <div className="flex w-[4.25rem] shrink-0 flex-col gap-px">
-                        <label className="whitespace-nowrap text-[8px] font-bold uppercase tracking-wide text-slate-500">
-                          Metres
-                        </label>
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          disabled={!canCaptureRun}
-                          value={row.metersProduced}
-                          onChange={(e) => updateDraftRow(row.id, { metersProduced: e.target.value })}
-                          className="w-full rounded-md border border-slate-200 bg-white py-1.5 px-1.5 text-xs font-bold tabular-nums text-[#134e4a] outline-none transition-all focus:border-[#134e4a]/40 focus:ring-1 focus:ring-[#134e4a]/20 disabled:opacity-60"
-                        />
-                      </div>
-
-                      <div className="flex min-w-[5.5rem] flex-1 flex-col gap-px">
+                      <div className="flex min-w-0 flex-1 flex-col gap-px">
                         <label className="whitespace-nowrap text-[8px] font-bold uppercase tracking-wide text-slate-500">
                           Note
                         </label>
@@ -1834,11 +2437,11 @@ export function LiveProductionMonitor({
                             (selectedJob.status === 'Running' && !draftRow)
                           }
                           placeholder="Trim, splice…"
-                          className="min-w-[5rem] w-full rounded-md border border-slate-200 bg-white py-1.5 px-2 text-[11px] font-medium text-slate-800 outline-none transition-all focus:border-slate-300 focus:ring-1 focus:ring-slate-200/80 disabled:opacity-60"
+                          className="min-h-10 min-w-0 w-full rounded-md border border-slate-200 bg-white py-2 px-2 text-[11px] font-medium text-slate-800 outline-none transition-all focus:border-slate-300 focus:ring-1 focus:ring-slate-200/80 disabled:opacity-60 lg:min-h-0 lg:py-1.5"
                         />
                       </div>
 
-                      <div className="flex w-[3.25rem] shrink-0 flex-col items-center gap-px text-center">
+                      <div className="flex w-full flex-col gap-px text-center lg:w-[3.25rem] lg:shrink-0">
                         <span className="whitespace-nowrap text-[8px] font-bold uppercase tracking-wide text-teal-800/90">
                           Used
                         </span>
@@ -1853,13 +2456,37 @@ export function LiveProductionMonitor({
                         <button
                           type="button"
                           onClick={() => removeDraftRow(row.id)}
-                          className="mb-px shrink-0 rounded-md border border-transparent p-1 text-slate-400 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+                          className="inline-flex min-h-10 min-w-10 shrink-0 items-center justify-center self-end rounded-md border border-transparent p-2 text-slate-400 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600 lg:mb-px lg:min-h-0 lg:min-w-0 lg:self-auto lg:p-1"
                           aria-label="Remove coil row"
                         >
                           <Trash2 size={14} />
                         </button>
                       ) : null}
                     </div>
+
+                    {canCaptureRun &&
+                    row.coilNo?.trim() &&
+                    Number(row.openingWeightKg) > 0 &&
+                    Number.isFinite(Number(row.closingWeightKg)) &&
+                    Number(row.closingWeightKg) >= 0 &&
+                    Number(row.closingWeightKg) < COIL_TAIL_FINISH_MAX_KG &&
+                    Number(row.closingWeightKg) <= Number(row.openingWeightKg) ? (
+                      <label className="mt-2 flex cursor-pointer items-start gap-2.5 rounded-md border border-amber-200/90 bg-amber-50/80 px-2.5 py-2.5 text-[11px] font-medium leading-snug text-amber-950 shadow-sm">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(row.finishCoil)}
+                          onChange={(e) => updateDraftRow(row.id, { finishCoil: e.target.checked })}
+                          className="mt-0.5 h-[1.125rem] w-[1.125rem] shrink-0 rounded border-amber-400 text-[#134e4a] focus:ring-2 focus:ring-[#134e4a]/30"
+                        />
+                        <span>
+                          <strong className="font-semibold text-amber-950">Roll finished</strong> — closing is under{' '}
+                          {COIL_TAIL_FINISH_MAX_KG} kg (core/spool / tail). Tick to remove the remaining tail from this
+                          coil&apos;s stock when you hit <strong className="font-semibold">Complete</strong>. Required
+                          before completion; leave unticked only if you increase closing kg because usable material is
+                          still on the roll.
+                        </span>
+                      </label>
+                    ) : null}
 
                     {row.specMismatch || specWarn ? (
                       <div className="mt-1 space-y-1 border-t border-slate-100/80 pt-1">
@@ -1961,7 +2588,7 @@ export function LiveProductionMonitor({
                                 {row.alertState}
                               </span>
                             </div>
-                            <div className="mt-2 grid grid-cols-2 gap-1 sm:grid-cols-3">
+                            <div className="mt-2 grid grid-cols-1 gap-1 sm:grid-cols-3">
                               <div className="rounded-md bg-white/70 px-1.5 py-1">
                                 <p className="text-[7px] font-black uppercase opacity-70">Act</p>
                                 <p className="text-[11px] font-black tabular-nums">{formatKgPerM(row.actualConversionKgPerM)}</p>
@@ -2031,8 +2658,8 @@ export function LiveProductionMonitor({
                   Complete the job with closing weights and metres — checks will show here for audit.
                 </div>
               ) : (
-                <div className="rounded-md border border-slate-100">
-                  <div className="overflow-x-auto">
+                <div className="min-w-0 max-w-full rounded-md border border-slate-100">
+                  <div className="z-scroll-x min-w-0 max-w-full overflow-x-auto overscroll-x-contain [-webkit-overflow-scrolling:touch]">
                     <table className="w-full min-w-[44rem] border-collapse text-sm">
                       <thead>
                         <tr className="border-b border-slate-200 bg-slate-50/90 text-xs font-bold uppercase tracking-wide text-slate-600">
@@ -2125,40 +2752,6 @@ export function LiveProductionMonitor({
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-1.5">
-            <div className="rounded-lg border border-slate-200 bg-white p-2 text-center sm:text-left">
-              <p className="text-[8px] font-bold uppercase tracking-wide text-slate-500">Planned</p>
-              <p className="text-sm font-black tabular-nums text-[#134e4a]">
-                {formatMeters(selectedJob.plannedMeters)}
-              </p>
-            </div>
-            <div className="rounded-lg border border-slate-200 bg-white p-2 text-center sm:text-left">
-              <p className="text-[8px] font-bold uppercase tracking-wide text-slate-500">Actual</p>
-              <p className="text-sm font-black tabular-nums text-[#134e4a]">
-                {formatMeters(selectedJob.actualMeters)}
-              </p>
-            </div>
-            <div className="rounded-lg border border-slate-200 bg-white p-2 text-center sm:text-left">
-              <p className="text-[8px] font-bold uppercase tracking-wide text-slate-500">Alert</p>
-              <p className="truncate text-sm font-black text-[#134e4a]">
-                {selectedJob.conversionAlertState || 'Pending'}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-start gap-2 rounded-lg border border-slate-200/80 bg-slate-50/90 px-2 py-2 text-[10px] text-slate-600 sm:px-2.5">
-            {selectedJob.status === 'Completed' ? (
-              <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-emerald-600" />
-            ) : selectedJob.status === 'Running' ? (
-              <Activity size={14} className="mt-0.5 shrink-0 text-sky-600" />
-            ) : (
-              <Link2 size={14} className="mt-0.5 shrink-0 text-[#134e4a]" />
-            )}
-            <p className="leading-snug">
-              <strong className="font-semibold text-slate-800">Stock logic:</strong> reserved kg stays on the coil until
-              you complete; only consumed kg is deducted. One coil can back several jobs.
-            </p>
-          </div>
         </div>
       </div>
 
@@ -2206,6 +2799,55 @@ export function LiveProductionMonitor({
                 className="rounded-md bg-amber-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-amber-700 disabled:opacity-45"
               >
                 {returnSaving ? 'Applying…' : 'Confirm return to plan'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {cancelModalOpen ? (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="cancel-job-title"
+        >
+          <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-rose-200 bg-white p-4 shadow-xl">
+            <h4 id="cancel-job-title" className="text-sm font-bold text-rose-950">
+              Cancel production job?
+            </h4>
+            <p className="mt-2 text-xs leading-snug text-slate-600">
+              This ends the run without posting output: <strong className="font-semibold">coil reservations are released</strong>, allocations are cleared, the job is marked <strong className="font-semibold">Cancelled</strong>, and the cutting list returns to <strong className="font-semibold">Waiting</strong>. Use for order cancellations (refunds may reference this record).
+            </p>
+            <label className="mt-3 block text-[10px] font-bold uppercase tracking-wide text-slate-500">
+              Reason (≥8 characters)
+            </label>
+            <textarea
+              value={cancelReason}
+              onChange={(e) => setCancelReason(e.target.value)}
+              rows={3}
+              className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-900 outline-none focus:ring-2 focus:ring-rose-200"
+              placeholder="e.g. Customer cancelled order — no production to run."
+            />
+            <div className="mt-3 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                onClick={() => {
+                  setCancelModalOpen(false);
+                  setCancelReason('');
+                }}
+                disabled={cancelSaving}
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                disabled={cancelSaving || cancelReason.trim().length < 8}
+                onClick={() => void submitCancelJob()}
+                className="rounded-md bg-rose-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-rose-800 disabled:opacity-45"
+              >
+                {cancelSaving ? 'Cancelling…' : 'Confirm cancel'}
               </button>
             </div>
           </div>

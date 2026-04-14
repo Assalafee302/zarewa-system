@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import { createDatabase } from './db.js';
 import { createApp } from './app.js';
@@ -7,6 +7,7 @@ describe.sequential('Zarewa API', () => {
   let app;
   let agent;
   let db;
+  const savedEnv = {};
 
   async function loginAs(client, username = 'admin', password = 'Admin@123') {
     const res = await client.post('/api/session/login').send({ username, password });
@@ -15,21 +16,12 @@ describe.sequential('Zarewa API', () => {
     return res;
   }
 
-  async function acceptAllRequiredPolicies(client, signatureName = 'Test User') {
-    const reqs = await client.get('/api/hr/policy-requirements');
-    expect(reqs.status).toBe(200);
-    for (const p of reqs.body.missing || []) {
-      const ack = await client.post('/api/hr/policy-acknowledgements').send({
-        policyKey: p.key,
-        policyVersion: p.version,
-        signatureName,
-        context: { channel: 'api.test' },
-      });
-      expect(ack.status).toBe(201);
-    }
-  }
 
   beforeEach(async () => {
+    savedEnv.ZAREWA_AI_API_KEY = process.env.ZAREWA_AI_API_KEY;
+    savedEnv.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    savedEnv.ZAREWA_AI_BASE_URL = process.env.ZAREWA_AI_BASE_URL;
+    savedEnv.ZAREWA_AI_MODEL = process.env.ZAREWA_AI_MODEL;
     db = createDatabase(':memory:');
     app = createApp(db);
     agent = request.agent(app);
@@ -37,6 +29,11 @@ describe.sequential('Zarewa API', () => {
   });
 
   afterEach(() => {
+    for (const k of ['ZAREWA_AI_API_KEY', 'OPENAI_API_KEY', 'ZAREWA_AI_BASE_URL', 'ZAREWA_AI_MODEL']) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+    vi.restoreAllMocks();
     db?.close();
     db = undefined;
   });
@@ -45,6 +42,7 @@ describe.sequential('Zarewa API', () => {
     const res = await request(app).get('/api/health');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
+    expect(res.body.capabilities?.officeDesk).toBe(true);
   });
 
   it('GET /api/ai/status reports disabled when no AI key is set', async () => {
@@ -52,12 +50,77 @@ describe.sequential('Zarewa API', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.enabled).toBe(false);
+    expect(Array.isArray(res.body.allowedModes)).toBe(true);
+    expect(res.body.allowedModes).toContain('search');
   });
 
   it('POST /api/ai/chat returns 503 when AI is not configured', async () => {
     const res = await agent.post('/api/ai/chat').send({ messages: [{ role: 'user', content: 'Hi' }] });
     expect(res.status).toBe(503);
     expect(res.body.ok).toBe(false);
+  });
+
+  it('GET /api/ai/status reports mode access by role', async () => {
+    process.env.ZAREWA_AI_API_KEY = 'test-key';
+    const salesAgent = request.agent(app);
+    await loginAs(salesAgent, 'sales.staff', 'Sales@123');
+    const salesRes = await salesAgent.get('/api/ai/status');
+    expect(salesRes.status).toBe(200);
+    expect(salesRes.body.enabled).toBe(true);
+    expect(salesRes.body.allowedModes).toContain('search');
+    expect(salesRes.body.allowedModes).toContain('sales');
+    expect(salesRes.body.allowedModes).not.toContain('finance');
+
+    const ceoAgent = request.agent(app);
+    await loginAs(ceoAgent, 'ceo', 'Ceo@1234567890!');
+    const ceoRes = await ceoAgent.get('/api/ai/status');
+    expect(ceoRes.status).toBe(200);
+    expect(ceoRes.body.enabled).toBe(false);
+    expect(ceoRes.body.allowedModes).toEqual([]);
+  });
+
+  it('POST /api/ai/chat rejects module mode without access', async () => {
+    process.env.ZAREWA_AI_API_KEY = 'test-key';
+    const salesAgent = request.agent(app);
+    await loginAs(salesAgent, 'sales.staff', 'Sales@123');
+    const res = await salesAgent.post('/api/ai/chat').send({
+      messages: [{ role: 'user', content: 'Show me finance issues' }],
+      mode: 'finance',
+      context: 'Path: /accounts',
+      pageContext: { pathname: '/accounts' },
+    });
+    expect(res.status).toBe(403);
+    expect(res.body.ok).toBe(false);
+  });
+
+  it('POST /api/ai/chat sends server-generated live context to provider', async () => {
+    process.env.ZAREWA_AI_API_KEY = 'test-key';
+    process.env.ZAREWA_AI_BASE_URL = 'https://api.openai.com/v1';
+    process.env.ZAREWA_AI_MODEL = 'gpt-test';
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: 'Live context summary.' } }],
+        }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = await agent.post('/api/ai/chat').send({
+      messages: [{ role: 'user', content: 'What needs attention today?' }],
+      mode: 'search',
+      context: 'Path: /',
+      pageContext: { pathname: '/', source: 'dashboard-test' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.message).toBe('Live context summary.');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse(String(fetchMock.mock.calls[0][1].body || '{}'));
+    expect(payload.messages[0].role).toBe('system');
+    expect(String(payload.messages[0].content)).toContain('Live workspace context from the server:');
+    expect(String(payload.messages[0].content)).toContain('Current notifications:');
+    expect(String(payload.messages[0].content)).toContain('Client page context:');
   });
 
   it('GET /api/bootstrap requires authentication', async () => {
@@ -99,6 +162,11 @@ describe.sequential('Zarewa API', () => {
     expect(Array.isArray(res.body.workspaceDepartmentIds)).toBe(true);
     expect(res.body.workspaceDepartmentIds).toContain('sales');
     expect(res.body.suggestedRoleByDepartment?.sales).toBe('sales_staff');
+    expect(res.body.operationsInventoryAttention).toBeDefined();
+    expect(res.body.operationsInventoryAttention.ok).toBe(true);
+    expect(res.body.operationsInventoryAttention.stuckProduction).toBeDefined();
+    expect(res.body.operationsInventoryAttention.inventoryChain).toBeDefined();
+    expect(res.body.operationsInventoryAttention.crossModule).toBeDefined();
   });
 
   it('GET /api/workspace/search returns 403 for ceo', async () => {
@@ -411,6 +479,45 @@ describe.sequential('Zarewa API', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.createdCount).toBe(2);
+    expect(res.body.skippedDuplicateCount ?? 0).toBe(0);
+  });
+
+  it('POST /api/bank-reconciliation/import-csv skips duplicate fingerprints on repeat', async () => {
+    const csv = `bankDateISO,description,amountNgn
+2026-04-20,"Dup fingerprint row",-8888`;
+    const r1 = await agent.post('/api/bank-reconciliation/import-csv').send({ csvText: csv });
+    expect(r1.status).toBe(200);
+    expect(r1.body.createdCount).toBe(1);
+    const r2 = await agent.post('/api/bank-reconciliation/import-csv').send({ csvText: csv });
+    expect(r2.status).toBe(200);
+    expect(r2.body.createdCount).toBe(0);
+    expect(r2.body.skippedDuplicateCount).toBe(1);
+  });
+
+  it('POST /api/bank-reconciliation/import skips duplicate fingerprints like CSV', async () => {
+    const lines = [{ bankDateISO: '2026-04-21', description: 'JSON dup test', amountNgn: 7777 }];
+    const a = await agent.post('/api/bank-reconciliation/import').send({ lines });
+    expect(a.status).toBe(200);
+    expect(a.body.createdCount).toBe(1);
+    const b = await agent.post('/api/bank-reconciliation/import').send({ lines });
+    expect(b.status).toBe(200);
+    expect(b.body.createdCount).toBe(0);
+    expect(b.body.skippedDuplicateCount).toBe(1);
+  });
+
+  it('bank CSV import creates finance bank_recon_exceptions work item when lines in Review', async () => {
+    const fin = request.agent(app);
+    await loginAs(fin, 'finance.manager', 'Finance@123');
+    const csv = `bankDateISO,description,amountNgn
+2026-04-22,"Work item recon test",-44444`;
+    const imp = await fin.post('/api/bank-reconciliation/import-csv').send({ csvText: csv });
+    expect(imp.status).toBe(200);
+    const boot = await fin.get('/api/bootstrap');
+    expect(boot.status).toBe(200);
+    const items = boot.body.unifiedWorkItems || [];
+    const hit = items.find((i) => i.documentType === 'bank_recon_exceptions');
+    expect(hit).toBeTruthy();
+    expect(String(hit.title || '')).toMatch(/Bank reconciliation/i);
   });
 
   it('GET /api/exec/summary returns queue KPIs for CEO', async () => {
@@ -671,6 +778,13 @@ describe.sequential('Zarewa API', () => {
       paymentTerms: 'Credit',
       qualityScore: 77,
       notes: 'from test',
+      supplierProfile: {
+        companyEmail: 'vendor-api-test@zarewa.test',
+        phoneMain: '+2348000000001',
+        bankAccounts: [{ bankName: 'Test Bank', accountName: 'API Supplier', accountNumber: '0011223344', sortCode: '' }],
+        contacts: [{ name: 'Contact A', role: 'Accounts', email: 'acct@zarewa.test', phone: '' }],
+        agreements: [],
+      },
     });
     expect(create.status).toBe(201);
     expect(create.body.ok).toBe(true);
@@ -681,6 +795,8 @@ describe.sequential('Zarewa API', () => {
     const row = boot.body.suppliers.find((s) => s.supplierID === create.body.supplierID);
     expect(row.name).toBe('API Test Supplier');
     expect(row.qualityScore).toBe(77);
+    expect(row.supplierProfile?.companyEmail).toBe('vendor-api-test@zarewa.test');
+    expect(row.supplierProfile?.bankAccounts?.[0]?.accountNumber).toBe('0011223344');
   });
 
   it('PATCH /api/suppliers/:id updates name and PO supplier_name', async () => {
@@ -811,7 +927,7 @@ describe.sequential('Zarewa API', () => {
     expect(del.status).toBe(200);
   });
 
-  it('PO transport: link → on loading, post-transport → in transit with optional treasury link', async () => {
+  it('PO transport: link → Finance queue; treasury payments drive in transit and settlement', async () => {
     const sup = await agent.post('/api/suppliers').send({ name: 'Haul Test Sup', city: 'Kano' });
     expect(sup.status).toBe(201);
     const tid = (
@@ -841,6 +957,7 @@ describe.sequential('Zarewa API', () => {
       transportAgentId: tid,
       transportAgentName: 'Haul Co',
       transportReference: 'WB-123',
+      transportAmountNgn: 100_000,
     });
     expect(link.status).toBe(200);
     let boot = await agent.get('/api/bootstrap');
@@ -851,11 +968,24 @@ describe.sequential('Zarewa API', () => {
       reference: 'WB-123',
       dateISO: '2026-03-29',
     });
-    expect(postFree.status).toBe(200);
+    expect(postFree.status).toBe(400);
+    expect(postFree.body.ok).toBe(false);
+
+    const accounts = boot.body.treasuryAccounts;
+    expect(accounts.length).toBeGreaterThan(0);
+    const acctId = accounts[0].id;
+    const post = await agent.post(`/api/purchase-orders/${encodeURIComponent(poId)}/post-transport`).send({
+      treasuryAccountId: acctId,
+      amountNgn: 100_000,
+      reference: 'WB-123',
+      dateISO: '2026-03-29',
+    });
+    expect(post.status).toBe(200);
     boot = await agent.get('/api/bootstrap');
     row = boot.body.purchaseOrders.find((p) => p.poID === poId);
     expect(row.status).toBe('In Transit');
-    expect(row.transportPaid).toBe(false);
+    expect(row.transportPaid).toBe(true);
+    expect(row.transportTreasuryMovementId).toBeTruthy();
 
     const sup2 = await agent.post('/api/suppliers').send({ name: 'Haul Test Sup 2', city: 'Jos' });
     const po2 = await agent.post('/api/purchase-orders').send({
@@ -880,21 +1010,32 @@ describe.sequential('Zarewa API', () => {
       transportAgentId: tid,
       transportAgentName: 'Haul Co',
       transportReference: 'WB-999',
+      transportAmountNgn: 100_000,
+      transportAdvanceNgn: 40_000,
     });
     boot = await agent.get('/api/bootstrap');
-    const accounts = boot.body.treasuryAccounts;
-    expect(accounts.length).toBeGreaterThan(0);
-    const acctId = accounts[0].id;
-    const post = await agent.post(`/api/purchase-orders/${encodeURIComponent(poId2)}/post-transport`).send({
+    row = boot.body.purchaseOrders.find((p) => p.poID === poId2);
+    expect(row.status).toBe('On loading');
+    const postAdv = await agent.post(`/api/purchase-orders/${encodeURIComponent(poId2)}/post-transport`).send({
       treasuryAccountId: acctId,
-      amountNgn: 50_000,
-      reference: 'WB-999',
+      amountNgn: 40_000,
+      reference: 'WB-999-a',
       dateISO: '2026-03-29',
     });
-    expect(post.status).toBe(200);
+    expect(postAdv.status).toBe(200);
     boot = await agent.get('/api/bootstrap');
     row = boot.body.purchaseOrders.find((p) => p.poID === poId2);
     expect(row.status).toBe('In Transit');
+    expect(row.transportPaid).toBe(false);
+    const postBal = await agent.post(`/api/purchase-orders/${encodeURIComponent(poId2)}/post-transport`).send({
+      treasuryAccountId: acctId,
+      amountNgn: 60_000,
+      reference: 'WB-999-b',
+      dateISO: '2026-03-29',
+    });
+    expect(postBal.status).toBe(200);
+    boot = await agent.get('/api/bootstrap');
+    row = boot.body.purchaseOrders.find((p) => p.poID === poId2);
     expect(row.transportPaid).toBe(true);
     expect(row.transportTreasuryMovementId).toBeTruthy();
     const tm = boot.body.treasuryMovements.find((m) => m.id === row.transportTreasuryMovementId);
@@ -904,7 +1045,7 @@ describe.sequential('Zarewa API', () => {
 
   it('POST /api/cutting-lists and /api/production-jobs persist linked production flow', async () => {
     const cutting = await agent.post('/api/cutting-lists').send({
-      quotationRef: 'QT-2026-001',
+      quotationRef: 'QT-2026-005',
       customerID: 'CUS-001',
       productID: 'FG-101',
       productName: 'Longspan thin',
@@ -942,84 +1083,7 @@ describe.sequential('Zarewa API', () => {
     expect(cl.productionRegisterRef).toBe(job.body.jobID);
   });
 
-  it('POST /api/deliveries then confirm deducts finished goods stock once', async () => {
-    const createCl = await agent.post('/api/cutting-lists').send({
-      quotationRef: 'QT-2026-002',
-      customerID: 'CUS-002',
-      productID: 'FG-101',
-      productName: 'Longspan thin',
-      dateISO: '2026-03-29',
-      lines: [{ sheets: 5, lengthM: 5 }],
-    });
-    const clId = createCl.body.id;
-    const before = await agent.get('/api/bootstrap');
-    const fgBefore = before.body.products.find((p) => p.productID === 'FG-101').stockLevel;
 
-    const delivery = await agent.post('/api/deliveries').send({
-      cuttingListId: clId,
-      destination: 'Kano site',
-      method: 'Company truck',
-      shipDate: '2026-03-29',
-      eta: '2026-03-30',
-    });
-    expect(delivery.status).toBe(201);
-
-    const confirm = await agent
-      .patch(`/api/deliveries/${encodeURIComponent(delivery.body.id)}/confirm`)
-      .send({ status: 'Delivered', deliveredDateISO: '2026-03-30', customerSignedPod: true });
-    expect(confirm.status).toBe(200);
-
-    const after = await agent.get('/api/bootstrap');
-    const fgAfter = after.body.products.find((p) => p.productID === 'FG-101').stockLevel;
-    const posted = after.body.deliveries.find((d) => d.id === delivery.body.id);
-    expect(posted.fulfillmentPosted).toBe(true);
-    expect(fgAfter).toBe(fgBefore - 25);
-
-    const second = await agent
-      .patch(`/api/deliveries/${encodeURIComponent(delivery.body.id)}/confirm`)
-      .send({ status: 'Delivered', deliveredDateISO: '2026-03-30', customerSignedPod: true });
-    expect(second.status).toBe(200);
-
-    const afterSecond = await agent.get('/api/bootstrap');
-    const fgAfterSecond = afterSecond.body.products.find((p) => p.productID === 'FG-101').stockLevel;
-    expect(fgAfterSecond).toBe(fgAfter);
-  });
-
-  it('POST /api/deliveries uses production job product when cutting list header product_id is blank', async () => {
-    const createCl = await agent.post('/api/cutting-lists').send({
-      quotationRef: 'QT-2026-002',
-      customerID: 'CUS-002',
-      productID: 'FG-101',
-      productName: 'Longspan thin',
-      dateISO: '2026-03-29',
-      lines: [{ sheets: 2, lengthM: 10 }],
-    });
-    expect(createCl.status).toBe(201);
-    const clId = createCl.body.id;
-    const job = await agent.post('/api/production-jobs').send({
-      cuttingListId: clId,
-      productID: 'FG-101',
-      productName: 'Longspan thin',
-      plannedMeters: 20,
-      plannedSheets: 2,
-      status: 'Planned',
-    });
-    expect(job.status).toBe(201);
-    db.prepare(`UPDATE cutting_lists SET product_id = NULL, product_name = NULL WHERE id = ?`).run(clId);
-
-    const delivery = await agent.post('/api/deliveries').send({
-      cuttingListId: clId,
-      destination: 'Site B',
-      method: 'Company truck',
-      shipDate: '2026-03-29',
-      eta: '2026-03-30',
-    });
-    expect(delivery.status).toBe(201);
-    const boot = await agent.get('/api/bootstrap');
-    const d = boot.body.deliveries.find((x) => x.id === delivery.body.id);
-    expect(d?.lines?.length).toBeGreaterThan(0);
-    expect(d.lines[0].productID).toBe('FG-101');
-  });
 
   it('POST /api/expenses and /api/treasury/transfer post treasury movements', async () => {
     const before = await agent.get('/api/bootstrap');
@@ -1380,7 +1444,7 @@ describe.sequential('Zarewa API', () => {
   it('production job start is blocked until coil allocations exist', async () => {
     const { coilA } = await seedTwoCoilsForProduction(agent);
     const cutting = await agent.post('/api/cutting-lists').send({
-      quotationRef: 'QT-2026-001',
+      quotationRef: 'QT-2026-005',
       customerID: 'CUS-001',
       productID: 'FG-101',
       productName: 'Longspan thin',
@@ -1413,10 +1477,55 @@ describe.sequential('Zarewa API', () => {
     expect(started.status).toBe(200);
   });
 
+  it('POST /api/production-jobs/:jobId/cancel marks planned job Cancelled and blocks restart', async () => {
+    const cutting = await agent.post('/api/cutting-lists').send({
+      quotationRef: 'QT-2026-005',
+      customerID: 'CUS-001',
+      productID: 'FG-101',
+      productName: 'Longspan thin',
+      dateISO: '2026-03-29',
+      machineName: 'Machine 01',
+      operatorName: 'QA',
+      lines: [{ sheets: 1, lengthM: 5 }],
+    });
+    expect(cutting.status).toBe(201);
+    const job = await agent.post('/api/production-jobs').send({
+      cuttingListId: cutting.body.id,
+      productID: 'FG-101',
+      productName: 'Longspan thin',
+      plannedMeters: 10,
+      plannedSheets: 1,
+    });
+    expect(job.status).toBe(201);
+    const jobId = job.body.jobID;
+    const cancel = await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/cancel`).send({
+      reason: 'Order cancelled — no run needed (QA test)',
+    });
+    expect(cancel.status).toBe(200);
+    expect(cancel.body.ok).toBe(true);
+    const boot = await agent.get('/api/bootstrap');
+    const j = boot.body.productionJobs.find((x) => x.jobID === jobId);
+    expect(j?.status).toBe('Cancelled');
+    const clAfter = boot.body.cuttingLists.find((x) => x.id === cutting.body.id);
+    expect(clAfter?.productionRegistered).toBe(false);
+    expect(String(clAfter?.productionRegisterRef ?? '')).toBe('');
+    const requeue = await agent.post('/api/production-jobs').send({
+      cuttingListId: cutting.body.id,
+      productID: 'FG-101',
+      productName: 'Longspan thin',
+      plannedMeters: 10,
+      plannedSheets: 1,
+    });
+    expect(requeue.status).toBe(201);
+    const badStart = await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/start`).send({});
+    expect(badStart.status).toBe(400);
+    expect(String(badStart.body.error || '')).toMatch(/cancel/i);
+  });
+
   it('GET /api/production-jobs/:jobId/coil-allocations lists allocations and 404s missing jobs', async () => {
     const { coilA } = await seedTwoCoilsForProduction(agent);
     const cutting = await agent.post('/api/cutting-lists').send({
-      quotationRef: 'QT-2026-001',
+      quotationRef: 'QT-2026-005',
       customerID: 'CUS-001',
       productID: 'FG-101',
       productName: 'Longspan thin',
@@ -1455,7 +1564,7 @@ describe.sequential('Zarewa API', () => {
   it('multi-coil job supports conversion preview with four reference fields', async () => {
     const { coilA, coilB } = await seedTwoCoilsForProduction(agent);
     const cutting = await agent.post('/api/cutting-lists').send({
-      quotationRef: 'QT-2026-001',
+      quotationRef: 'QT-2026-005',
       customerID: 'CUS-001',
       productID: 'FG-101',
       productName: 'Longspan thin',
@@ -1560,6 +1669,10 @@ describe.sequential('Zarewa API', () => {
     const scrapProd = boot2.body.products.find((p) => p.productID === 'SCRAP-COIL');
     expect(scrapProd).toBeTruthy();
     expect(Number(scrapProd.stockLevel)).toBeGreaterThanOrEqual(99.9);
+    expect(Array.isArray(boot2.body.coilControlEvents)).toBe(true);
+    const scrapEv = boot2.body.coilControlEvents.find((e) => e.eventKind === 'scrap_offcut' && e.coilNo === coilA);
+    expect(scrapEv).toBeTruthy();
+    expect(Number(scrapEv.kgCoilDelta)).toBeCloseTo(-100, 3);
 
     const ret = await agent.post(`/api/coil-lots/${encodeURIComponent(coilA)}/return-material`).send({
       kg: 50,
@@ -1572,6 +1685,9 @@ describe.sequential('Zarewa API', () => {
     const boot3 = await agent.get('/api/bootstrap');
     const lotA2 = boot3.body.coilLots.find((c) => c.coilNo === coilA);
     expect(lotA2.qtyRemaining).toBeCloseTo(2550, 1);
+    const addEv = boot3.body.coilControlEvents.find((e) => e.eventKind === 'adjust_add_kg' && e.coilNo === coilA);
+    expect(addEv).toBeTruthy();
+    expect(Number(addEv.kgCoilDelta)).toBeCloseTo(50, 3);
   });
 
   it('one coil can back two production jobs with separate allocations', async () => {
@@ -1644,8 +1760,8 @@ describe.sequential('Zarewa API', () => {
       return pj.body.jobID;
     }
 
-    const job1 = await jobForCutting('QT-2026-001', 12);
-    const job2 = await jobForCutting('QT-2026-002', 8);
+    const job1 = await jobForCutting('QT-2026-005', 12);
+    const job2 = await jobForCutting('QT-2026-006', 8);
     const a1 = await agent.post(`/api/production-jobs/${encodeURIComponent(job1)}/allocations`).send({
       allocations: [{ coilNo: 'CL-API-SHARED', openingWeightKg: 4000 }],
     });
@@ -1704,7 +1820,7 @@ describe.sequential('Zarewa API', () => {
       supplierName: 'Alert Coil Supplier',
     });
     const cutting = await agent.post('/api/cutting-lists').send({
-      quotationRef: 'QT-2026-001',
+      quotationRef: 'QT-2026-005',
       customerID: 'CUS-001',
       productID: 'FG-101',
       productName: 'Longspan thin',
@@ -1785,7 +1901,7 @@ describe.sequential('Zarewa API', () => {
     await mkGrn('CL-APPEND-A', 'L-AP-A');
     await mkGrn('CL-APPEND-B', 'L-AP-B');
     const cutting = await agent.post('/api/cutting-lists').send({
-      quotationRef: 'QT-2026-001',
+      quotationRef: 'QT-2026-005',
       customerID: 'CUS-001',
       productID: 'FG-101',
       productName: 'Longspan thin',
@@ -1863,7 +1979,7 @@ describe.sequential('Zarewa API', () => {
       supplierName: 'Signoff Supplier',
     });
     const cutting = await agent.post('/api/cutting-lists').send({
-      quotationRef: 'QT-2026-001',
+      quotationRef: 'QT-2026-005',
       customerID: 'CUS-001',
       productID: 'FG-101',
       productName: 'Longspan thin',
@@ -1887,7 +2003,7 @@ describe.sequential('Zarewa API', () => {
     await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/start`).send({ startedAtISO: '2026-03-29' });
     const done = await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/complete`).send({
       completedAtISO: '2026-03-29',
-      allocations: [{ coilNo: 'CL-API-SIGNOFF', closingWeightKg: 0, metersProduced: 50 }],
+      allocations: [{ coilNo: 'CL-API-SIGNOFF', closingWeightKg: 0, metersProduced: 50, finishCoil: true }],
     });
     expect(done.status).toBe(200);
     expect(done.body.managerReviewRequired).toBe(true);
@@ -1964,7 +2080,7 @@ describe.sequential('Zarewa API', () => {
       supplierName: 'Adj Supplier',
     });
     const cutting = await agent.post('/api/cutting-lists').send({
-      quotationRef: 'QT-2026-001',
+      quotationRef: 'QT-2026-005',
       customerID: 'CUS-001',
       productID: 'FG-101',
       productName: 'Longspan thin',
@@ -2002,7 +2118,7 @@ describe.sequential('Zarewa API', () => {
     await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/start`).send({ startedAtISO: '2026-03-30' });
     const done = await agent.post(`/api/production-jobs/${encodeURIComponent(jobId)}/complete`).send({
       completedAtISO: '2026-03-30',
-      allocations: [{ coilNo: 'CL-API-ADJ', closingWeightKg: 0, metersProduced: 10 }],
+      allocations: [{ coilNo: 'CL-API-ADJ', closingWeightKg: 0, metersProduced: 10, finishCoil: true }],
     });
     expect(done.status).toBe(200);
     const fgBefore = await agent.get('/api/bootstrap');
@@ -2209,397 +2325,32 @@ describe.sequential('Zarewa API', () => {
     expect(typeof res.body.totals?.invalidBranchIdRows).toBe('number');
   });
 
-  it('HR: caps, payroll recompute, treasury CSV when locked', async () => {
-    const fin = request.agent(app);
-    await loginAs(fin, 'hr.manager', 'HrManager@12345!');
-    await acceptAllRequiredPolicies(fin, 'HR Manager');
-
-    const caps = await fin.get('/api/hr/caps');
-    expect(caps.status).toBe(200);
-    expect(caps.body.ok).toBe(true);
-    expect(caps.body.enabled).toBe(true);
-    expect(caps.body.canPayroll).toBe(true);
-
-    const created = await fin.post('/api/hr/payroll-runs').send({ periodYyyymm: '209901' });
-    expect(created.status).toBe(201);
-    expect(created.body.ok).toBe(true);
-    const runId = created.body.id;
-    expect(runId).toBeTruthy();
-
-    const badTreasury = await fin.get(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/treasury-pack`);
-    expect(badTreasury.status).toBe(400);
-
-    const rec = await fin.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/recompute`).send({});
-    expect(rec.status).toBe(200);
-    expect(rec.body.ok).toBe(true);
-    expect(Array.isArray(rec.body.lines)).toBe(true);
-    expect(rec.body.lines.length).toBeGreaterThan(0);
-
-    const md = request.agent(app);
-    await loginAs(md, 'md', 'Md@1234567890!');
-    const mdOk = await md.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/md-approve`).send({});
-    expect(mdOk.status).toBe(200);
-    expect(mdOk.body.ok).toBe(true);
-
-    const lock = await fin.patch(`/api/hr/payroll-runs/${encodeURIComponent(runId)}`).send({ status: 'locked' });
-    expect(lock.status).toBe(200);
-    expect(lock.body.ok).toBe(true);
-
-    const csv = await fin.get(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/treasury-pack`);
-    expect(csv.status).toBe(200);
-    expect(String(csv.headers['content-type'] || '')).toMatch(/csv/i);
-    expect(csv.text).toContain('209901');
-
-    const linesOnly = await fin.get(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/lines`);
-    expect(linesOnly.status).toBe(200);
-    expect(linesOnly.body.lines.length).toBe(rec.body.lines.length);
-
-    const snap = await fin.get('/api/hr/salary-welfare/snapshot');
-    expect(snap.status).toBe(200);
-    expect(snap.body.ok).toBe(true);
-  });
-
-  it('HR staff loan: approve, pay disbursement, principal + payroll deduction', async () => {
-    const adminAgent = request.agent(app);
-    await loginAs(adminAgent);
-
-    const reqPolicies = await adminAgent.get('/api/hr/policy-requirements');
-    expect(reqPolicies.status).toBe(200);
-    for (const p of reqPolicies.body.missing || []) {
-      const ack = await adminAgent.post('/api/hr/policy-acknowledgements').send({
-        policyKey: p.key,
-        policyVersion: p.version,
-        signatureName: 'Admin User',
-        context: { channel: 'api.test.loan' },
-      });
-      expect(ack.status).toBe(201);
-    }
-
-    const staffList = await adminAgent.get('/api/hr/staff');
-    expect(staffList.status).toBe(200);
-    const staffUser = staffList.body.staff.find((s) => s.username === 'sales.staff');
-    expect(staffUser?.userId).toBeTruthy();
-
-    const tenure = await adminAgent.patch(`/api/hr/staff/${encodeURIComponent(staffUser.userId)}`).send({
-      dateJoinedIso: '2018-01-15',
-    });
-    expect(tenure.status).toBe(200);
-
-    const staffAgent = request.agent(app);
-    await loginAs(staffAgent, 'sales.staff', 'Sales@123');
-
-    const loanTitle = `API loan ${Date.now()}`;
-    const createLoan = await staffAgent.post('/api/hr/requests').send({
-      kind: 'loan',
-      title: loanTitle,
-      body: 'Integration test',
-      payload: {
-        amountNgn: 120_000,
-        repaymentMonths: 2,
-        deductionPerMonthNgn: 60_000,
-      },
-    });
-    expect(createLoan.status).toBe(201);
-    const loanId = createLoan.body.request?.id;
-    expect(loanId).toBeTruthy();
-
-    const sub = await staffAgent.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/submit`).send({});
-    expect(sub.status).toBe(200);
-
-    const hrRev = await adminAgent.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/hr-review`).send({
-      approve: true,
-      note: 'ok note',
-      reasonCode: 'policy',
-    });
-    expect(hrRev.status).toBe(200);
-
-    const bmRev = await adminAgent.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/branch-endorse`).send({
-      approve: true,
-      note: 'ok note',
-      reasonCode: 'policy',
-    });
-    expect(bmRev.status).toBe(200);
-
-    const gmRev = await adminAgent.patch(`/api/hr/requests/${encodeURIComponent(loanId)}/gm-hr-review`).send({
-      approve: true,
-      note: 'ok note',
-      reasonCode: 'policy',
-    });
-    expect(gmRev.status).toBe(200);
-
-    const finAgent = request.agent(app);
-    await loginAs(finAgent, 'finance.manager', 'Finance@123');
-
-    const boot = await adminAgent.get('/api/bootstrap');
+  it('PATCH /api/branches/:branchId/cutting-threshold updates min paid fraction', async () => {
+    const boot = await agent.get('/api/bootstrap');
     expect(boot.status).toBe(200);
-    const pr = boot.body.paymentRequests.find((p) => String(p.description || '').includes(loanTitle));
-    expect(pr).toBeTruthy();
-
-    const dec = await finAgent.post(`/api/payment-requests/${encodeURIComponent(pr.requestID)}/decision`).send({
-      status: 'Approved',
-      note: 'ok',
-      actedAtISO: '2026-03-29',
-    });
-    expect(dec.status).toBe(200);
-
-    const cash = boot.body.treasuryAccounts[0];
-    expect(cash?.id).toBeTruthy();
-
-    const pay = await finAgent.post(`/api/payment-requests/${encodeURIComponent(pr.requestID)}/pay`).send({
-      treasuryAccountId: cash.id,
-      amountNgn: 120_000,
-      paidAtISO: '2026-03-29',
-    });
-    expect(pay.status).toBe(201);
-    expect(pay.body.fullyPaid).toBe(true);
-
-    const snap = await adminAgent.get('/api/hr/salary-welfare/snapshot');
-    expect(snap.status).toBe(200);
-    const ln = snap.body.approvedLoans.find((l) => l.requestId === loanId);
-    expect(ln).toBeTruthy();
-    expect(ln.deductionsActive).toBe(true);
-    expect(ln.principalOutstandingNgn).toBe(120_000);
-
-    await acceptAllRequiredPolicies(adminAgent, 'Admin');
-    const run = await adminAgent.post('/api/hr/payroll-runs').send({ periodYyyymm: '209910' });
-    expect(run.status).toBe(201);
-    const runId = run.body.id;
-    const comp = await adminAgent.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/recompute`).send({});
-    expect(comp.status).toBe(200);
-    const staffLine = comp.body.lines.find((l) => l.userId === staffUser.userId);
-    expect(staffLine?.otherDeductionNgn).toBe(60_000);
-
-    const paid = await adminAgent.patch(`/api/hr/payroll-runs/${encodeURIComponent(runId)}`).send({ status: 'paid' });
-    expect(paid.status).toBe(200);
-
-    const snap2 = await adminAgent.get('/api/hr/salary-welfare/snapshot');
-    const ln2 = snap2.body.approvedLoans.find((l) => l.requestId === loanId);
-    expect(ln2.principalOutstandingNgn).toBe(60_000);
-    expect(ln2.repaymentMonthsRemaining).toBe(1);
+    const bid = boot.body.workspaceBranches?.[0]?.id;
+    expect(bid).toBeTruthy();
+    const res = await agent
+      .patch(`/api/branches/${encodeURIComponent(bid)}/cutting-threshold`)
+      .send({ cuttingListMinPaidFraction: 0.85 });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.cuttingListMinPaidFraction).toBeCloseTo(0.85, 5);
+    const boot2 = await agent.get('/api/bootstrap');
+    const br = boot2.body.workspaceBranches?.find((b) => b.id === bid);
+    expect(br?.cuttingListMinPaidFraction).toBeCloseTo(0.85, 5);
+    const restore = await agent
+      .patch(`/api/branches/${encodeURIComponent(bid)}/cutting-threshold`)
+      .send({ cuttingListMinPaidFraction: 0.7 });
+    expect(restore.status).toBe(200);
   });
 
-  it('supports handbook acknowledgement and HR observability endpoints', async () => {
-    const adminAgent = request.agent(app);
-    await loginAs(adminAgent, 'admin', 'Admin@123');
 
-    const ack = await adminAgent.post('/api/hr/policy-acknowledgements').send({
-      policyKey: 'employee_handbook',
-      policyVersion: '2026.04',
-      signatureName: 'Admin User',
-      context: { channel: 'web' },
-    });
-    expect(ack.status).toBe(201);
-    expect(ack.body.ok).toBe(true);
-    expect(ack.body.recordHash).toBeTruthy();
 
-    const list = await adminAgent.get('/api/hr/policy-acknowledgements').query({
-      policyKey: 'employee_handbook',
-    });
-    expect(list.status).toBe(200);
-    expect(list.body.acknowledgements.length).toBeGreaterThan(0);
 
-    const obs = await adminAgent.get('/api/hr/observability');
-    expect(obs.status).toBe(200);
-    expect(obs.body.ok).toBe(true);
-    expect(typeof obs.body.summary.totalEvents).toBe('number');
-  });
 
-  it('HR: payroll endpoints are blocked until required policy acknowledgements exist', async () => {
-    const hr = request.agent(app);
-    await loginAs(hr, 'hr.manager', 'HrManager@12345!');
 
-    const blocked = await hr.post('/api/hr/payroll-runs').send({ periodYyyymm: '209911' });
-    expect(blocked.status).toBe(403);
-    expect(blocked.body.code).toBe('POLICY_ACK_REQUIRED');
-    expect(Array.isArray(blocked.body.missing)).toBe(true);
-    expect(blocked.body.missing.length).toBeGreaterThan(0);
 
-    // Accept required policies then retry.
-    const reqs = await hr.get('/api/hr/policy-requirements').send();
-    expect(reqs.status).toBe(200);
-    for (const p of reqs.body.missing || []) {
-      const ack = await hr.post('/api/hr/policy-acknowledgements').send({
-        policyKey: p.key,
-        policyVersion: p.version,
-        signatureName: 'HR Manager',
-        context: { channel: 'api.test' },
-      });
-      expect(ack.status).toBe(201);
-    }
-
-    const ok = await hr.post('/api/hr/payroll-runs').send({ periodYyyymm: '209911' });
-    expect(ok.status).toBe(201);
-    expect(String(ok.body.id || '')).toBeTruthy();
-  });
-
-  it('HR: attendance exception waives late-day payroll deduction', async () => {
-    const adminAgent = request.agent(app);
-    await loginAs(adminAgent, 'admin', 'Admin@123');
-    await acceptAllRequiredPolicies(adminAgent, 'Admin');
-
-    // Register a staff user in Kaduna.
-    const staffUsername = `api.att.exc.${Date.now()}`;
-    const reg = await adminAgent.post('/api/hr/staff/register').send({
-      username: staffUsername,
-      displayName: 'Attendance Exception Staff',
-      password: 'Staff@123456',
-      roleKey: 'viewer',
-      workspaceDepartment: 'hr',
-      branchId: 'BR-KD',
-      employeeNo: `EMP-EXC-${Date.now()}`,
-      jobTitle: 'Tester',
-      department: 'Operations',
-      employmentType: 'permanent',
-      dateJoinedIso: '2025-01-15',
-      baseSalaryNgn: 220_000,
-    });
-    expect(reg.status).toBe(201);
-    const staffUserId = reg.body.userId;
-
-    // Mark a late day in March 2026.
-    const roll = await adminAgent.post('/api/hr/daily-roll').send({
-      branchId: 'BR-KD',
-      dayIso: '2026-03-03',
-      rows: [{ userId: staffUserId, status: 'late' }],
-      notes: 'Late day',
-    });
-    expect(roll.status).toBe(200);
-
-    // Create payroll run and recompute: expect one late-day deduction (base/22).
-    const run = await adminAgent.post('/api/hr/payroll-runs').send({ periodYyyymm: '202603' });
-    expect(run.status).toBe(201);
-    const runId = run.body.id;
-    const rec1 = await adminAgent.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/recompute`).send({});
-    expect(rec1.status).toBe(200);
-    const line1 = rec1.body.lines.find((l) => l.userId === staffUserId);
-    expect(line1).toBeTruthy();
-    const daily = Math.round(220_000 / 22);
-    expect(line1.attendanceDeductionNgn).toBe(daily);
-
-    // Create attendance exception request (late) for that day and approve it.
-    const staffAgent = request.agent(app);
-    await loginAs(staffAgent, staffUsername, 'Staff@123456');
-    const req = await staffAgent.post('/api/hr/requests').send({
-      kind: 'attendance_exception',
-      title: 'Late exc',
-      body: 'Traffic',
-      payload: { dayIso: '2026-03-03', type: 'late', reason: 'Traffic' },
-    });
-    expect(req.status).toBe(201);
-    const reqId = req.body.request?.id;
-    const submit = await staffAgent.patch(`/api/hr/requests/${encodeURIComponent(reqId)}/submit`).send({});
-    expect(submit.status).toBe(200);
-
-    const hr = request.agent(app);
-    await loginAs(hr, 'hr.manager', 'HrManager@12345!');
-    await acceptAllRequiredPolicies(hr, 'HR Manager');
-    const hrRev = await hr.patch(`/api/hr/requests/${encodeURIComponent(reqId)}/hr-review`).send({
-      approve: true,
-      note: 'ok note',
-      reasonCode: 'policy',
-    });
-    expect(hrRev.status).toBe(200);
-    const bm = await hr.patch(`/api/hr/requests/${encodeURIComponent(reqId)}/branch-endorse`).send({
-      approve: true,
-      note: 'ok note',
-      reasonCode: 'policy',
-    });
-    expect(bm.status).toBe(200);
-    const gm = await hr.patch(`/api/hr/requests/${encodeURIComponent(reqId)}/gm-hr-review`).send({
-      approve: true,
-      note: 'ok note',
-      reasonCode: 'policy',
-    });
-    expect(gm.status).toBe(200);
-
-    // Recompute should waive the late-day deduction.
-    const rec2 = await adminAgent.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/recompute`).send({});
-    expect(rec2.status).toBe(200);
-    const line2 = rec2.body.lines.find((l) => l.userId === staffUserId);
-    expect(line2.attendanceDeductionNgn).toBe(0);
-  });
-
-  it('supports HR Next compensation, cleanup queue, and UAT readiness endpoints', async () => {
-    const adminAgent = request.agent(app);
-    await loginAs(adminAgent, 'admin', 'Admin@123');
-    await acceptAllRequiredPolicies(adminAgent, 'Admin');
-
-    const staffList = await adminAgent.get('/api/hr/staff');
-    expect(staffList.status).toBe(200);
-    const staffUser = staffList.body.staff.find((s) => s.username === 'sales.staff') || staffList.body.staff[0];
-    expect(staffUser?.userId).toBeTruthy();
-
-    const patch = await adminAgent.patch(`/api/hr/staff/${encodeURIComponent(staffUser.userId)}`).send({
-      employmentType: 'weird-temp-type',
-    });
-    expect(patch.status).toBe(200);
-
-    const comp = await adminAgent.get('/api/hr/compensation-insights');
-    expect(comp.status).toBe(200);
-    expect(comp.body.ok).toBe(true);
-    expect(typeof comp.body.summary?.medianBaseSalaryNgn).toBe('number');
-
-    const queue = await adminAgent.get('/api/hr/data-cleanup-queue');
-    expect(queue.status).toBe(200);
-    expect(queue.body.ok).toBe(true);
-    expect(Array.isArray(queue.body.queue)).toBe(true);
-    const hit = queue.body.queue.find((q) => q.userId === staffUser.userId);
-    expect(hit).toBeTruthy();
-
-    const resolve = await adminAgent.post('/api/hr/data-cleanup-queue/resolve').send({
-      userId: staffUser.userId,
-      action: 'normalize_employment_type',
-      targetValue: 'permanent',
-    });
-    expect(resolve.status).toBe(200);
-    expect(resolve.body.ok).toBe(true);
-
-    const uat = await adminAgent.get('/api/hr/next-uat-readiness');
-    expect(uat.status).toBe(200);
-    expect(uat.body.ok).toBe(true);
-    expect(typeof uat.body.canCutover).toBe('boolean');
-    expect(typeof uat.body.gates?.qualityCoveragePct).toBe('number');
-    expect(uat.body.signoff == null || typeof uat.body.signoff).toBeTruthy();
-
-    const signoff = await adminAgent.post('/api/hr/next-uat-signoff').send({
-      approve: true,
-      note: 'UAT signed off by QA lead',
-    });
-    expect(signoff.status).toBe(200);
-    expect(signoff.body.ok).toBe(true);
-    expect(signoff.body.signoff?.approvedAtIso).toBeTruthy();
-
-    const uatAfter = await adminAgent.get('/api/hr/next-uat-readiness');
-    expect(uatAfter.status).toBe(200);
-    expect(uatAfter.body.ok).toBe(true);
-    expect(uatAfter.body.signoff?.approvedAtIso).toBeTruthy();
-
-    const revoke = await adminAgent.post('/api/hr/next-uat-signoff').send({ approve: false });
-    expect(revoke.status).toBe(200);
-    expect(revoke.body.ok).toBe(true);
-    expect(revoke.body.signoff).toBeNull();
-  });
-
-  it('exports payroll payslip and statutory packs', async () => {
-    const adminAgent = request.agent(app);
-    await loginAs(adminAgent, 'admin', 'Admin@123');
-    await acceptAllRequiredPolicies(adminAgent, 'Admin');
-    const run = await adminAgent.post('/api/hr/payroll-runs').send({ periodYyyymm: '209912' });
-    expect(run.status).toBe(201);
-    const runId = run.body.id;
-    const rec = await adminAgent.post(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/recompute`).send({});
-    expect(rec.status).toBe(200);
-    const lock = await adminAgent.patch(`/api/hr/payroll-runs/${encodeURIComponent(runId)}`).send({ status: 'locked' });
-    expect(lock.status).toBe(200);
-
-    const payslip = await adminAgent.get(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/payslips-pack`);
-    expect(payslip.status).toBe(200);
-    expect(String(payslip.text || '')).toContain('period_yyyymm');
-
-    const statutory = await adminAgent.get(`/api/hr/payroll-runs/${encodeURIComponent(runId)}/statutory-pack`);
-    expect(statutory.status).toBe(200);
-    expect(String(statutory.text || '')).toContain('tax_ngn');
-  });
 
   it('GET /api/gl/journals, journal lines, and activity return ok for admin', async () => {
     const signedAgent = request.agent(app);
@@ -2623,67 +2374,6 @@ describe.sequential('Zarewa API', () => {
     }
   });
 
-  it('GET /api/accounting/costing-snapshot, fixed-assets CRUD, standard-costs PUT', async () => {
-    const signedAgent = request.agent(app);
-    await loginAs(signedAgent);
-    const snap = await signedAgent.get('/api/accounting/costing-snapshot');
-    expect(snap.status).toBe(200);
-    expect(snap.body.ok).toBe(true);
-    expect(Array.isArray(snap.body.rows)).toBe(true);
-
-    const create = await signedAgent.post('/api/accounting/fixed-assets').send({
-      name: 'API test asset',
-      category: 'it',
-      branchId: 'BR-KD',
-      acquisitionDateIso: '2025-06-01',
-      costNgn: 500_000,
-      salvageNgn: 0,
-      usefulLifeMonths: 60,
-    });
-    expect(create.status).toBe(201);
-    expect(create.body.ok).toBe(true);
-    const id = create.body.asset.id;
-
-    const list = await signedAgent.get('/api/accounting/fixed-assets');
-    expect(list.status).toBe(200);
-    expect(list.body.assets.some((a) => a.id === id)).toBe(true);
-
-    const patch = await signedAgent.patch(`/api/accounting/fixed-assets/${encodeURIComponent(id)}`).send({
-      notes: 'Updated via API test',
-    });
-    expect(patch.status).toBe(200);
-    expect(patch.body.ok).toBe(true);
-
-    const productId = snap.body.rows[0]?.productId;
-    expect(productId).toBeTruthy();
-    const put = await signedAgent.put(`/api/accounting/standard-costs/${encodeURIComponent(productId)}`).send({
-      standardMaterialCostNgnPerKg: 1250,
-      effectiveFromIso: '2025-01-01',
-    });
-    expect(put.status).toBe(200);
-    expect(put.body.ok).toBe(true);
-
-    const stm = await signedAgent.get('/api/accounting/statements-pack?periodKey=2026-01');
-    expect(stm.status).toBe(200);
-    expect(stm.body.ok).toBe(true);
-    expect(stm.body.profitAndLoss).toBeTruthy();
-    expect(stm.body.balanceSheet).toBeTruthy();
-
-    const depPrev = await signedAgent.get('/api/accounting/depreciation-preview?periodKey=2026-01');
-    expect(depPrev.status).toBe(200);
-    expect(depPrev.body.ok).toBe(true);
-    expect(Array.isArray(depPrev.body.rows)).toBe(true);
-
-    const recon = await signedAgent.get('/api/accounting/reconciliation-pack?periodKey=2026-01');
-    expect(recon.status).toBe(200);
-    expect(recon.body.ok).toBe(true);
-    expect(recon.body).toHaveProperty('salesReceiptsPostedNgn');
-
-    const cf = await signedAgent.get('/api/accounting/cash-flow?periodKey=2026-01');
-    expect(cf.status).toBe(200);
-    expect(cf.body.ok).toBe(true);
-    expect(Array.isArray(cf.body.rows)).toBe(true);
-  });
 
   it('POST /api/inventory/stone-receipt, accessory-receipt, ensure-stone-product; GET /api/pricing/resolve', async () => {
     const stone = await agent.post('/api/inventory/stone-receipt').send({
@@ -2727,5 +2417,100 @@ describe.sequential('Zarewa API', () => {
     expect(csvExport.status).toBe(200);
     expect(String(csvExport.headers['content-type'] || '')).toMatch(/csv/i);
     expect(csvExport.text).toMatch(/gauge_key/);
+
+    const mps = await agent.get('/api/pricing/material-sheet').query({ materialKey: 'alu', branchId: 'BR-KD' });
+    expect(mps.status).toBe(200);
+    expect(mps.body.ok).toBe(true);
+    expect(Array.isArray(mps.body.gauges)).toBe(true);
+    expect(mps.body.gauges.length).toBeGreaterThan(0);
+
+    const mpsSave = await agent.post('/api/pricing/material-sheet/rows').send({
+      materialKey: 'alu',
+      gaugeMm: '0.45',
+      branchId: 'BR-KD',
+      designKey: '',
+      conversionReferenceKgPerM: 1.5,
+      conversionHistoryKgPerM: 1.52,
+      costPerKgNgn: 800,
+      conversionUsedKgPerM: 1.51,
+      overheadNgnPerM: 100,
+      profitNgnPerM: 50,
+      minimumPricePerMeterNgn: 5000,
+    });
+    expect(mpsSave.status).toBe(200);
+    expect(mpsSave.body.ok).toBe(true);
+
+    const mpsEv = await agent.get('/api/pricing/material-sheet/events').query({ materialKey: 'alu' });
+    expect(mpsEv.status).toBe(200);
+    expect(mpsEv.body.ok).toBe(true);
+    expect(Array.isArray(mpsEv.body.events)).toBe(true);
+    expect(mpsEv.body.events.length).toBeGreaterThan(0);
+  });
+
+  it('Office Desk: summary, thread detail, convert to payment request', async () => {
+    const sum = await agent.get('/api/office/summary');
+    expect(sum.status).toBe(200);
+    expect(sum.body.ok).toBe(true);
+    expect(sum.body).toHaveProperty('unreadApprox');
+
+    const create = await agent.post('/api/office/threads').send({
+      subject: 'API test memo',
+      body: 'Conversion body',
+      kind: 'memo',
+    });
+    expect(create.status).toBe(201);
+    expect(create.body.thread?.id).toBeTruthy();
+    const tid = create.body.thread.id;
+
+    const detail = await agent.get(`/api/office/threads/${encodeURIComponent(tid)}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.ok).toBe(true);
+    expect(detail.body.thread?.id).toBe(tid);
+
+    const conv = await agent.post(`/api/office/threads/${encodeURIComponent(tid)}/convert-payment-request`).send({
+      requestDate: '2026-04-09',
+      description: 'Office API test',
+      requestReference: 'OFFICE-API',
+      expenseCategory: 'Logistics & haulage',
+      lineItems: [{ item: 'Test item', unit: 2, unitPriceNgn: 2500 }],
+    });
+    expect(conv.status).toBe(200);
+    expect(conv.body.ok).toBe(true);
+    expect(conv.body.requestID).toBeTruthy();
+
+    const boot = await agent.get('/api/bootstrap');
+    const pr = boot.body.paymentRequests.find((r) => r.requestID === conv.body.requestID);
+    expect(pr).toBeTruthy();
+  });
+
+  it('GET /api/office/summary requires authentication', async () => {
+    const res = await request(app).get('/api/office/summary');
+    expect(res.status).toBe(401);
+  });
+
+  it('POST /api/office/ai/polish-memo returns 503 when AI is not configured', async () => {
+    const res = await agent.post('/api/office/ai/polish-memo').send({ subject: 'Test', body: 'Hello' });
+    expect(res.status).toBe(503);
+    expect(res.body.ok).toBe(false);
+  });
+
+  it('GET /api/office/filing returns filings array for signed-in user', async () => {
+    const res = await agent.get('/api/office/filing');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(Array.isArray(res.body.filings)).toBe(true);
+  });
+
+  it('POST /api/office/threads/:id/ai-file returns 503 when AI is not configured', async () => {
+    const create = await agent.post('/api/office/threads').send({
+      subject: 'Filing API test',
+      body: 'Need fuel',
+      kind: 'memo',
+    });
+    expect(create.status).toBe(201);
+    const tid = create.body.thread.id;
+    const res = await agent.post(`/api/office/threads/${encodeURIComponent(tid)}/ai-file`).send({});
+    expect(res.status).toBe(503);
+    expect(res.body.ok).toBe(false);
   });
 });

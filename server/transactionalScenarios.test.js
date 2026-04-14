@@ -551,6 +551,30 @@ describe('Transactional scenarios (business checklist)', () => {
         paymentLines: [{ treasuryAccountId: cashId, amountNgn: total, reference: 'TX11-PAY' }],
       });
 
+      const cutting = await admin.post('/api/cutting-lists').send({
+        quotationRef: qid,
+        customerID: 'CUS-TX-11',
+        productID: 'FG-101',
+        productName: 'Longspan thin',
+        dateISO: '2026-03-29',
+        machineName: 'TX11',
+        operatorName: 'QA',
+        lines: [{ sheets: 1, lengthM: 5 }],
+      });
+      expect(cutting.status).toBe(201);
+      const job = await admin.post('/api/production-jobs').send({
+        cuttingListId: cutting.body.id,
+        productID: 'FG-101',
+        productName: 'Longspan thin',
+        plannedMeters: 10,
+        plannedSheets: 1,
+      });
+      expect(job.status).toBe(201);
+      const cancel = await admin
+        .post(`/api/production-jobs/${encodeURIComponent(job.body.jobID)}/cancel`)
+        .send({ reason: 'Customer cancelled before run — TX11' });
+      expect(cancel.status).toBe(200);
+
       const sales = request.agent(app);
       await loginAs(sales, 'sales.staff', 'Sales@123');
       const created = await sales.post('/api/refunds').send({
@@ -603,7 +627,7 @@ describe('Transactional scenarios (business checklist)', () => {
           {
             lineKey: 'L-TX12',
             productID: 'PRD-102',
-            productName: 'Aluzinc (PPGI) coil (kg)',
+            productName: 'Aluzinc coil (kg)',
             qtyOrdered: 500,
             unitPricePerKgNgn: 200,
             unitPriceNgn: 200,

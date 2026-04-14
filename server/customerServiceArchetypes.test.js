@@ -195,6 +195,14 @@ async function createProductionJob(agent, payload) {
   return res.body;
 }
 
+async function cancelProductionJobForRefundEligibility(agent, jobID) {
+  const res = await agent.post(`/api/production-jobs/${encodeURIComponent(jobID)}/cancel`).send({
+    reason: 'Archetype — close production for refund eligibility',
+  });
+  expect(res.status).toBe(200);
+  expect(res.body.ok).toBe(true);
+}
+
 async function approvePaymentRequest(agent, requestID, note = 'Approved.') {
   const res = await agent
     .post(`/api/payment-requests/${encodeURIComponent(requestID)}/decision`)
@@ -528,6 +536,14 @@ function buildArchetypes() {
           operatorName: 'Estimator error',
           lines: buildExactLengths(20, 400),
         });
+        const job11 = await createProductionJob(agent, {
+          cuttingListId: cl.id,
+          productID: fg.productID,
+          productName: fg.name,
+          plannedMeters: 400,
+          plannedSheets: 20,
+        });
+        await cancelProductionJobForRefundEligibility(agent, job11.jobID);
         const rf = await agent.post('/api/refunds').send({
           customerID: cid,
           customer: 'Short-sheet client',
@@ -674,10 +690,43 @@ function buildArchetypes() {
         await loginAs(admin, 'admin', 'Admin@123');
         const [acc] = await ensureTreasuryAccounts(admin, 1, 'A17');
         const cid = await createCustomer(admin, 'ARC17', 'Refund target');
+        const q17 = await createQuotation(admin, cid, 'ARC17', {
+          products: [{ name: 'Sheet', qty: '1', unitPrice: '50000' }],
+          accessories: [],
+          services: [],
+        });
+        await admin.post('/api/ledger/receipt').send({
+          customerID: cid,
+          quotationId: q17.quotationId,
+          amountNgn: 50_000,
+          paymentMethod: 'Cash',
+          dateISO: '2026-03-29',
+          paymentLines: [{ treasuryAccountId: acc.id, amountNgn: 50_000, reference: 'A17-PAY' }],
+        });
+        const snap17 = await bootstrap(admin);
+        const fg17 = snap17.products[0];
+        const cl17 = await createCuttingList(admin, {
+          quotationRef: q17.quotationId,
+          customerID: cid,
+          productID: fg17.productID,
+          productName: fg17.name,
+          dateISO: '2026-03-29',
+          machineName: 'M1',
+          operatorName: 'QA',
+          lines: [{ sheets: 1, lengthM: 5 }],
+        });
+        const j17 = await createProductionJob(admin, {
+          cuttingListId: cl17.id,
+          productID: fg17.productID,
+          productName: fg17.name,
+          plannedMeters: 5,
+          plannedSheets: 1,
+        });
+        await cancelProductionJobForRefundEligibility(admin, j17.jobID);
         const rf = await admin.post('/api/refunds').send({
           customerID: cid,
           customer: 'Refund target',
-          quotationRef: 'QT-ARC17',
+          quotationRef: q17.quotationId,
           reasonCategory: 'Adjustment',
           reason: 'Test',
           amountNgn: 10_000,
@@ -704,10 +753,43 @@ function buildArchetypes() {
         const { agent } = await createSession();
         const [acc] = await ensureTreasuryAccounts(agent, 1, 'A18');
         const cid = await createCustomer(agent, 'ARC18', 'Pending approval');
+        const q18 = await createQuotation(agent, cid, 'ARC18', {
+          products: [{ name: 'Sheet', qty: '1', unitPrice: '100000' }],
+          accessories: [],
+          services: [],
+        });
+        await agent.post('/api/ledger/receipt').send({
+          customerID: cid,
+          quotationId: q18.quotationId,
+          amountNgn: 100_000,
+          paymentMethod: 'Cash',
+          dateISO: '2026-03-29',
+          paymentLines: [{ treasuryAccountId: acc.id, amountNgn: 100_000, reference: 'A18-PAY' }],
+        });
+        const snap18 = await bootstrap(agent);
+        const fg18 = snap18.products[0];
+        const cl18 = await createCuttingList(agent, {
+          quotationRef: q18.quotationId,
+          customerID: cid,
+          productID: fg18.productID,
+          productName: fg18.name,
+          dateISO: '2026-03-29',
+          machineName: 'M1',
+          operatorName: 'QA',
+          lines: [{ sheets: 1, lengthM: 5 }],
+        });
+        const j18 = await createProductionJob(agent, {
+          cuttingListId: cl18.id,
+          productID: fg18.productID,
+          productName: fg18.name,
+          plannedMeters: 5,
+          plannedSheets: 1,
+        });
+        await cancelProductionJobForRefundEligibility(agent, j18.jobID);
         const rf = await agent.post('/api/refunds').send({
           customerID: cid,
           customer: 'Pending approval',
-          quotationRef: 'QT-A18',
+          quotationRef: q18.quotationId,
           reasonCategory: 'Overpayment',
           reason: 'Early payout attempt',
           amountNgn: 50_000,
@@ -1009,10 +1091,43 @@ function buildArchetypes() {
         const { agent } = await createSession();
         const accs = await ensureTreasuryAccounts(agent, 2, 'A29');
         const cid = await createCustomer(agent, 'ARC29', 'Split refund');
+        const q29 = await createQuotation(agent, cid, 'ARC29', {
+          products: [{ name: 'Sheet', qty: '1', unitPrice: '200000' }],
+          accessories: [],
+          services: [],
+        });
+        await agent.post('/api/ledger/receipt').send({
+          customerID: cid,
+          quotationId: q29.quotationId,
+          amountNgn: 200_000,
+          paymentMethod: 'Transfer',
+          dateISO: '2026-03-29',
+          paymentLines: [{ treasuryAccountId: accs[0].id, amountNgn: 200_000, reference: 'A29-PAY' }],
+        });
+        const snap29 = await bootstrap(agent);
+        const fg29 = snap29.products[0];
+        const cl29 = await createCuttingList(agent, {
+          quotationRef: q29.quotationId,
+          customerID: cid,
+          productID: fg29.productID,
+          productName: fg29.name,
+          dateISO: '2026-03-29',
+          machineName: 'M1',
+          operatorName: 'QA',
+          lines: [{ sheets: 1, lengthM: 5 }],
+        });
+        const j29 = await createProductionJob(agent, {
+          cuttingListId: cl29.id,
+          productID: fg29.productID,
+          productName: fg29.name,
+          plannedMeters: 5,
+          plannedSheets: 1,
+        });
+        await cancelProductionJobForRefundEligibility(agent, j29.jobID);
         const rf = await agent.post('/api/refunds').send({
           customerID: cid,
           customer: 'Split refund',
-          quotationRef: 'QT-A29',
+          quotationRef: q29.quotationId,
           reasonCategory: 'Adjustment',
           reason: 'Customer wants two banks',
           amountNgn: 180_000,
@@ -1120,15 +1235,50 @@ function buildArchetypes() {
       title: 'Dual control: sales raises refund → sales manager approves → finance pays (one org DB)',
       run: async () => {
         const app = createApp(createDatabase(':memory:'));
+        const admin = request.agent(app);
+        await loginAs(admin, 'admin', 'Admin@123');
+        const snapAdm = await bootstrap(admin);
+        const treasuryId = snapAdm.treasuryAccounts[0].id;
+        const fg31 = snapAdm.products[0];
+        const cid = await createCustomer(admin, 'ARC31', 'Walk-in refund story');
+        const q31 = await createQuotation(admin, cid, 'ARC31', {
+          products: [{ name: 'Sheet', qty: '1', unitPrice: '100000' }],
+          accessories: [],
+          services: [],
+        });
+        await admin.post('/api/ledger/receipt').send({
+          customerID: cid,
+          quotationId: q31.quotationId,
+          amountNgn: 100_000,
+          paymentMethod: 'Cash',
+          dateISO: '2026-03-29',
+          paymentLines: [{ treasuryAccountId: treasuryId, amountNgn: 100_000, reference: 'A31-PAY' }],
+        });
+        const cl31 = await createCuttingList(admin, {
+          quotationRef: q31.quotationId,
+          customerID: cid,
+          productID: fg31.productID,
+          productName: fg31.name,
+          dateISO: '2026-03-29',
+          machineName: 'M1',
+          operatorName: 'QA',
+          lines: [{ sheets: 1, lengthM: 5 }],
+        });
+        const j31 = await createProductionJob(admin, {
+          cuttingListId: cl31.id,
+          productID: fg31.productID,
+          productName: fg31.name,
+          plannedMeters: 5,
+          plannedSheets: 1,
+        });
+        await cancelProductionJobForRefundEligibility(admin, j31.jobID);
+
         const staff = request.agent(app);
         await loginAs(staff, 'sales.staff', 'Sales@123');
-        const snap = await bootstrap(staff);
-        const treasuryId = snap.treasuryAccounts[0].id;
-        const cid = await createCustomer(staff, 'ARC31', 'Walk-in refund story');
         const rf = await staff.post('/api/refunds').send({
           customerID: cid,
           customer: 'Walk-in refund story',
-          quotationRef: 'QT-ARC31',
+          quotationRef: q31.quotationId,
           reasonCategory: 'Overpayment',
           reason: 'Customer paid twice by mistake',
           amountNgn: 75_000,
@@ -1170,13 +1320,50 @@ function buildArchetypes() {
       title: 'Sales officer cannot approve refunds (403) — must escalate to manager/finance',
       run: async () => {
         const app = createApp(createDatabase(':memory:'));
+        const admin = request.agent(app);
+        await loginAs(admin, 'admin', 'Admin@123');
+        const [acc33] = await ensureTreasuryAccounts(admin, 1, 'A33');
+        const cid = await createCustomer(admin, 'ARC33', 'No self-approval');
+        const q33 = await createQuotation(admin, cid, 'ARC33', {
+          products: [{ name: 'Sheet', qty: '1', unitPrice: '10000' }],
+          accessories: [],
+          services: [],
+        });
+        await admin.post('/api/ledger/receipt').send({
+          customerID: cid,
+          quotationId: q33.quotationId,
+          amountNgn: 10_000,
+          paymentMethod: 'Cash',
+          dateISO: '2026-03-29',
+          paymentLines: [{ treasuryAccountId: acc33.id, amountNgn: 10_000, reference: 'A33-PAY' }],
+        });
+        const snap33 = await bootstrap(admin);
+        const fg33 = snap33.products[0];
+        const cl33 = await createCuttingList(admin, {
+          quotationRef: q33.quotationId,
+          customerID: cid,
+          productID: fg33.productID,
+          productName: fg33.name,
+          dateISO: '2026-03-29',
+          machineName: 'M1',
+          operatorName: 'QA',
+          lines: [{ sheets: 1, lengthM: 5 }],
+        });
+        const j33 = await createProductionJob(admin, {
+          cuttingListId: cl33.id,
+          productID: fg33.productID,
+          productName: fg33.name,
+          plannedMeters: 5,
+          plannedSheets: 1,
+        });
+        await cancelProductionJobForRefundEligibility(admin, j33.jobID);
+
         const staff = request.agent(app);
         await loginAs(staff, 'sales.staff', 'Sales@123');
-        const cid = await createCustomer(staff, 'ARC33', 'No self-approval');
         const rf = await staff.post('/api/refunds').send({
           customerID: cid,
           customer: 'No self-approval',
-          quotationRef: 'QT-ARC33',
+          quotationRef: q33.quotationId,
           reasonCategory: 'Adjustment',
           reason: 'Try to self-approve',
           amountNgn: 5000,
@@ -1217,10 +1404,43 @@ function buildArchetypes() {
         const { agent } = await createSession();
         const [acc] = await ensureTreasuryAccounts(agent, 1, 'A35');
         const cid = await createCustomer(agent, 'ARC35', 'Rejected payout');
+        const q35 = await createQuotation(agent, cid, 'ARC35', {
+          products: [{ name: 'Sheet', qty: '1', unitPrice: '1000000' }],
+          accessories: [],
+          services: [],
+        });
+        await agent.post('/api/ledger/receipt').send({
+          customerID: cid,
+          quotationId: q35.quotationId,
+          amountNgn: 1_000_000,
+          paymentMethod: 'Transfer',
+          dateISO: '2026-03-29',
+          paymentLines: [{ treasuryAccountId: acc.id, amountNgn: 1_000_000, reference: 'A35-PAY' }],
+        });
+        const snap35 = await bootstrap(agent);
+        const fg35 = snap35.products[0];
+        const cl35 = await createCuttingList(agent, {
+          quotationRef: q35.quotationId,
+          customerID: cid,
+          productID: fg35.productID,
+          productName: fg35.name,
+          dateISO: '2026-03-29',
+          machineName: 'M1',
+          operatorName: 'QA',
+          lines: [{ sheets: 1, lengthM: 5 }],
+        });
+        const j35 = await createProductionJob(agent, {
+          cuttingListId: cl35.id,
+          productID: fg35.productID,
+          productName: fg35.name,
+          plannedMeters: 5,
+          plannedSheets: 1,
+        });
+        await cancelProductionJobForRefundEligibility(agent, j35.jobID);
         const rf = await agent.post('/api/refunds').send({
           customerID: cid,
           customer: 'Rejected payout',
-          quotationRef: 'QT-A35',
+          quotationRef: q35.quotationId,
           reasonCategory: 'Adjustment',
           reason: 'Suspicious pattern',
           amountNgn: 900_000,
@@ -1423,15 +1643,50 @@ function buildArchetypes() {
       title: 'Alternate line: sales requests → finance approves (no sales manager in path)',
       run: async () => {
         const app = createApp(createDatabase(':memory:'));
+        const admin = request.agent(app);
+        await loginAs(admin, 'admin', 'Admin@123');
+        const snapAdm = await bootstrap(admin);
+        const treasuryId = snapAdm.treasuryAccounts[0].id;
+        const fg44 = snapAdm.products[0];
+        const cid = await createCustomer(admin, 'ARC44', 'CFO approval line');
+        const q44 = await createQuotation(admin, cid, 'ARC44', {
+          products: [{ name: 'Sheet', qty: '1', unitPrice: '50000' }],
+          accessories: [],
+          services: [],
+        });
+        await admin.post('/api/ledger/receipt').send({
+          customerID: cid,
+          quotationId: q44.quotationId,
+          amountNgn: 50_000,
+          paymentMethod: 'Cash',
+          dateISO: '2026-03-29',
+          paymentLines: [{ treasuryAccountId: treasuryId, amountNgn: 50_000, reference: 'A44-PAY' }],
+        });
+        const cl44 = await createCuttingList(admin, {
+          quotationRef: q44.quotationId,
+          customerID: cid,
+          productID: fg44.productID,
+          productName: fg44.name,
+          dateISO: '2026-03-29',
+          machineName: 'M1',
+          operatorName: 'QA',
+          lines: [{ sheets: 1, lengthM: 5 }],
+        });
+        const j44 = await createProductionJob(admin, {
+          cuttingListId: cl44.id,
+          productID: fg44.productID,
+          productName: fg44.name,
+          plannedMeters: 5,
+          plannedSheets: 1,
+        });
+        await cancelProductionJobForRefundEligibility(admin, j44.jobID);
+
         const staff = request.agent(app);
         await loginAs(staff, 'sales.staff', 'Sales@123');
-        const snap = await bootstrap(staff);
-        const treasuryId = snap.treasuryAccounts[0].id;
-        const cid = await createCustomer(staff, 'ARC44', 'CFO approval line');
         const rf = await staff.post('/api/refunds').send({
           customerID: cid,
           customer: 'CFO approval line',
-          quotationRef: 'QT-ARC44',
+          quotationRef: q44.quotationId,
           reasonCategory: 'Adjustment',
           reason: 'End-of-month true-up',
           amountNgn: 42_000,

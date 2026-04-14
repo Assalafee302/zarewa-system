@@ -1,6 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { signInViaApi, signOutViaApi } from './helpers/auth.js';
 import { seedPaidQuotationAndPendingRefund } from './helpers/salesRefundFinanceSeed.js';
+import { waitForRefundApprovedInBootstrap } from './helpers/waitBootstrapRefund.js';
+import { ensureAllBranchesRollup } from './helpers/branchRollup.js';
 
 test.describe.configure({ timeout: 120_000 });
 
@@ -36,11 +38,12 @@ test.describe('Focused checklist — Sales, Refund, Finance', () => {
 
     await signInViaApi(page, 'sales.manager', 'Sales@123');
     await page.goto('/sales');
-    await page.getByRole('tab', { name: 'Refunds' }).click();
-    await page.getByPlaceholder(/search id, customer, date/i).fill(refundID);
-    const row = page.locator('li').filter({ hasText: refundID });
-    await expect(row.first()).toBeVisible({ timeout: 20_000 });
-    await row.first().locator('button[aria-haspopup="menu"]').click();
+    await expect(page.getByRole('tablist', { name: 'Section' })).toBeVisible({ timeout: 20_000 });
+    await page.getByRole('tablist', { name: 'Section' }).getByRole('tab', { name: 'Refunds' }).click();
+    await page.getByPlaceholder(/search refund id/i).fill(refundID);
+    const row = page.getByTestId(`refund-row-${refundID}`);
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    await row.locator('button[aria-haspopup="menu"]').click();
     await page.getByRole('menuitem', { name: 'Edit' }).click();
 
     await expect(page.getByRole('heading', { name: 'Refund Approval' })).toBeVisible({ timeout: 15_000 });
@@ -56,12 +59,16 @@ test.describe('Focused checklist — Sales, Refund, Finance', () => {
     await signOutViaApi(page);
 
     await signInViaApi(page, 'finance.manager', 'Finance@123');
+    await page.goto('/');
+    await ensureAllBranchesRollup(page);
     await page.goto('/accounts');
     await expect(page.getByRole('heading', { name: /finance & accounts/i })).toBeVisible({ timeout: 20_000 });
-    await expect(page.getByText(/Customer refunds — approved, awaiting payout/i)).toBeVisible({
-      timeout: 20_000,
-    });
-    await page.getByRole('button', { name: 'Record pay' }).first().click();
+    await waitForRefundApprovedInBootstrap(page, refundID);
+    await expect(page.getByTestId('finance-refunds-awaiting-payout')).toBeVisible({ timeout: 30_000 });
+    await page
+      .getByTestId(`finance-refund-awaiting-row-${refundID}`)
+      .getByRole('button', { name: 'Record pay' })
+      .click();
     await expect(page.getByRole('heading', { name: 'Refund payout' })).toBeVisible();
     await page.getByPlaceholder(/e\.g\. Hauwa/i).fill('Playwright GTB transfer');
     const postPayout = page.getByRole('button', { name: 'Post refund payout' });
@@ -82,11 +89,12 @@ test.describe('Focused checklist — Sales, Refund, Finance', () => {
 
     await signInViaApi(page, 'md', 'Md@1234567890!');
     await page.goto('/sales');
-    await page.getByRole('tab', { name: 'Refunds' }).click();
-    await page.getByPlaceholder(/search id, customer, date/i).fill(refundID);
-    const row = page.locator('li').filter({ hasText: refundID });
-    await expect(row.first()).toBeVisible({ timeout: 20_000 });
-    await row.first().locator('button[aria-haspopup="menu"]').click();
+    await expect(page.getByRole('tablist', { name: 'Section' })).toBeVisible({ timeout: 20_000 });
+    await page.getByRole('tablist', { name: 'Section' }).getByRole('tab', { name: 'Refunds' }).click();
+    await page.getByPlaceholder(/search refund id/i).fill(refundID);
+    const row = page.getByTestId(`refund-row-${refundID}`);
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    await row.locator('button[aria-haspopup="menu"]').click();
     await page.getByRole('menuitem', { name: 'Edit' }).click();
 
     await expect(page.getByRole('heading', { name: 'Refund Approval' })).toBeVisible({ timeout: 15_000 });
@@ -103,12 +111,16 @@ test.describe('Focused checklist — Sales, Refund, Finance', () => {
     await signOutViaApi(page);
 
     await signInViaApi(page, 'finance.manager', 'Finance@123');
+    await page.goto('/');
+    await ensureAllBranchesRollup(page);
     await page.goto('/accounts');
     await expect(page.getByRole('heading', { name: /finance & accounts/i })).toBeVisible({ timeout: 20_000 });
-    await expect(page.getByText(/Customer refunds — approved, awaiting payout/i)).toBeVisible({
-      timeout: 20_000,
-    });
-    await page.getByRole('button', { name: 'Record pay' }).first().click();
+    await waitForRefundApprovedInBootstrap(page, refundID);
+    await expect(page.getByTestId('finance-refunds-awaiting-payout')).toBeVisible({ timeout: 30_000 });
+    await page
+      .getByTestId(`finance-refund-awaiting-row-${refundID}`)
+      .getByRole('button', { name: 'Record pay' })
+      .click();
     await expect(page.getByRole('heading', { name: 'Refund payout' })).toBeVisible();
     await page.getByPlaceholder(/e\.g\. Hauwa/i).fill('Playwright MD path payout');
     const postPayout = page.getByRole('button', { name: 'Post refund payout' });
@@ -120,7 +132,7 @@ test.describe('Focused checklist — Sales, Refund, Finance', () => {
     await expect(page.getByRole('heading', { name: 'Refund payout' })).toBeHidden({ timeout: 20_000 });
   });
 
-  test('Finance: treasury, payables, expenses & requests, and audit tabs load', async ({ page }) => {
+  test('Finance: treasury, expenses & requests, and audit tabs load', async ({ page }) => {
     await signInViaApi(page, 'finance.manager', 'Finance@123');
     await page.goto('/accounts');
     await expect(page.getByRole('heading', { name: /finance & accounts/i })).toBeVisible({ timeout: 20_000 });
@@ -131,10 +143,6 @@ test.describe('Focused checklist — Sales, Refund, Finance', () => {
     await tabs.getByRole('tab', { name: 'Treasury' }).click();
     await expect(mainTitle).toHaveText('Treasury');
     await expect(page.getByText(/Cash inflows/i).first()).toBeVisible();
-
-    await tabs.getByRole('tab', { name: 'Payables' }).click();
-    await expect(mainTitle).toHaveText('Payables');
-    await expect(page.getByText(/Supplier invoices linked to purchase orders/i)).toBeVisible();
 
     await tabs.getByRole('tab', { name: 'Expenses & requests' }).click();
     await expect(mainTitle).toHaveText('Expenses & requests');

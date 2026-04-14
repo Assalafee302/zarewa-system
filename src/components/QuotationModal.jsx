@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   X,
   Search,
@@ -27,6 +27,7 @@ import {
   recordAdvanceAppliedToQuotation,
 } from '../lib/customerLedgerStore';
 import { apiFetch } from '../lib/apiBase';
+import { guidanceForLedgerPostFailure, isVoucherDateInLockedPeriod } from '../lib/ledgerPostingGuidance';
 import { EditSecondApprovalInline } from './EditSecondApprovalInline';
 import QuotationPrintView from './QuotationPrintView';
 
@@ -98,10 +99,10 @@ function normalizeLoadedLines(raw) {
   };
 }
 
-function rowsForPrint(rows) {
+function rowsForPrint(rows, placeholderWhenEmpty = true) {
   const filled = rows.filter((r) => String(r.name ?? '').trim());
   if (filled.length === 0) {
-    return [{ name: '—', qty: 0, unitPrice: 0, value: 0 }];
+    return placeholderWhenEmpty ? [{ name: '—', qty: 0, unitPrice: 0, value: 0 }] : [];
   }
   return filled.map((r) => {
     const qty = parseLineNum(r.qty);
@@ -333,6 +334,7 @@ const QuotationModal = ({
   const [showPrint, setShowPrint] = useState(false);
   const [printDocumentKind, setPrintDocumentKind] = useState('quotation');
   const [applyAdvanceAmount, setApplyAdvanceAmount] = useState('');
+  const [applyAdvanceHint, setApplyAdvanceHint] = useState(null);
   const [saving, setSaving] = useState(false);
   const [reviving, setReviving] = useState(false);
   const [quotationEditApprovalId, setQuotationEditApprovalId] = useState('');
@@ -483,6 +485,7 @@ const QuotationModal = ({
   useEffect(() => {
     if (!isOpen) return;
     setApplyAdvanceAmount('');
+    setApplyAdvanceHint(null);
     const cid = editData?.customerID ?? '';
     setSelectedCustomerId(cid);
     const match = customers.find((x) => x.customerID === cid);
@@ -560,6 +563,16 @@ const QuotationModal = ({
     [advanceBal, quoteDueNgn]
   );
 
+  const applyAdvanceDateISO = useMemo(
+    () => String(editData?.dateISO || new Date().toISOString().slice(0, 10)),
+    [editData?.dateISO]
+  );
+  const periodLocks = ws?.snapshot?.periodLocks ?? [];
+  const applyAdvanceDateLocked = useMemo(
+    () => Boolean(useLedgerApi && isVoucherDateInLockedPeriod(applyAdvanceDateISO, periodLocks)),
+    [useLedgerApi, applyAdvanceDateISO, periodLocks]
+  );
+
   const submitApplyAdvance = async (e) => {
     e.preventDefault();
     if (!editData?.id || !selectedCustomerId) return;
@@ -584,12 +597,15 @@ const QuotationModal = ({
           customerName: selectedCustomer?.name ?? '',
           quotationRef: editData.id,
           amountNgn: n,
+          dateISO: applyAdvanceDateISO,
         }),
       });
       if (!ok || !data?.ok) {
+        setApplyAdvanceHint(guidanceForLedgerPostFailure(data) || null);
         showToast(data?.error || 'Could not apply advance.', { variant: 'error' });
         return;
       }
+      setApplyAdvanceHint(null);
     } else {
       const res = recordAdvanceAppliedToQuotation({
         customerID: selectedCustomerId,
@@ -660,9 +676,9 @@ const QuotationModal = ({
 
   const printLinePayload = useMemo(
     () => ({
-      products: rowsForPrint(productRows),
-      accessories: rowsForPrint(accessoryRows),
-      services: rowsForPrint(serviceRows),
+      products: rowsForPrint(productRows, true),
+      accessories: rowsForPrint(accessoryRows, false),
+      services: rowsForPrint(serviceRows, false),
     }),
     [productRows, accessoryRows, serviceRows]
   );
@@ -776,7 +792,7 @@ const QuotationModal = ({
   };
 
   return (
-    <ModalFrame isOpen={isOpen} onClose={onClose}>
+    <ModalFrame isOpen={isOpen} onClose={onClose} modal={!showPrint}>
       <div className="z-modal-panel max-w-[min(100%,210mm)] w-full max-h-[min(92vh,820px)] flex flex-col">
         <div className="px-5 py-4 border-b border-slate-200 flex justify-between items-center shrink-0 bg-white gap-3">
           <div className="flex items-center gap-3 min-w-0">
@@ -1150,6 +1166,32 @@ const QuotationModal = ({
                 mock paid + ledger){' '}
                 <strong>{formatNgn(quoteDueNgn)}</strong>. Applying advance is not revenue — it reduces what they owe.
               </p>
+              {useLedgerApi && applyAdvanceDateLocked ? (
+                <div className="mb-3 rounded-lg border border-amber-300 bg-amber-100/80 px-3 py-2 text-[10px] text-amber-950">
+                  <p className="font-bold">Quotation date month is locked</p>
+                  <p className="mt-0.5 leading-snug">
+                    Apply advance uses the quotation date ({applyAdvanceDateISO}) for the ledger period check.
+                  </p>
+                  <Link to="/settings/governance" className="mt-1 inline-block font-semibold underline underline-offset-2">
+                    Period controls
+                  </Link>
+                </div>
+              ) : null}
+              {applyAdvanceHint ? (
+                <div className="mb-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[10px] text-rose-950 space-y-1">
+                  <p className="font-bold">{applyAdvanceHint.title}</p>
+                  <p className="leading-snug">{applyAdvanceHint.detail}</p>
+                  {applyAdvanceHint.links?.length ? (
+                    <div className="flex flex-wrap gap-x-2">
+                      {applyAdvanceHint.links.map((l) => (
+                        <Link key={l.to} to={l.to} className="font-semibold underline underline-offset-2">
+                          {l.label}
+                        </Link>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               {advanceBal <= 0 ? (
                 <p className="text-[10px] font-medium text-slate-500">No advance balance — record an advance in Sales first.</p>
               ) : quoteDueNgn <= 0 ? (
@@ -1267,12 +1309,15 @@ const QuotationModal = ({
             <button
               type="button"
               aria-label="Close print preview"
-              className="no-print fixed inset-0 z-[10000] bg-black/50"
+              className="no-print fixed inset-0 z-[11060] bg-black/50"
               onClick={() => setShowPrint(false)}
             />
-            <div className="no-print fixed inset-0 z-[10001] overflow-y-auto p-4 sm:p-8 pointer-events-none">
-              <div className="pointer-events-auto mx-auto max-w-[210mm] pb-16">
-                <div className="quotation-print-root overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl print:rounded-none print:border-0 print:shadow-none">
+            <div
+              className="print-portal-scroll fixed inset-0 z-[11070] overflow-y-auto overscroll-y-contain p-4 sm:p-8"
+              onClick={() => setShowPrint(false)}
+            >
+              <div className="mx-auto max-w-[210mm] pb-16 print:m-0 print:max-w-none print:pb-0" onClick={(e) => e.stopPropagation()}>
+                <div className="quotation-print-root quotation-print-preview-mode rounded-lg border border-slate-200 bg-white shadow-2xl print:rounded-none print:border-0 print:shadow-none">
                   <QuotationPrintView
                     documentKind={printDocumentKind}
                     quotationId={editData?.id ?? 'Draft'}
@@ -1291,7 +1336,7 @@ const QuotationModal = ({
                     balanceDueNgn={quotationBalanceAfterPaidNgn}
                   />
                 </div>
-                <div className="mt-4 flex flex-wrap justify-center gap-2">
+                <div className="no-print mt-4 flex flex-wrap justify-center gap-2">
                   <button
                     type="button"
                     onClick={() => window.print()}

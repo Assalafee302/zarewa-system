@@ -6,8 +6,9 @@ test.describe.configure({ timeout: 60_000 });
 test.describe('Authenticated app flows', () => {
   test('dashboard loads after sign-in with active user identity', async ({ page }) => {
     await signInViaUi(page, 'admin', 'Admin@123');
-    await expect(page.getByRole('heading', { name: /operations dashboard/i })).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByRole('group', { name: /signed in as zarewa admin/i })).toBeVisible();
+    await page.goto('/operations');
+    await expect(page.getByRole('heading', { name: /store & production/i })).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByRole('button', { name: /signed in as zarewa admin/i })).toBeVisible();
   });
 
   test('sidebar navigates through protected modules', async ({ page }) => {
@@ -32,16 +33,15 @@ test.describe('Authenticated app flows', () => {
     await modulesNav.getByRole('link', { name: 'Reports' }).click();
     await expect(page).toHaveURL(/\/reports$/);
 
-    await modulesNav.getByRole('link', { name: 'Dashboard' }).click();
+    await modulesNav.getByRole('link', { name: 'Workspace' }).click();
     await expect(page).toHaveURL(/\//);
   });
 
   test('settings exposes profile and period lock controls', async ({ page }) => {
     await signInViaUi(page, 'admin', 'Admin@123');
     await page.goto('/settings/profile');
-    await expect(page.getByRole('heading', { name: /settings/i })).toBeVisible();
     const main = page.locator('#main-content');
-    await expect(main.getByText(/your profile/i).first()).toBeVisible({ timeout: 15_000 });
+    await expect(main.getByText(/your profile/i).first()).toBeVisible({ timeout: 20_000 });
     await expect(main.getByRole('textbox').first()).toHaveValue(/zarewa admin/i);
     await expect(main.getByText(/^administrator$/i).first()).toBeVisible();
 
@@ -100,7 +100,9 @@ test.describe('Authenticated app flows', () => {
     await page.getByRole('tab', { name: 'Refunds' }).click();
     await page.getByRole('button', { name: /new refund/i }).click();
     await expect(page.getByRole('heading', { name: /create refund/i })).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByText(/quotation-linked workflow/i)).toBeVisible();
+    await expect(page.getByText(/must be linked to a finished quotation/i)).toBeVisible();
+    await page.getByRole('button', { name: /show how refunds work/i }).click();
+    await expect(page.getByText(/quotation-linked workflow/i)).toBeVisible({ timeout: 10_000 });
     // Eligible quotations load from GET /api/refunds/eligible-quotations — spinner must clear.
     await expect(page.getByText('Loading active quotes...')).toBeHidden({ timeout: 25_000 });
     await expect(page.getByText('Transaction Intelligence')).toBeVisible();

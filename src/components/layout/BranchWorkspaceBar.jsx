@@ -50,7 +50,7 @@ export function BranchWorkspaceBar() {
   return (
     <div className="flex w-full min-w-0 flex-col gap-1 sm:w-auto sm:flex-row sm:items-center sm:gap-3">
       {isHqRole ? (
-        <div className="flex min-w-0 w-full items-center gap-2 rounded-2xl border border-gray-100/90 bg-white/95 px-3 py-2.5 shadow-sm sm:w-auto sm:py-2">
+        <div className="flex min-w-0 w-full items-center gap-1.5 rounded-xl border border-slate-200/80 bg-white px-2.5 py-1.5 shadow-sm sm:gap-2 sm:rounded-2xl sm:border-gray-100/90 sm:bg-white/95 sm:px-3 sm:py-2 sm:shadow-sm">
           <Building2 size={16} className="shrink-0 text-[#134e4a]/70" aria-hidden />
           <div className="min-w-0 flex-1">
             <label htmlFor="zarewa-branch-workspace" className="sr-only">
@@ -61,7 +61,7 @@ export function BranchWorkspaceBar() {
               value={currentId || (branches[0]?.id ?? '')}
               onChange={onBranchChange}
               disabled={busy}
-              className="z-toolbar-shell w-full min-w-0 max-w-none cursor-pointer truncate bg-transparent text-[11px] font-bold uppercase tracking-wide text-[#134e4a] outline-none disabled:opacity-50 sm:max-w-[240px]"
+              className="w-full min-w-0 max-w-none cursor-pointer truncate bg-transparent text-[10px] font-bold uppercase tracking-wide text-[#134e4a] outline-none disabled:opacity-50 sm:z-toolbar-shell sm:text-[11px] sm:max-w-[240px]"
             >
               {branches.map((b) => (
                 <option key={b.id} value={b.id}>
@@ -72,10 +72,10 @@ export function BranchWorkspaceBar() {
           </div>
         </div>
       ) : (
-        <div className="flex min-w-0 w-full items-center gap-2 rounded-2xl border border-gray-100/90 bg-white/95 px-3 py-2.5 shadow-sm sm:w-auto sm:py-2">
+        <div className="flex min-w-0 w-full items-center gap-1.5 rounded-xl border border-slate-200/80 bg-white px-2.5 py-1.5 shadow-sm sm:gap-2 sm:rounded-2xl sm:border-gray-100/90 sm:bg-white/95 sm:px-3 sm:py-2 sm:shadow-sm">
           <Building2 size={16} className="shrink-0 text-[#134e4a]/70" aria-hidden />
           <div className="min-w-0 flex-1">
-            <p className="truncate text-[11px] font-bold uppercase tracking-wide text-[#134e4a]">
+            <p className="truncate text-[10px] font-bold uppercase tracking-wide text-[#134e4a] sm:text-[11px]">
               {activeBranch ? activeBranch.name || activeBranch.code || activeBranch.id : 'Branch'}
             </p>
           </div>
@@ -83,7 +83,7 @@ export function BranchWorkspaceBar() {
       )}
 
       {canHqRollup ? (
-        <label className="flex cursor-pointer items-center gap-2 whitespace-nowrap rounded-xl border border-gray-100/80 bg-white/80 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-gray-600 shadow-sm">
+        <label className="flex w-full cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200/70 bg-white px-2 py-1.5 text-[9px] font-bold uppercase tracking-wide text-gray-600 shadow-sm sm:w-auto sm:gap-2 sm:rounded-xl sm:border-gray-100/80 sm:bg-white/80 sm:px-3 sm:py-2 sm:text-[10px]">
           <input
             type="checkbox"
             checked={viewAll}

@@ -1,6 +1,6 @@
-import { amountDueOnQuotationFromEntries } from './customerLedgerCore';
-import { refundOutstandingAmount } from './refundsStore';
-import { receiptCashReceivedNgn } from './salesReceiptsList';
+import { amountDueOnQuotationFromEntries } from './customerLedgerCore.js';
+import { refundOutstandingAmount } from './refundsStore.js';
+import { receiptCashReceivedNgn } from './salesReceiptsList.js';
 
 function toIsoDate(value) {
   return String(value || '').slice(0, 10);
@@ -346,7 +346,8 @@ export function liveTopSalesPerformersByMaterial(productionJobs = [], quotations
   });
 
   rows.sort((a, b) => (b.revenueNgn - a.revenueNgn) || (b.metresProduced - a.metresProduced));
-  return rows.slice(0, limit).map((r, i) => ({ ...r, rank: i + 1 }));
+  const capped = limit == null ? rows : rows.slice(0, limit);
+  return capped.map((r, i) => ({ ...r, rank: i + 1 }));
 }
 
 export function liveProductionPulse(productionJobs = [], movements = [], wipByProduct = {}, coilRequests = []) {

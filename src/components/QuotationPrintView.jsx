@@ -50,9 +50,11 @@ export function normalizeQuotationLinesForPrint(quotationLines, fallbackLines = 
   );
   if (!Array.isArray(products) || !Array.isArray(accessories) || !Array.isArray(services)) return fallbackLines;
 
-  const mapRows = (rows) => {
+  const mapRows = (rows, placeholderWhenEmpty = true) => {
     const filled = (rows || []).filter((r) => String(/** @type {{ name?: string }} */ (r).name ?? '').trim());
-    if (filled.length === 0) return [{ name: '—', qty: 0, unitPrice: 0, value: 0 }];
+    if (filled.length === 0) {
+      return placeholderWhenEmpty ? [{ name: '—', qty: 0, unitPrice: 0, value: 0 }] : [];
+    }
     return filled.map((r) => {
       const row = /** @type {{ name?: string; qty?: unknown; unitPrice?: unknown }} */ (r);
       const qty = parseLineNum(row.qty);
@@ -62,14 +64,15 @@ export function normalizeQuotationLinesForPrint(quotationLines, fallbackLines = 
   };
 
   return {
-    products: mapRows(products),
-    accessories: mapRows(accessories),
-    services: mapRows(services),
+    products: mapRows(products, true),
+    accessories: mapRows(accessories, false),
+    services: mapRows(services, false),
   };
 }
 
-const CELL = 'px-3 py-2 align-middle text-[9px] leading-snug sm:text-[10px] print:px-2.5 print:py-1.5 print:text-[8pt]';
-const TH_CELL = `${CELL} font-bold uppercase tracking-wide text-[8px] sm:text-[9px] print:text-[7.5pt]`;
+const CELL =
+  'px-3 py-2 align-middle text-[11px] leading-snug sm:text-[12px] print:px-2 print:py-1 print:text-[9pt] print:leading-tight';
+const TH_CELL = `${CELL} font-bold uppercase tracking-wide text-[10px] sm:text-[11px] print:text-[8pt]`;
 
 function PrintLineRow({ name, qty, unitPrice, value }) {
   return (
@@ -87,7 +90,7 @@ function PrintSectionLabel({ label, noTopRule = false }) {
     <tr className={`quotation-print-tr bg-slate-50 ${noTopRule ? '' : 'border-t border-slate-200'}`}>
       <td
         colSpan={4}
-        className="border-l-[3px] px-3 py-2 text-[9px] font-bold uppercase tracking-wider text-slate-800 sm:text-[10px] print:px-2.5 print:text-[8pt]"
+        className="border-l-[3px] px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-slate-800 sm:text-[12px] print:px-2 print:py-1 print:text-[8pt]"
         style={{ borderLeftColor: ACCENT }}
       >
         {label}
@@ -115,7 +118,7 @@ function PrintSubtotalRow({ label, amount }) {
 /** One aligned label / value pair for meta blocks */
 function MetaField({ label, children, valueClass = '' }) {
   return (
-    <div className="grid grid-cols-[minmax(6.5rem,7.5rem)_1fr] items-baseline gap-x-3 gap-y-0 text-[10px] sm:text-[11px] print:text-[8.5pt]">
+    <div className="grid grid-cols-[minmax(6.5rem,7.5rem)_1fr] items-baseline gap-x-3 gap-y-0 text-[12px] sm:text-[13px] print:text-[9pt] print:gap-x-2">
       <span className="shrink-0 font-bold leading-snug" style={{ color: ACCENT }}>
         {label}
       </span>
@@ -169,6 +172,15 @@ export default function QuotationPrintView({
   const subB = sumLines(accessories);
   const subC = sumLines(services);
   const grand = subA + subB + subC;
+  const showAccessories = accessories.length > 0;
+  const showServices = services.length > 0;
+  let optSectionLetter = 66; // 'B' — optional sections after A. Product
+  const accessoriesSectionTitle = showAccessories
+    ? `${String.fromCharCode(optSectionLetter++)}. Accessories`
+    : null;
+  const servicesSectionTitle = showServices
+    ? `${String.fromCharCode(optSectionLetter++)}. Services`
+    : null;
 
   const bankName = payAccount?.bankName ?? '—';
   const accNo = payAccount?.accNo ?? '—';
@@ -179,6 +191,7 @@ export default function QuotationPrintView({
     documentKind === 'receipt' && receiptRef ? receiptRef : quotationId;
 
   const showValidity = documentKind === 'quotation';
+  const showPayInto = documentKind === 'invoice';
   const footerTerms =
     documentKind === 'receipt'
       ? 'This receipt acknowledges payment received as stated. Retain for your records. Outstanding balance (if any) remains payable per agreed terms.'
@@ -190,21 +203,24 @@ export default function QuotationPrintView({
 
   return (
     <div className="quotation-print-a4 relative mx-auto max-w-4xl w-full overflow-hidden bg-slate-100/80 p-3 font-sans text-slate-800 shadow-lg print:max-w-none print:w-full print:overflow-visible print:bg-white print:p-0 print:shadow-none sm:p-5">
-      <div className="pointer-events-none absolute inset-0 flex items-center justify-center opacity-[0.028] print:opacity-[0.04]" aria-hidden>
+      <div
+        className="quotation-print-watermark pointer-events-none absolute inset-0 flex items-center justify-center opacity-[0.028] print:opacity-[0.04]"
+        aria-hidden
+      >
         <span className="select-none text-[11rem] font-bold leading-none text-slate-400 sm:text-[15rem] print:text-[13rem]">
           ZP
         </span>
       </div>
 
       <div className="relative overflow-hidden rounded-lg border border-slate-200/90 bg-white shadow-md print:overflow-visible print:rounded-none print:border-0 print:shadow-none">
-        <div className="px-5 py-5 sm:px-8 sm:py-6 print:px-6 print:py-5">
+        <div className="px-5 py-5 sm:px-8 sm:py-6 print:px-5 print:py-3">
           <header
-            className="flex flex-col gap-5 border-b-2 pb-5 print:gap-4 print:pb-4 lg:flex-row lg:items-start lg:justify-between"
+            className="flex flex-col gap-5 border-b-2 pb-5 print:gap-3 print:pb-3 lg:flex-row lg:items-start lg:justify-between"
             style={{ borderColor: ACCENT }}
           >
-            <div className="flex min-w-0 flex-1 items-start gap-4">
+            <div className="flex min-w-0 flex-1 items-start gap-4 print:gap-3">
               <div
-                className="flex h-[4.25rem] w-[4.25rem] shrink-0 items-center justify-center overflow-hidden rounded-md p-2 text-2xl font-bold text-white shadow-sm print:h-14 print:w-14 sm:h-[4.5rem] sm:w-[4.5rem]"
+                className="flex h-[4.25rem] w-[4.25rem] shrink-0 items-center justify-center overflow-hidden rounded-md p-2 text-2xl font-bold text-white shadow-sm print:h-12 print:w-12 sm:h-[4.5rem] sm:w-[4.5rem]"
                 style={{ backgroundColor: MAROON }}
               >
                 {b.logoSrc ? (
@@ -214,11 +230,13 @@ export default function QuotationPrintView({
                 )}
               </div>
               <div className="min-w-0 pt-0.5">
-                <h1 className="text-[15px] font-bold uppercase leading-snug tracking-tight text-slate-900 sm:text-lg print:text-[13pt]">
+                <h1 className="w-full max-w-full text-center text-[30px] font-bold uppercase leading-snug tracking-tight text-slate-900 print:text-[13pt] print:leading-tight">
                   {b.legalName}
                 </h1>
-                <p className="mt-1 text-[10px] leading-relaxed text-slate-600 sm:text-[11px] print:text-[8.5pt]">{b.poBox}</p>
-                <p className="mt-0.5 text-[10px] text-slate-600 sm:text-[11px] print:text-[8.5pt]">
+                <p className="mt-1 text-center text-[12px] leading-relaxed text-slate-600 sm:text-[13px] print:text-[8pt] print:leading-snug">
+                  {b.poBox}
+                </p>
+                <p className="mt-0.5 text-center text-[12px] text-slate-600 sm:text-[13px] print:text-[8pt] print:leading-snug">
                   <span className="font-semibold" style={{ color: ACCENT }}>
                     Email
                   </span>{' '}
@@ -226,65 +244,74 @@ export default function QuotationPrintView({
                 </p>
               </div>
             </div>
-            <div className="grid w-full shrink-0 grid-cols-1 gap-4 text-[9px] leading-relaxed text-slate-700 sm:grid-cols-3 sm:gap-5 sm:text-[8.5px] lg:max-w-[58%] lg:text-right xl:max-w-[55%] print:max-w-[60%] print:text-[7.5pt]">
-              {b.branches.map((br, idx) => (
-                <div
-                  key={br.title}
-                  className={`min-w-0 lg:text-right ${idx > 0 ? 'border-t border-slate-200 pt-3 sm:border-t-0 sm:border-l sm:border-slate-200 sm:pl-4 sm:pt-0 lg:pl-5' : ''}`}
-                >
-                  <p className="mb-1 font-bold uppercase tracking-wide" style={{ color: ACCENT }}>
-                    {br.title}
-                  </p>
-                  {br.lines.map((line, i) => (
-                    <p key={i} className="text-slate-600">
-                      {line}
+            <div className="grid w-full shrink-0 grid-cols-1 gap-4 text-[11px] leading-relaxed text-slate-700 sm:grid-cols-3 sm:gap-5 sm:text-[10.5px] lg:max-w-[58%] lg:text-right xl:max-w-[55%] print:max-w-[60%] print:gap-2 print:text-[7.5pt] print:leading-snug">
+              {b.branches.map((br, idx) => {
+                const rows = (br.lines || []).map((line) => String(line || '').trim()).filter(Boolean);
+                const telLine = rows.find((line) => /^tel\s*:/i.test(line)) || rows[rows.length - 1] || 'Tel: —';
+                const addressLine = rows.filter((line) => line !== telLine).join(' ').trim() || '—';
+                return (
+                  <div
+                    key={br.title}
+                    className={`min-w-0 lg:text-right ${idx > 0 ? 'border-t border-slate-200 pt-3 sm:border-t-0 sm:border-l sm:border-slate-200 sm:pl-4 sm:pt-0 lg:pl-5 print:border-t-0 print:border-l print:pl-2 print:pt-0' : ''}`}
+                  >
+                    <p className="mb-1 font-bold uppercase tracking-wide print:mb-0.5" style={{ color: ACCENT }}>
+                      {br.title}
                     </p>
-                  ))}
-                </div>
-              ))}
+                    <p className="text-slate-600 font-medium">{addressLine}</p>
+                    <p className="text-slate-600 font-medium">{telLine}</p>
+                  </div>
+                );
+              })}
             </div>
           </header>
 
           <div
-            className="mt-5 rounded-sm py-2.5 text-center print:mt-4 print:py-2"
-            style={{ backgroundColor: ACCENT }}
+            className="mt-5 grid grid-cols-1 rounded-sm py-2.5 text-center print:mt-3 print:py-1.5"
+            style={{ backgroundColor: ACCENT, flexDirection: 'column' }}
           >
-            <h2 className="text-[11px] font-bold uppercase tracking-[0.2em] text-white sm:text-xs print:text-[10.5pt]">
+            <h2 className="text-[16px] font-bold uppercase tracking-[0.2em] text-white sm:text-base print:text-[11pt] print:tracking-[0.12em]">
               {title}
             </h2>
           </div>
 
-          <div className="mt-5 grid grid-cols-1 gap-x-10 gap-y-4 border-b border-slate-200 pb-5 print:mt-4 print:gap-y-3 print:pb-4 lg:grid-cols-2">
-            <div className="space-y-2.5 print:space-y-2">
-              <MetaField label={primaryMetaLabel(documentKind)}>{primaryId}</MetaField>
+          <div className="mt-5 border-b border-slate-200 pb-5 print:mt-3 print:pb-3">
+            <div className="space-y-2.5 print:space-y-1.5">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <MetaField label={primaryMetaLabel(documentKind)}>{primaryId}</MetaField>
+                <MetaField label="Date">{dateStr ?? '—'}</MetaField>
+                <MetaField label="Terms">{terms}</MetaField>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <MetaField label="Gauge">{gauge}</MetaField>
+                <MetaField label="Design">{design}</MetaField>
+                <MetaField label="Colour">{color}</MetaField>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <MetaField label={customerLabel}>{customerName}</MetaField>
+                <MetaField label="Project">{projectName?.trim() ? projectName.trim() : '—'}</MetaField>
+              </div>
+
               {documentKind === 'receipt' && linkedQuotationId ? (
                 <MetaField label="Quotation">{linkedQuotationId}</MetaField>
               ) : null}
-              <MetaField label={customerLabel}>{customerName}</MetaField>
-              <MetaField label="Project">{projectName?.trim() ? projectName.trim() : '—'}</MetaField>
-              <MetaField label="Terms">{terms}</MetaField>
-              <MetaField label="Gauge">{gauge}</MetaField>
-              <MetaField label="Colour">{color}</MetaField>
-            </div>
-            <div className="space-y-2.5 border-t border-slate-100 pt-4 lg:border-t-0 lg:pt-0 print:space-y-2">
-              <MetaField label="Date">{dateStr ?? '—'}</MetaField>
-              <MetaField label="Phone / Ref.">{customerPhone}</MetaField>
-              <MetaField label="Design">{design}</MetaField>
+
               {documentKind === 'receipt' && amountPaidNgn != null && balanceDueNgn != null ? (
-                <>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <MetaField label="Amount paid" valueClass="font-semibold tabular-nums text-slate-900">
                     {formatNgn(amountPaidNgn)}
                   </MetaField>
                   <MetaField label="Balance due" valueClass="font-semibold tabular-nums text-slate-900">
                     {formatNgn(balanceDueNgn)}
                   </MetaField>
-                </>
+                </div>
               ) : null}
             </div>
           </div>
 
-          <div className="mt-5 overflow-x-auto print:mt-4 print:max-w-full print:overflow-visible">
-            <table className="quotation-print-table w-full table-fixed border-collapse border border-slate-200 text-left text-sm print:text-[9pt]">
+          <div className="mt-5 overflow-x-auto print:mt-3 print:max-w-full print:overflow-visible">
+            <table className="quotation-print-table w-full table-fixed border-collapse border border-slate-200 text-left text-sm print:text-[8pt]">
               <colgroup>
                 <col className="w-[40%] sm:w-[42%]" />
                 <col className="w-[16%]" />
@@ -326,26 +353,36 @@ export default function QuotationPrintView({
                 ))}
                 <PrintSubtotalRow label="Sub total" amount={subA} />
 
-                <PrintSectionLabel label="B. Accessories" />
-                {accessories.map((r, i) => (
-                  <PrintLineRow key={`${r.name}-${i}`} {...r} />
-                ))}
-                <PrintSubtotalRow label="Sub total" amount={subB} />
+                {showAccessories ? (
+                  <>
+                    <PrintSectionLabel label={accessoriesSectionTitle} />
+                    {accessories.map((r, i) => (
+                      <PrintLineRow key={`${r.name}-${i}`} {...r} />
+                    ))}
+                    <PrintSubtotalRow label="Sub total" amount={subB} />
+                  </>
+                ) : null}
 
-                <PrintSectionLabel label="C. Services" />
-                {services.map((r, i) => (
-                  <PrintLineRow key={`${r.name}-${i}`} {...r} />
-                ))}
-                <PrintSubtotalRow label="Sub total" amount={subC} />
+                {showServices ? (
+                  <>
+                    <PrintSectionLabel label={servicesSectionTitle} />
+                    {services.map((r, i) => (
+                      <PrintLineRow key={`${r.name}-${i}`} {...r} />
+                    ))}
+                    <PrintSubtotalRow label="Sub total" amount={subC} />
+                  </>
+                ) : null}
               </tbody>
               <tfoot>
                 <tr className="border-t-2 border-slate-200 bg-slate-50" style={{ borderTopColor: ACCENT }}>
-                  <td colSpan={3} className={`${CELL} py-3 text-right text-[11px] font-bold uppercase tracking-wide text-slate-800 sm:py-3.5 sm:text-xs print:py-2.5 print:text-[9.5pt]`}>
+                  <td
+                    colSpan={3}
+                    className={`${CELL} py-3 text-right text-[11px] font-bold uppercase tracking-wide text-slate-800 sm:py-3.5 sm:text-xs print:py-1.5 print:text-[8pt]`}
+                  >
                     Grand total
                   </td>
                   <td
-                    className={`${CELL} py-3 text-right text-[11px] font-bold tabular-nums text-slate-900 sm:py-3.5 sm:text-sm print:py-2.5 print:text-[10pt]`}
-                    style={{ boxShadow: `inset 0 0 0 2px ${ACCENT}` }}
+                    className={`${CELL} py-3 text-right text-[11px] font-bold tabular-nums text-slate-900 sm:py-3.5 sm:text-sm print:py-1.5 print:text-[9pt]`}
                   >
                     {formatNgn(grand)}
                   </td>
@@ -355,77 +392,71 @@ export default function QuotationPrintView({
           </div>
 
           <div
-            className="mt-6 rounded-sm px-3 py-2.5 text-center text-[9px] font-bold uppercase leading-snug tracking-wide text-white print:mt-5 print:px-2 print:py-2 print:text-[7.5pt]"
+            className="mt-6 rounded-sm px-3 py-2.5 text-center text-[9px] font-bold uppercase leading-snug tracking-wide text-white print:mt-3 print:px-2 print:py-1.5 print:text-[6.5pt] print:leading-tight"
             style={{ backgroundColor: ACCENT }}
           >
             {QUOTATION_PAYMENT_NOTICE}
           </div>
 
-          <div className="mt-5 space-y-4 print:mt-4 print:space-y-3">
-            <div
-              className="rounded-md border border-slate-200 px-3 py-3 print:px-2.5 print:py-2"
-              style={{ backgroundColor: ACCENT_SOFT, borderColor: ACCENT }}
-            >
-              <p className="text-[8px] font-bold uppercase tracking-wide text-slate-700 print:text-[7pt]">Pay into</p>
-              <div className="mt-2 grid gap-1.5 text-[9px] leading-relaxed text-slate-800 print:text-[7.5pt] sm:grid-cols-[auto_1fr] sm:gap-x-4">
-                <div className="flex flex-wrap items-baseline gap-x-1 sm:block">
-                  <span className="font-semibold text-slate-600">Bank</span>
-                  <span className="hidden sm:inline">: </span>
-                  <span>{bankName}</span>
-                </div>
-                <div className="flex flex-wrap items-baseline gap-x-1 sm:block">
-                  <span className="font-semibold text-slate-600">Account no.</span>
-                  <span className="hidden sm:inline">: </span>
-                  <span className="font-mono font-semibold tabular-nums">{accNo}</span>
-                </div>
-                <div className="sm:col-span-2">
-                  <span className="font-semibold text-slate-600">Account name</span>
-                  <span>: </span>
-                  <span>{accName}</span>
+          <div className="mt-5 space-y-4 print:mt-3 print:space-y-2">
+            {showPayInto ? (
+              <div
+                className="rounded-md border border-slate-200 px-3 py-3 print:px-2.5 print:py-2"
+                style={{ backgroundColor: ACCENT_SOFT, borderColor: ACCENT }}
+              >
+                <p className="text-[8px] font-bold uppercase tracking-wide text-slate-700 print:text-[7pt]">Pay into</p>
+                <div className="mt-2 grid gap-1.5 text-[9px] leading-relaxed text-slate-800 print:text-[7.5pt] sm:grid-cols-[auto_1fr] sm:gap-x-4">
+                  <div className="flex flex-wrap items-baseline gap-x-1 sm:block">
+                    <span className="font-semibold text-slate-600">Bank</span>
+                    <span className="hidden sm:inline">: </span>
+                    <span>{bankName}</span>
+                  </div>
+                  <div className="flex flex-wrap items-baseline gap-x-1 sm:block">
+                    <span className="font-semibold text-slate-600">Account no.</span>
+                    <span className="hidden sm:inline">: </span>
+                    <span className="font-mono font-semibold tabular-nums">{accNo}</span>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <span className="font-semibold text-slate-600">Account name</span>
+                    <span>: </span>
+                    <span>{accName}</span>
+                  </div>
                 </div>
               </div>
-            </div>
-
-            {showValidity ? (
-              <p className="text-center text-[9px] font-bold uppercase tracking-wide text-slate-700 print:text-[7.5pt]">
-                <span style={{ color: ACCENT }}>Quotation valid for {validityDays} days only</span>
-              </p>
-            ) : null}
-            <p className="text-justify text-[8px] leading-relaxed text-slate-600 print:text-[7pt]">{footerTerms}</p>
-            {salesperson && salesperson !== '—' ? (
-              <p className="text-[8px] text-slate-600 print:text-[7pt]">
-                <span className="font-semibold" style={{ color: ACCENT }}>
-                  Prepared by
-                </span>
-                : <span className="font-semibold uppercase text-slate-800">{salesperson}</span>
-              </p>
             ) : null}
 
+            <p className="quotation-print-terms rounded-sm bg-white px-1 text-justify text-[12px] font-semibold leading-relaxed text-slate-600 print:text-[7.5pt] print:leading-snug">
+              {showValidity
+                ? `Quotation valid for ${validityDays} days only. ${footerTerms}`
+                : footerTerms}
+            </p>
             <div
-              className="quotation-print-signatures grid grid-cols-1 gap-8 border-t-2 border-slate-200 pt-5 sm:grid-cols-2 sm:gap-10 print:gap-6 print:pt-4"
+              className="quotation-print-signatures grid grid-cols-1 gap-3 border-t-2 border-slate-200 pt-3 sm:grid-cols-2 sm:gap-4 print:gap-2 print:pt-2"
               style={{ borderTopColor: ACCENT }}
             >
               <div className="min-w-0">
-                {b.marketingSignatoryName ? (
-                  <p className="text-[9px] font-bold uppercase text-slate-900 print:text-[8pt]">{b.marketingSignatoryName}</p>
-                ) : null}
-                <p className="mt-1 text-[8px] font-semibold print:text-[7pt]" style={{ color: ACCENT }}>
+                <p className="mt-1 text-[10px] font-semibold print:mt-0 print:text-[8pt]" style={{ color: ACCENT }}>
                   Yours faithfully,
                 </p>
-                <p className="mt-0.5 text-[9px] font-bold text-slate-900 print:text-[7.5pt]">{signatureCompany}</p>
-                <div className="mt-8 border-b border-slate-400 pb-1 text-[8px] text-slate-600 print:mt-6 print:text-[7pt]">
+                <p className="mt-0.5 text-[11px] font-bold text-slate-900 print:text-[8.5pt]">{signatureCompany}</p>
+                <div className="mt-3 border-b border-slate-400 pb-1 text-[10px] text-slate-600 print:mt-1.5 print:pb-0.5 print:text-[8pt]">
                   Marketing Manager
                 </div>
+                {salesperson && salesperson !== '—' ? (
+                  <p className="mt-1 text-[10px] text-left text-slate-600 print:mt-1 print:text-[8pt]">
+                    <span className="font-semibold" style={{ color: ACCENT }}>
+                      Prepared by
+                    </span>
+                    : <span className="font-semibold uppercase text-slate-800">{salesperson}</span>
+                  </p>
+                ) : null}
               </div>
               <div className="min-w-0">
-                <p className="text-[8px] font-semibold uppercase print:text-[7pt]" style={{ color: ACCENT }}>
+                <p className="text-[10px] font-semibold uppercase print:text-[8pt]" style={{ color: ACCENT }}>
                   Customer
                 </p>
-                <div className="mt-10 border-b border-slate-400 pb-1 text-[8px] text-slate-600 print:mt-8 print:text-[7pt]">
+                <div className="mt-3 border-b border-slate-400 pb-1 text-[10px] text-slate-600 print:mt-1.5 print:pb-0.5 print:text-[8pt]">
                   Signature
-                </div>
-                <div className="mt-4 border-b border-slate-400 pb-1 text-[8px] text-slate-600 print:mt-3 print:text-[7pt]">
-                  Phone no.
                 </div>
               </div>
             </div>

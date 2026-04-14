@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo, useRef, useCallback, Fragment } from 'react';
+import React, { useEffect, useState, useMemo, useRef, useCallback } from 'react';
 import {
   ShieldCheck,
   History,
@@ -17,7 +17,6 @@ import {
   LayoutDashboard,
   AlertTriangle,
   Radio,
-  ClipboardList,
   Printer,
   Paperclip,
   HelpCircle,
@@ -40,9 +39,11 @@ import {
   MANAGER_METRIC_PERIODS,
   managementPeriodStartISO,
 } from '../lib/managementLiveFromWorkspace';
+import { formatRefundReasonCategory, matchesInboxSearch } from '../lib/managerDashboardCore';
 import { Card, Button } from '../components/ui';
 import { ModalFrame, PageShell } from '../components/layout';
 import { DashboardKpiStrip } from '../components/dashboard/DashboardKpiStrip';
+import { ManagementAuditSections } from '../components/management/ManagementAuditSections';
 
 const INBOX_TABS = [
   { key: 'clearance', label: 'Clearance', description: 'Paid quotes awaiting manager clearance' },
@@ -52,380 +53,6 @@ const INBOX_TABS = [
   { key: 'refunds', label: 'Refunds', description: 'Pending refund requests' },
   { key: 'payments', label: 'Payment requests', description: 'Expense / payment approvals' },
 ];
-
-function formatRefundReasonCategory(raw) {
-  if (raw == null || raw === '') return '—';
-  try {
-    const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    if (Array.isArray(arr)) return arr.filter(Boolean).join(', ') || '—';
-  } catch {
-    /* stored as plain text */
-  }
-  return String(raw).trim() || '—';
-}
-
-function flattenQuotationLineItems(quotation) {
-  const ql = quotation?.quotationLines;
-  if (!ql || typeof ql !== 'object') return [];
-  const out = [];
-  for (const cat of ['products', 'accessories', 'services']) {
-    const arr = ql[cat];
-    if (!Array.isArray(arr)) continue;
-    for (const item of arr) {
-      if (!item || typeof item !== 'object') continue;
-      const name = item.name || item.label || item.description || 'Line';
-      const qty = item.qty ?? item.quantity ?? item.qtyMeters ?? '';
-      const unit = item.unit || item.uom || '';
-      const unitPrice = item.unitPrice ?? item.unit_price_ngn ?? item.price ?? '';
-      const lineTotal = item.lineTotal ?? item.line_total_ngn ?? item.total ?? '';
-      out.push({ category: cat, name, qty, unit, unitPrice, lineTotal });
-    }
-  }
-  return out;
-}
-
-function ledgerTypeStyle(type) {
-  const t = String(type || '').toUpperCase();
-  if (t === 'RECEIPT' || t === 'ADVANCE_IN' || t === 'OVERPAY_ADVANCE') return 'bg-emerald-500/20 text-emerald-200';
-  if (t.includes('REVERSAL') || t.includes('REFUND') || t.includes('OUT')) return 'bg-rose-500/20 text-rose-200';
-  if (t.includes('APPLIED')) return 'bg-sky-500/20 text-sky-200';
-  return 'bg-white/10 text-white/70';
-}
-
-/** Shared rich audit body for quotation-linked management intel (orders, ledger, production, conversion, refunds). */
-function ManagementAuditSections({ auditData, loadingAudit, formatNgn }) {
-  if (loadingAudit) {
-    return (
-      <div className="flex items-center justify-center py-16">
-        <RefreshCw className="text-teal-400 animate-spin" size={28} />
-      </div>
-    );
-  }
-  if (!auditData || auditData.ok === false) {
-    return (
-      <p className="text-xs text-rose-300/90">
-        {auditData?.error || 'Could not load quotation audit.'}
-      </p>
-    );
-  }
-
-  const sum = auditData.summary;
-  const lines = flattenQuotationLineItems(auditData.quotation);
-  const ledger = Array.isArray(auditData.ledgerEntries) ? auditData.ledgerEntries : [];
-  const refunds = Array.isArray(auditData.refunds) ? auditData.refunds : [];
-  const totals = auditData.totals || {};
-  const checks = Array.isArray(auditData.conversionChecks) ? auditData.conversionChecks : [];
-  const coils = Array.isArray(auditData.jobCoils) ? auditData.jobCoils : [];
-
-  const checksByJob = new Map();
-  for (const c of checks) {
-    const jid = String(c.job_id || '');
-    if (!jid) continue;
-    if (!checksByJob.has(jid)) checksByJob.set(jid, []);
-    checksByJob.get(jid).push(c);
-  }
-  const coilsByJob = new Map();
-  for (const c of coils) {
-    const jid = String(c.job_id || '');
-    if (!jid) continue;
-    if (!coilsByJob.has(jid)) coilsByJob.set(jid, []);
-    coilsByJob.get(jid).push(c);
-  }
-
-  const cuttingLists = Array.isArray(auditData.cuttingLists) ? auditData.cuttingLists : [];
-  const productionLogs = Array.isArray(auditData.productionLogs) ? auditData.productionLogs : [];
-
-  return (
-    <Fragment>
-      {sum ? (
-        <section>
-          <p className="text-[10px] font-black text-white/40 uppercase tracking-widest mb-2">Order &amp; balance</p>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-            <div className="rounded-xl bg-white/[0.07] border border-white/10 p-3">
-              <p className="text-[9px] font-bold uppercase text-white/35">Order total</p>
-              <p className="text-sm font-black text-white tabular-nums mt-1">{formatNgn(sum.orderTotalNgn)}</p>
-            </div>
-            <div className="rounded-xl bg-white/[0.07] border border-white/10 p-3">
-              <p className="text-[9px] font-bold uppercase text-white/35">Paid in</p>
-              <p className="text-sm font-black text-emerald-300 tabular-nums mt-1">{formatNgn(sum.paidNgn)}</p>
-              {sum.percentPaid != null ? (
-                <p className="text-[9px] text-white/40 mt-1 tabular-nums">{sum.percentPaid}% of order</p>
-              ) : null}
-            </div>
-            <div className="rounded-xl bg-white/[0.07] border border-amber-500/20 p-3">
-              <p className="text-[9px] font-bold uppercase text-white/35">Outstanding</p>
-              <p className="text-sm font-black text-amber-200 tabular-nums mt-1">{formatNgn(sum.outstandingNgn)}</p>
-            </div>
-          </div>
-          {(sum.managerClearedAtIso || sum.managerFlaggedAtIso || sum.managerProductionApprovedAtIso) && (
-            <div className="mt-2 flex flex-wrap gap-2 text-[9px] text-white/40">
-              {sum.managerClearedAtIso ? <span>Cleared {sum.managerClearedAtIso.slice(0, 10)}</span> : null}
-              {sum.managerProductionApprovedAtIso ? (
-                <span>Prod override {sum.managerProductionApprovedAtIso.slice(0, 10)}</span>
-              ) : null}
-              {sum.managerFlaggedAtIso ? (
-                <span className="text-rose-300/90">Flagged {sum.managerFlaggedAtIso.slice(0, 10)}</span>
-              ) : null}
-            </div>
-          )}
-        </section>
-      ) : null}
-
-      {auditData.quotation?.projectName ? (
-        <p className="text-[11px] text-white/50">
-          <span className="font-bold text-white/70">Project:</span> {auditData.quotation.projectName}
-        </p>
-      ) : null}
-
-      <section>
-        <p className="text-[10px] font-black text-white/40 uppercase tracking-widest mb-2">Order lines</p>
-        {lines.length === 0 ? (
-          <p className="text-xs text-white/35 py-2">No structured line items on file (check Sales for full quote).</p>
-        ) : (
-          <div className="rounded-xl border border-white/10 overflow-hidden divide-y divide-white/10">
-            {lines.map((ln, idx) => (
-              <div key={`${ln.category}-${idx}`} className="flex flex-wrap items-baseline justify-between gap-2 px-3 py-2 text-[11px]">
-                <div className="min-w-0">
-                  <span className="text-[8px] font-black uppercase text-white/30 mr-2">{ln.category}</span>
-                  <span className="font-semibold text-white">{ln.name}</span>
-                  <span className="text-white/45 ml-1">
-                    {ln.qty !== '' && ln.qty != null ? `${ln.qty}${ln.unit ? ` ${ln.unit}` : ''}` : ''}
-                  </span>
-                </div>
-                <div className="text-right tabular-nums text-white/80 shrink-0">
-                  {ln.lineTotal !== '' && ln.lineTotal != null
-                    ? formatNgn(ln.lineTotal)
-                    : ln.unitPrice
-                      ? `@ ${formatNgn(ln.unitPrice)}`
-                      : '—'}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      <section>
-        <p className="text-[10px] font-black text-white/40 uppercase tracking-widest mb-2">
-          Ledger &amp; payments ({ledger.length})
-        </p>
-        <div className="space-y-2 max-h-[min(40vh,280px)] overflow-y-auto custom-scrollbar pr-1">
-          {ledger.length === 0 ? (
-            <p className="text-xs text-white/35 py-2">No ledger rows for this quotation.</p>
-          ) : (
-            ledger.map((e, idx) => (
-              <div key={e.id || idx} className="flex gap-3 p-3 rounded-xl bg-white/[0.06] border border-white/10">
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className={`text-[8px] font-black uppercase px-2 py-0.5 rounded-md ${ledgerTypeStyle(e.type)}`}>
-                      {e.type || '—'}
-                    </span>
-                    <p className="text-sm font-black text-white tabular-nums">{formatNgn(e.amount_ngn)}</p>
-                  </div>
-                  <p className="text-[10px] text-white/45 mt-1">{e.payment_method || e.purpose || '—'}</p>
-                  {e.bank_reference ? (
-                    <p className="text-[9px] text-white/30 mt-0.5 font-mono">Ref: {e.bank_reference}</p>
-                  ) : null}
-                  {e.note ? <p className="text-[9px] text-white/35 mt-1 leading-snug">{e.note}</p> : null}
-                  <p className="text-[9px] text-white/25 mt-1">
-                    {e.at_iso?.slice(0, 16)?.replace('T', ' ')} · {e.created_by_name || '—'}
-                  </p>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      </section>
-
-      {refunds.length ? (
-        <section>
-          <p className="text-[10px] font-black text-white/40 uppercase tracking-widest mb-2">Refunds on this quote</p>
-          <div className="space-y-2">
-            {refunds.map((r) => (
-              <div key={r.refund_id} className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-[11px]">
-                <div className="flex justify-between gap-2">
-                  <span className="font-mono font-bold text-amber-100">{r.refund_id}</span>
-                  <span className="font-black text-amber-200 tabular-nums">{formatNgn(r.amount_ngn)}</span>
-                </div>
-                <p className="text-white/60 mt-1">
-                  {r.status} · {r.product || '—'}
-                </p>
-                <p className="text-[10px] text-white/40 mt-1">{r.requested_at_iso?.slice(0, 16)?.replace('T', ' ')}</p>
-                {r.reason ? <p className="text-[10px] text-white/45 mt-2 leading-snug">{r.reason}</p> : null}
-              </div>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
-      <section>
-        <p className="text-[10px] font-black text-teal-300/90 uppercase tracking-widest mb-2">Metres &amp; production totals</p>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-          <div className="rounded-xl bg-teal-500/10 border border-teal-500/20 p-3">
-            <p className="text-[9px] font-bold uppercase text-teal-200/80">Cutting lists (planned)</p>
-            <p className="text-lg font-black text-white tabular-nums mt-1">
-              {Number(totals.cuttingListMetersSum || 0).toLocaleString()} m
-            </p>
-          </div>
-          <div className="rounded-xl bg-teal-500/10 border border-teal-500/20 p-3">
-            <p className="text-[9px] font-bold uppercase text-teal-200/80">Produced (completed jobs)</p>
-            <p className="text-lg font-black text-white tabular-nums mt-1">
-              {Number(totals.completedProductionMetersSum || 0).toLocaleString()} m
-            </p>
-          </div>
-          <div className="rounded-xl bg-white/[0.06] border border-white/10 p-3">
-            <p className="text-[9px] font-bold uppercase text-white/35">All job actuals</p>
-            <p className="text-lg font-black text-white/90 tabular-nums mt-1">
-              {Number(totals.productionJobsMetersSum || 0).toLocaleString()} m
-            </p>
-          </div>
-        </div>
-      </section>
-
-      <section>
-        <p className="text-[10px] font-black text-white/40 uppercase tracking-widest mb-2">Cutting lists</p>
-        <div className="space-y-2">
-          {!cuttingLists.length ? (
-            <p className="text-xs text-white/35 py-2">None linked.</p>
-          ) : (
-            cuttingLists.map((cl, idx) => (
-              <div key={cl.id || idx} className="p-3 rounded-xl bg-white/[0.06] border border-white/10">
-                <div className="flex justify-between items-start gap-2 mb-1">
-                  <span
-                    className={`text-[8px] font-black uppercase px-2 py-0.5 rounded-md ${
-                      cl.status === 'Draft' ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-300'
-                    }`}
-                  >
-                    {cl.status}
-                  </span>
-                  <span className="text-[9px] text-white/35">{cl.date_iso}</span>
-                </div>
-                <p className="text-xs font-bold text-white">{cl.id}</p>
-                <p className="text-[10px] text-white/40 mt-1 tabular-nums">{Number(cl.total_meters || 0).toLocaleString()} m</p>
-              </div>
-            ))
-          )}
-        </div>
-      </section>
-
-      <section>
-        <p className="text-[10px] font-black text-white/40 uppercase tracking-widest mb-2">Production &amp; conversion</p>
-        <div className="space-y-3">
-          {!productionLogs.length ? (
-            <p className="text-xs text-white/35 py-2">No production jobs for this quotation.</p>
-          ) : (
-            productionLogs.map((job, idx) => {
-              const jid = String(job.job_id || idx);
-              const jobChecks = checksByJob.get(job.job_id) || [];
-              const jobCoilRows = coilsByJob.get(job.job_id) || [];
-              return (
-                <div key={job.job_id || idx} className="rounded-xl border border-white/10 bg-white/[0.05] overflow-hidden">
-                  <div className="p-3 border-b border-white/10">
-                    <div className="flex flex-wrap justify-between gap-2">
-                      <p className="text-xs font-black text-white font-mono">{job.job_id}</p>
-                      <span className="text-[8px] font-black uppercase px-2 py-0.5 rounded-md bg-white/10 text-white/70">
-                        {job.status}
-                      </span>
-                    </div>
-                    <p className="text-[11px] font-bold text-white/90 mt-1">{job.product_name || '—'}</p>
-                    <p className="text-[10px] text-white/40 mt-1">
-                      List {job.cutting_list_id || '—'} · {job.machine_name || '—'}
-                    </p>
-                    <div className="flex flex-wrap gap-3 mt-2 text-[10px] tabular-nums text-white/70">
-                      <span>Planned {Number(job.planned_meters || 0).toLocaleString()} m</span>
-                      <span>Actual {Number(job.actual_meters || 0).toLocaleString()} m</span>
-                      <span>{Number(job.actual_weight_kg || 0).toLocaleString()} kg</span>
-                    </div>
-                    <p className="text-[9px] text-violet-300/90 mt-2">
-                      Conversion alert: {job.conversion_alert_state || '—'}
-                      {job.manager_review_required ? ' · manager review' : ''}
-                    </p>
-                    {job.completed_at_iso ? (
-                      <p className="text-[9px] text-white/30 mt-1">Done {job.completed_at_iso.slice(0, 16).replace('T', ' ')}</p>
-                    ) : null}
-                    {job.manager_review_signed_at_iso ? (
-                      <p className="text-[9px] text-emerald-300/80 mt-1">
-                        Signed off {job.manager_review_signed_at_iso.slice(0, 10)}
-                      </p>
-                    ) : null}
-                  </div>
-                  {jobCoilRows.length ? (
-                    <div className="px-3 py-2 border-b border-white/5 bg-black/20">
-                      <p className="text-[9px] font-black uppercase text-white/35 mb-1">Coils / meters</p>
-                      <ul className="space-y-1 text-[10px] text-white/60">
-                        {jobCoilRows.map((co) => (
-                          <li key={`${jid}-${co.coil_no}`} className="flex justify-between gap-2">
-                            <span className="font-mono truncate">{co.coil_no}</span>
-                            <span className="tabular-nums shrink-0">{Number(co.meters_produced || 0).toLocaleString()} m</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : null}
-                  {jobChecks.length ? (
-                    <div className="px-3 py-2 bg-black/25">
-                      <p className="text-[9px] font-black uppercase text-white/35 mb-1">Conversion checks</p>
-                      <ul className="space-y-1.5 text-[10px]">
-                        {jobChecks.map((ch, i) => (
-                          <li key={`${ch.job_id}-${ch.coil_no}-${i}`} className="text-white/55">
-                            <span className="font-mono text-white/70">{ch.coil_no}</span> · {ch.alert_state} · actual{' '}
-                            {ch.actual_conversion_kg_per_m != null ? Number(ch.actual_conversion_kg_per_m).toFixed(3) : '—'} kg/m
-                            {ch.standard_conversion_kg_per_m != null
-                              ? ` · std ${Number(ch.standard_conversion_kg_per_m).toFixed(3)}`
-                              : ''}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })
-          )}
-        </div>
-      </section>
-    </Fragment>
-  );
-}
-
-function matchesInboxSearch(query, row, tabKey) {
-  const s = query.trim().toLowerCase();
-  if (!s) return true;
-  const parts = [];
-  if (tabKey === 'clearance' || tabKey === 'flagged') {
-    parts.push(row.id, row.customer_name, row.status);
-  } else if (tabKey === 'production') {
-    parts.push(row.id, row.quotation_ref, row.customer_name);
-  } else if (tabKey === 'refunds') {
-    parts.push(row.refund_id, row.customer_name, row.quotation_ref, formatRefundReasonCategory(row.reason_category));
-  } else if (tabKey === 'payments') {
-    parts.push(
-      row.request_id,
-      row.description,
-      row.expense_id,
-      row.request_reference,
-      row.attachment_name,
-      row.expense_category
-    );
-  } else if (tabKey === 'conversions') {
-    parts.push(
-      row.job_id,
-      row.quotation_ref,
-      row.cutting_list_id,
-      row.customer_name,
-      row.product_name,
-      row.conversion_alert_state
-    );
-  } else if (tabKey === 'edit_approvals') {
-    parts.push(row.id, row.entityKind, row.entityId, row.requestedByDisplay, row.requestedByUserId, row.status);
-  }
-  return parts.some((p) => String(p ?? '').toLowerCase().includes(s));
-}
-
-function ymdLocal(d = new Date()) {
-  const z = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`;
-}
 
 const ManagerDashboard = () => {
   const navigate = useNavigate();
@@ -456,22 +83,8 @@ const ManagerDashboard = () => {
   const [conversionSignoffRemark, setConversionSignoffRemark] = useState('');
   const [conversionSignoffEditApprovalId, setConversionSignoffEditApprovalId] = useState('');
   const [showStockRequest, setShowStockRequest] = useState(false);
-  const [showAttendanceModal, setShowAttendanceModal] = useState(false);
-  const [attDayIso, setAttDayIso] = useState(() => ymdLocal());
-  const [attBranchId, setAttBranchId] = useState('');
-  const [attStaffList, setAttStaffList] = useState([]);
-  const [attStatusByUser, setAttStatusByUser] = useState({});
-  const [attNotes, setAttNotes] = useState('');
-  const [attLoadError, setAttLoadError] = useState(null);
-  const [attLoading, setAttLoading] = useState(false);
-  const [attSaving, setAttSaving] = useState(false);
   /** @type {['month' | '4months' | 'half' | 'year', Function]} */
   const [metricPeriod, setMetricPeriod] = useState('month');
-  const [mdPayrollRuns, setMdPayrollRuns] = useState([]);
-  const [mdPayrollLoading, setMdPayrollLoading] = useState(false);
-  const [mdPayrollBusyId, setMdPayrollBusyId] = useState(null);
-
-  const showMdPayrollCard = Boolean(ws?.hasPermission?.('hr.payroll.md_approve'));
 
   const inboxTabs = useMemo(() => {
     const t = [...INBOX_TABS];
@@ -484,6 +97,105 @@ const ManagerDashboard = () => {
     }
     return t;
   }, [ws?.session?.user?.roleKey, ws?.permissions]);
+
+  const unifiedWorkItems = useMemo(
+    () => (Array.isArray(ws?.snapshot?.unifiedWorkItems) ? ws.snapshot.unifiedWorkItems : []),
+    [ws?.snapshot?.unifiedWorkItems]
+  );
+  const branchNameById = useMemo(() => {
+    const branches = ws?.snapshot?.workspaceBranches ?? ws?.session?.branches ?? [];
+    return Object.fromEntries(
+      branches.map((b) => [String(b.id || '').trim(), String(b.name || b.code || b.id || '').trim()])
+    );
+  }, [ws?.snapshot?.workspaceBranches, ws?.session?.branches]);
+  const unifiedBySource = useMemo(() => {
+    const out = new Map();
+    for (const item of unifiedWorkItems) {
+      const key = `${String(item.sourceKind || '').trim()}:${String(item.sourceId || '').trim()}`;
+      if (!key || key === ':') continue;
+      out.set(key, item);
+    }
+    return out;
+  }, [unifiedWorkItems]);
+  const resolveManagerWorkItem = useCallback(
+    (kind, row, extra = {}) => {
+      if (!row) return null;
+      if (kind === 'clearance') return unifiedBySource.get(`quotation_clearance:${String(row.id || '').trim()}`) || null;
+      if (kind === 'production') {
+        const qref = String(row.quotation_ref || extra.quoteId || '').trim();
+        return unifiedBySource.get(`production_gate:${qref}`) || null;
+      }
+      if (kind === 'flagged') return unifiedBySource.get(`flagged_transaction:${String(row.id || '').trim()}`) || null;
+      if (kind === 'refunds') return unifiedBySource.get(`refund_request:${String(row.refund_id || '').trim()}`) || null;
+      if (kind === 'payments') return unifiedBySource.get(`payment_request:${String(row.request_id || '').trim()}`) || null;
+      if (kind === 'conversions') return unifiedBySource.get(`conversion_review:${String(row.job_id || '').trim()}`) || null;
+      if (kind === 'edit_approvals') return unifiedBySource.get(`edit_approval:${String(row.id || '').trim()}`) || null;
+      return null;
+    },
+    [unifiedBySource]
+  );
+  const openUnifiedWorkItem = useCallback(
+    (item) => {
+      if (!item?.routePath) return;
+      navigate(item.routePath, item.routeState ? { state: item.routeState } : undefined);
+    },
+    [navigate]
+  );
+  const selectedUnifiedWorkItem = useMemo(() => {
+    if (!selectedIntel) return null;
+    if (selectedIntel.kind === 'quotation') {
+      if (selectedIntel.fromProductionGate) {
+        return (
+          unifiedBySource.get(`production_gate:${String(selectedIntel.quoteId || '').trim()}`) ||
+          unifiedBySource.get(`quotation_clearance:${String(selectedIntel.quoteId || '').trim()}`) ||
+          null
+        );
+      }
+      return (
+        unifiedBySource.get(`flagged_transaction:${String(selectedIntel.quoteId || '').trim()}`) ||
+        unifiedBySource.get(`quotation_clearance:${String(selectedIntel.quoteId || '').trim()}`) ||
+        null
+      );
+    }
+    if (selectedIntel.kind === 'refund') {
+      return unifiedBySource.get(`refund_request:${String(selectedIntel.refundId || '').trim()}`) || null;
+    }
+    if (selectedIntel.kind === 'payment') {
+      return unifiedBySource.get(`payment_request:${String(selectedIntel.requestId || '').trim()}`) || null;
+    }
+    if (selectedIntel.kind === 'conversion') {
+      return unifiedBySource.get(`conversion_review:${String(selectedIntel.jobId || '').trim()}`) || null;
+    }
+    return null;
+  }, [selectedIntel, unifiedBySource]);
+  const renderOfficialRecordBanner = (item) => {
+    if (!item) return null;
+    return (
+      <div className="rounded-2xl border border-white/15 bg-white/[0.07] p-3">
+        <p className="text-[10px] font-black uppercase tracking-widest text-teal-300/90">Official record</p>
+        <div className="flex items-start justify-between gap-3 mt-2">
+          <div className="min-w-0">
+            <p className="text-xs font-mono font-bold text-white">{item.referenceNo || item.id}</p>
+            <p className="text-[10px] text-white/50 mt-1 capitalize">
+              {item.documentClass} · {item.documentType?.replace?.(/_/g, ' ')}
+            </p>
+            {item.keyDecisionSummary ? (
+              <p className="text-[10px] text-teal-100/85 mt-2 line-clamp-2">{item.keyDecisionSummary}</p>
+            ) : null}
+          </div>
+          {item.routePath ? (
+            <button
+              type="button"
+              onClick={() => openUnifiedWorkItem(item)}
+              className="shrink-0 rounded-lg border border-white/10 bg-white/10 px-3 py-2 text-[9px] font-black uppercase tracking-wide text-white hover:bg-white/15"
+            >
+              Open record
+            </button>
+          ) : null}
+        </div>
+      </div>
+    );
+  };
 
   const paymentIntelLineItems = useMemo(() => {
     const raw = selectedIntel?.row?.line_items;
@@ -650,122 +362,9 @@ const ManagerDashboard = () => {
     await (ws.refresh?.() ?? Promise.resolve());
   };
 
-  const openAttendanceModal = useCallback(() => {
-    const branches = ws?.session?.branches ?? [];
-    if (branches.length === 0) {
-      showToast('Choose a branch in the workspace bar first.', { variant: 'error' });
-      return;
-    }
-    const bid = String(ws?.session?.currentBranchId || branches[0]?.id || '').trim();
-    setAttBranchId(bid);
-    setAttDayIso(ymdLocal());
-    setAttNotes('');
-    setAttLoadError(null);
-    setShowAttendanceModal(true);
-  }, [ws?.session?.branches, ws?.session?.currentBranchId, showToast]);
-
-  useEffect(() => {
-    if (!showAttendanceModal || !attBranchId) return;
-    let cancelled = false;
-    (async () => {
-      setAttLoading(true);
-      setAttLoadError(null);
-      const staffRes = await apiFetch('/api/hr/staff');
-      if (cancelled) return;
-      if (!staffRes.ok || !staffRes.data?.ok) {
-        setAttStaffList([]);
-        setAttStatusByUser({});
-        setAttLoadError(staffRes.data?.error || 'Could not load staff for your role.');
-        setAttLoading(false);
-        return;
-      }
-      const all = Array.isArray(staffRes.data.staff) ? staffRes.data.staff : [];
-      const inBranch = all.filter((s) => String(s.branchId || '') === String(attBranchId));
-      setAttStaffList(inBranch);
-      const rollRes = await apiFetch(
-        `/api/hr/daily-roll?branchId=${encodeURIComponent(attBranchId)}&dayIso=${encodeURIComponent(attDayIso)}`
-      );
-      if (cancelled) return;
-      const fromRoll =
-        rollRes.ok && rollRes.data?.ok && rollRes.data.roll?.rows?.length
-          ? Object.fromEntries(
-              rollRes.data.roll.rows.map((r) => [
-                String(r.userId),
-                String(r.status || '').toLowerCase() === 'late' ? 'late' : 'present',
-              ])
-            )
-          : {};
-      const next = {};
-      for (const s of inBranch) {
-        const id = String(s.userId);
-        next[id] = fromRoll[id] || 'present';
-      }
-      setAttStatusByUser(next);
-      setAttLoading(false);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [showAttendanceModal, attBranchId, attDayIso]);
-
-  const saveAttendanceRoll = async (e) => {
-    e?.preventDefault?.();
-    if (!attBranchId || attStaffList.length === 0) return;
-    setAttSaving(true);
-    const rows = attStaffList.map((s) => ({
-      userId: String(s.userId),
-      status: attStatusByUser[String(s.userId)] === 'late' ? 'late' : 'present',
-    }));
-    const { ok, data } = await apiFetch('/api/hr/daily-roll', {
-      method: 'POST',
-      body: JSON.stringify({
-        branchId: attBranchId,
-        dayIso: attDayIso,
-        rows,
-        notes: attNotes.trim() || undefined,
-      }),
-    });
-    setAttSaving(false);
-    if (!ok || !data?.ok) {
-      showToast(data?.error || 'Could not save attendance.', { variant: 'error' });
-      return;
-    }
-    showToast('Attendance saved for this day.');
-    setShowAttendanceModal(false);
-  };
-
   useEffect(() => {
     fetchData();
   }, [ws?.refreshEpoch]);
-
-  const loadMdPayrollRuns = useCallback(async () => {
-    if (!showMdPayrollCard) return;
-    setMdPayrollLoading(true);
-    const { ok, data } = await apiFetch('/api/hr/payroll-runs');
-    setMdPayrollLoading(false);
-    if (ok && data?.ok) setMdPayrollRuns(Array.isArray(data.runs) ? data.runs : []);
-    else setMdPayrollRuns([]);
-  }, [showMdPayrollCard]);
-
-  useEffect(() => {
-    if (!showMdPayrollCard) return;
-    void loadMdPayrollRuns();
-  }, [showMdPayrollCard, loadMdPayrollRuns, ws?.refreshEpoch]);
-
-  const approveMdPayrollRun = async (runId) => {
-    setMdPayrollBusyId(runId);
-    const { ok, data } = await apiFetch(
-      `/api/hr/payroll-runs/${encodeURIComponent(runId)}/md-approve`,
-      { method: 'POST' }
-    );
-    setMdPayrollBusyId(null);
-    if (!ok || !data?.ok) {
-      showToast(data?.error || 'Could not approve payroll run.', { variant: 'error' });
-      return;
-    }
-    showToast('Payroll run signed off — HR can lock when ready.');
-    await loadMdPayrollRuns();
-  };
 
   const fetchAudit = useCallback(async (quoteId) => {
     if (!quoteId) return;
@@ -1081,6 +680,7 @@ const ManagerDashboard = () => {
   const renderInboxRow = (row) => {
     if (activeTab === 'edit_approvals') {
       const e = row;
+      const workItem = resolveManagerWorkItem('edit_approvals', e);
       return (
         <div
           key={e.id}
@@ -1094,6 +694,9 @@ const ManagerDashboard = () => {
             <p className="text-[9px] text-slate-500 mt-1">
               Requested by {e.requestedByDisplay || e.requestedByUserId || '—'}
             </p>
+            {workItem?.referenceNo ? (
+              <p className="text-[9px] text-slate-400 mt-1 font-mono">Record {workItem.referenceNo}</p>
+            ) : null}
           </div>
           <button
             type="button"
@@ -1118,6 +721,7 @@ const ManagerDashboard = () => {
       );
     }
     if (activeTab === 'clearance') {
+      const workItem = resolveManagerWorkItem('clearance', row);
       return (
         <button
           key={row.id}
@@ -1134,6 +738,12 @@ const ManagerDashboard = () => {
             </span>
           </div>
           <p className="text-[11px] font-semibold text-slate-700 truncate mb-2">{row.customer_name}</p>
+          {workItem?.referenceNo ? (
+            <p className="text-[9px] text-slate-400 mb-2 font-mono">Record {workItem.referenceNo}</p>
+          ) : null}
+          {row.branch_id ? (
+            <p className="text-[9px] text-slate-400 mb-2">{branchNameById[row.branch_id] || row.branch_id}</p>
+          ) : null}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-bold text-teal-800 bg-teal-100/90 px-2 py-0.5 rounded-md tabular-nums">
@@ -1151,6 +761,7 @@ const ManagerDashboard = () => {
     }
     if (activeTab === 'production') {
       const qref = row.quotation_ref;
+      const workItem = resolveManagerWorkItem('production', row, { quoteId: qref });
       return (
         <button
           key={row.id}
@@ -1172,6 +783,12 @@ const ManagerDashboard = () => {
           </div>
           <p className="text-xs font-bold text-[#134e4a] mb-1">{qref}</p>
           <p className="text-[11px] font-semibold text-slate-700 truncate mb-2">{row.customer_name}</p>
+          {workItem?.referenceNo ? (
+            <p className="text-[9px] text-slate-400 mb-2 font-mono">Record {workItem.referenceNo}</p>
+          ) : null}
+          {row.branch_id ? (
+            <p className="text-[9px] text-slate-400 mb-2">{branchNameById[row.branch_id] || row.branch_id}</p>
+          ) : null}
           <div className="flex items-center justify-between text-[10px]">
             <span className="text-slate-500">
               Paid {formatNgn(row.paid_ngn)} / {formatNgn(row.total_ngn)}
@@ -1182,6 +799,7 @@ const ManagerDashboard = () => {
       );
     }
     if (activeTab === 'flagged') {
+      const workItem = resolveManagerWorkItem('flagged', row);
       return (
         <button
           key={row.id}
@@ -1196,6 +814,12 @@ const ManagerDashboard = () => {
             <AlertTriangle size={14} className="text-rose-500 shrink-0" />
           </div>
           <p className="text-[11px] font-semibold text-slate-700 truncate mb-2">{row.customer_name}</p>
+          {workItem?.referenceNo ? (
+            <p className="text-[9px] text-slate-400 mb-2 font-mono">Record {workItem.referenceNo}</p>
+          ) : null}
+          {row.branch_id ? (
+            <p className="text-[9px] text-slate-400 mb-2">{branchNameById[row.branch_id] || row.branch_id}</p>
+          ) : null}
           <p className="text-[10px] text-rose-800/90 line-clamp-2 leading-snug">{row.manager_flag_reason || 'No reason on file.'}</p>
           <p className="text-[9px] text-slate-400 mt-2">
             {row.manager_flagged_at_iso ? new Date(row.manager_flagged_at_iso).toLocaleString() : '—'}
@@ -1204,6 +828,7 @@ const ManagerDashboard = () => {
       );
     }
     if (activeTab === 'refunds') {
+      const workItem = resolveManagerWorkItem('refunds', row);
       return (
         <button
           key={row.refund_id}
@@ -1218,6 +843,12 @@ const ManagerDashboard = () => {
             <span className="text-[10px] font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-md">{formatNgn(row.amount_ngn)}</span>
           </div>
           <p className="text-[11px] font-semibold text-slate-700 truncate">{row.customer_name}</p>
+          {workItem?.referenceNo ? (
+            <p className="text-[9px] text-slate-400 mt-1 font-mono">Record {workItem.referenceNo}</p>
+          ) : null}
+          {row.branch_id ? (
+            <p className="text-[9px] text-slate-400 mt-1">{branchNameById[row.branch_id] || row.branch_id}</p>
+          ) : null}
           <p className="text-[10px] text-slate-500 mt-1">
             {row.quotation_ref} · {formatRefundReasonCategory(row.reason_category)}
           </p>
@@ -1232,6 +863,7 @@ const ManagerDashboard = () => {
       );
     }
     if (activeTab === 'payments') {
+      const workItem = resolveManagerWorkItem('payments', row);
       return (
         <button
           key={row.request_id}
@@ -1252,6 +884,12 @@ const ManagerDashboard = () => {
             </span>
           </div>
           <p className="text-[11px] font-semibold text-slate-600 line-clamp-2">{row.description}</p>
+          {workItem?.referenceNo ? (
+            <p className="text-[9px] text-slate-400 mt-1 font-mono">Record {workItem.referenceNo}</p>
+          ) : null}
+          {row.branch_id ? (
+            <p className="text-[9px] text-slate-400 mt-1">{branchNameById[row.branch_id] || row.branch_id}</p>
+          ) : null}
           <p className="text-[9px] text-slate-400 mt-2 uppercase tracking-wide">{row.request_date}</p>
           <p className="text-[9px] text-slate-400 mt-1">Status: {row.approval_status ?? row.status ?? 'Pending'}</p>
           <div className="flex items-center justify-end mt-1">
@@ -1262,6 +900,7 @@ const ManagerDashboard = () => {
     }
     if (activeTab === 'conversions') {
       const alert = String(row.conversion_alert_state || '');
+      const workItem = resolveManagerWorkItem('conversions', row);
       return (
         <button
           key={row.job_id}
@@ -1291,6 +930,12 @@ const ManagerDashboard = () => {
           </div>
           <p className="text-xs font-bold text-[#134e4a] mb-0.5">{row.quotation_ref || '—'}</p>
           <p className="text-[11px] font-semibold text-slate-700 truncate">{row.customer_name}</p>
+          {workItem?.referenceNo ? (
+            <p className="text-[9px] text-slate-400 mt-1 font-mono">Record {workItem.referenceNo}</p>
+          ) : null}
+          {row.branch_id ? (
+            <p className="text-[9px] text-slate-400 mt-1">{branchNameById[row.branch_id] || row.branch_id}</p>
+          ) : null}
           <p className="text-[10px] text-slate-500 mt-1 line-clamp-1">{row.product_name}</p>
           <p className="text-[9px] text-slate-400 mt-2 tabular-nums">
             {row.actual_meters != null ? `${Number(row.actual_meters).toLocaleString()} m` : '—'}
@@ -1301,14 +946,6 @@ const ManagerDashboard = () => {
     }
     return null;
   };
-
-  const mdPayrollPending = useMemo(
-    () =>
-      mdPayrollRuns.filter(
-        (r) => String(r.status || '').toLowerCase() === 'draft' && !r.mdApprovedAtIso
-      ),
-    [mdPayrollRuns]
-  );
 
   const tabMeta = inboxTabs.find((t) => t.key === activeTab);
 
@@ -1331,14 +968,6 @@ const ManagerDashboard = () => {
         >
           <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
         </button>
-        <Button
-          type="button"
-          variant="outline"
-          onClick={() => openAttendanceModal()}
-          className="rounded-xl gap-2 font-bold uppercase text-[10px] h-10 border-teal-200 text-[#134e4a] hover:bg-teal-50"
-        >
-          <ClipboardList size={16} /> Mark attendance
-        </Button>
         <Button
           type="button"
           onClick={() => setShowStockRequest(true)}
@@ -1440,7 +1069,7 @@ const ManagerDashboard = () => {
               </p>
             </div>
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 w-full lg:max-w-xl">
+          <div className="grid w-full min-w-0 grid-cols-1 gap-3 sm:grid-cols-4 lg:max-w-xl">
             <div className="rounded-xl bg-white/10 border border-white/10 px-3 py-3">
               <p className="text-[9px] font-bold uppercase tracking-wider text-teal-200/80">Quotes</p>
               <p className="text-lg font-black tabular-nums mt-1">{displaySnapshots.quoteCount}</p>
@@ -1506,65 +1135,6 @@ const ManagerDashboard = () => {
         <p className="text-xs font-semibold text-slate-500 mb-6">
           KPI strip uses live workspace data — connect to the API if figures look empty.
         </p>
-      ) : null}
-
-      {showMdPayrollCard ? (
-        <Card className="mb-6 overflow-hidden border-violet-200/80 bg-gradient-to-br from-violet-50/90 to-white shadow-sm">
-          <div className="flex flex-col gap-3 border-b border-violet-100 bg-violet-50/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-2 min-w-0">
-              <DollarSign size={20} className="text-violet-700 shrink-0" aria-hidden />
-              <div className="min-w-0">
-                <h2 className="text-sm font-black text-[#134e4a] tracking-tight">Payroll — MD sign-off</h2>
-                <p className="text-[11px] text-slate-600 mt-0.5">
-                  Draft runs need your approval before HR can lock and export for payment.
-                </p>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => void loadMdPayrollRuns()}
-              className="shrink-0 self-start sm:self-center inline-flex items-center gap-1.5 rounded-xl border border-violet-200 bg-white px-3 py-2 text-[10px] font-black uppercase tracking-wide text-violet-900 hover:bg-violet-50"
-            >
-              <RefreshCw size={14} className={mdPayrollLoading ? 'animate-spin' : ''} />
-              Refresh
-            </button>
-          </div>
-          <div className="p-4">
-            {mdPayrollLoading && mdPayrollRuns.length === 0 ? (
-              <p className="text-xs text-slate-500">Loading payroll runs…</p>
-            ) : null}
-            {!mdPayrollLoading && mdPayrollPending.length === 0 ? (
-              <p className="text-xs text-slate-600">
-                No draft payroll runs are waiting for MD approval.
-              </p>
-            ) : null}
-            {mdPayrollPending.length > 0 ? (
-              <ul className="space-y-2">
-                {mdPayrollPending.map((r) => (
-                  <li
-                    key={r.id}
-                    className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5"
-                  >
-                    <div className="min-w-0">
-                      <p className="text-xs font-black text-slate-900 tabular-nums">
-                        Period {r.periodYyyymm}
-                      </p>
-                      <p className="text-[10px] text-amber-800 font-semibold mt-0.5">Awaiting MD approval</p>
-                    </div>
-                    <button
-                      type="button"
-                      disabled={mdPayrollBusyId === r.id}
-                      onClick={() => void approveMdPayrollRun(r.id)}
-                      className="rounded-lg bg-[#134e4a] px-3 py-1.5 text-[10px] font-black uppercase text-white disabled:opacity-50"
-                    >
-                      {mdPayrollBusyId === r.id ? '…' : 'Approve'}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </div>
-        </Card>
       ) : null}
 
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
@@ -1737,6 +1307,7 @@ const ManagerDashboard = () => {
                       </p>
                     ) : null}
                   </div>
+                  {renderOfficialRecordBanner(selectedUnifiedWorkItem)}
 
                   {loadingAudit ? (
                     <div className="flex flex-col items-center justify-center gap-3 py-14 rounded-2xl border border-white/10 bg-white/[0.04]">
@@ -1817,6 +1388,7 @@ const ManagerDashboard = () => {
                       {formatRefundReasonCategory(selectedIntel.row?.reason_category)}
                     </p>
                   </div>
+                  {renderOfficialRecordBanner(selectedUnifiedWorkItem)}
 
                   {loadingRefundIntel ? (
                     <div className="flex items-center justify-center py-12">
@@ -1880,7 +1452,7 @@ const ManagerDashboard = () => {
 
                   <div className="pt-4 border-t border-white/10 space-y-3">
                     <p className="text-[10px] font-black text-teal-400 uppercase tracking-widest">Decision</p>
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                       <button
                         type="button"
                         disabled={decisionBusy}
@@ -1942,7 +1514,7 @@ const ManagerDashboard = () => {
                     </p>
                     <p className="text-[10px] text-white/35 mt-3 uppercase tracking-wide">{selectedIntel.row?.request_date}</p>
                     {paymentIntelLineItems.total > 0 ? (
-                      <div className="mt-4 rounded-xl border border-white/10 overflow-hidden bg-black/20 overflow-x-auto">
+                      <div className="z-scroll-x mt-4 overflow-x-auto rounded-xl border border-white/10 bg-black/20">
                         <table className="w-full min-w-[320px] border-collapse text-left text-xs">
                           <thead>
                             <tr className="text-white/50 uppercase tracking-wide border-b border-white/10 text-[11px] font-bold">
@@ -2021,9 +1593,10 @@ const ManagerDashboard = () => {
                       </button>
                     </div>
                   </div>
+                  {renderOfficialRecordBanner(selectedUnifiedWorkItem)}
                   <div className="pt-4 border-t border-white/10 space-y-3">
                     <p className="text-[10px] font-black text-teal-400 uppercase tracking-widest">Decision</p>
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                       <button
                         type="button"
                         disabled={decisionBusy}
@@ -2075,6 +1648,7 @@ const ManagerDashboard = () => {
                         : ''}
                     </p>
                   </div>
+                  {renderOfficialRecordBanner(selectedUnifiedWorkItem)}
 
                   {selectedIntel.row?.quotation_ref ? (
                     <div className="space-y-3">
@@ -2135,139 +1709,6 @@ const ManagerDashboard = () => {
       </div>
 
       <ModalFrame
-        isOpen={showAttendanceModal}
-        onClose={() => setShowAttendanceModal(false)}
-        title="Mark staff attendance"
-        description="Record present or late for each staff member in your branch for one calendar day."
-      >
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-xl max-w-2xl w-full max-h-[min(90dvh,720px)] flex flex-col overflow-hidden">
-          <div className="px-5 py-4 border-b border-slate-100 flex justify-between items-center gap-3 shrink-0">
-            <div>
-              <h2 className="text-base font-bold text-[#134e4a]">Daily attendance</h2>
-              <p className="text-[11px] text-slate-500 mt-0.5">Branch scope follows your workspace bar.</p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowAttendanceModal(false)}
-              className="p-2 rounded-lg text-slate-400 hover:bg-slate-100"
-              aria-label="Close"
-            >
-              ×
-            </button>
-          </div>
-          <form onSubmit={saveAttendanceRoll} className="flex flex-col flex-1 min-h-0">
-            <div className="p-5 space-y-4 overflow-y-auto flex-1">
-              {attLoadError ? (
-                <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">
-                  {attLoadError}
-                </div>
-              ) : null}
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase" htmlFor="mgr-att-branch">
-                    Branch
-                  </label>
-                  <select
-                    id="mgr-att-branch"
-                    value={attBranchId}
-                    onChange={(e) => setAttBranchId(e.target.value)}
-                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold outline-none"
-                  >
-                    {(ws?.session?.branches ?? []).map((b) => (
-                      <option key={b.id} value={b.id}>
-                        {b.name || b.code || b.id}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase" htmlFor="mgr-att-day">
-                    Date
-                  </label>
-                  <input
-                    id="mgr-att-day"
-                    type="date"
-                    value={attDayIso}
-                    onChange={(e) => setAttDayIso(e.target.value)}
-                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold outline-none"
-                  />
-                </div>
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-slate-400 uppercase" htmlFor="mgr-att-notes">
-                  Notes (optional)
-                </label>
-                <input
-                  id="mgr-att-notes"
-                  value={attNotes}
-                  onChange={(e) => setAttNotes(e.target.value)}
-                  placeholder="e.g. half-day closure"
-                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold outline-none"
-                />
-              </div>
-              {attLoading ? (
-                <p className="text-sm text-slate-500">Loading staff…</p>
-              ) : attStaffList.length === 0 && !attLoadError ? (
-                <p className="text-sm text-slate-600">No staff assigned to this branch in HR.</p>
-              ) : (
-                <ul className="space-y-2 border border-slate-100 rounded-xl divide-y divide-slate-100 max-h-[min(40vh,320px)] overflow-y-auto">
-                  {attStaffList.map((s) => {
-                    const id = String(s.userId);
-                    const st = attStatusByUser[id] === 'late' ? 'late' : 'present';
-                    return (
-                      <li key={id} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
-                        <div className="min-w-0">
-                          <p className="text-sm font-bold text-slate-900 truncate">{s.displayName || s.username}</p>
-                          <p className="text-[10px] text-slate-500 font-mono">{s.jobTitle || '—'}</p>
-                        </div>
-                        <div className="flex rounded-lg border border-slate-200 overflow-hidden shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => setAttStatusByUser((m) => ({ ...m, [id]: 'present' }))}
-                            className={`px-3 py-1.5 text-[10px] font-black uppercase ${
-                              st === 'present' ? 'bg-[#134e4a] text-white' : 'bg-white text-slate-600'
-                            }`}
-                          >
-                            Present
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setAttStatusByUser((m) => ({ ...m, [id]: 'late' }))}
-                            className={`px-3 py-1.5 text-[10px] font-black uppercase border-l border-slate-200 ${
-                              st === 'late' ? 'bg-amber-600 text-white' : 'bg-white text-slate-600'
-                            }`}
-                          >
-                            Late
-                          </button>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </div>
-            <div className="p-4 border-t border-slate-100 flex flex-wrap gap-2 shrink-0 bg-slate-50/80">
-              <Button
-                type="submit"
-                disabled={attLoading || attStaffList.length === 0 || attSaving || Boolean(attLoadError)}
-                className="flex-1 min-w-[8rem] rounded-xl font-bold uppercase text-[10px] h-11"
-              >
-                {attSaving ? 'Saving…' : 'Save roll'}
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setShowAttendanceModal(false)}
-                className="rounded-xl font-bold uppercase text-[10px] h-11"
-              >
-                Cancel
-              </Button>
-            </div>
-          </form>
-        </div>
-      </ModalFrame>
-
-      <ModalFrame
         isOpen={showStockRequest}
         onClose={() => setShowStockRequest(false)}
         title="Inventory note"
@@ -2289,7 +1730,7 @@ const ManagerDashboard = () => {
             <p className="text-sm text-slate-600">
               Draft a coil or material request for procurement. Wire this to your payment / PO flow when ready.
             </p>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="space-y-1">
                 <label className="text-[10px] font-bold text-slate-400 uppercase">Material</label>
                 <select className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold outline-none">
@@ -2307,8 +1748,17 @@ const ManagerDashboard = () => {
               </div>
             </div>
             <div className="flex gap-3 pt-2">
-              <Button className="flex-1 rounded-xl font-bold uppercase text-[10px] h-11" type="button">
-                Submit (placeholder)
+              <Button
+                className="flex-1 rounded-xl font-bold uppercase text-[10px] h-11"
+                type="button"
+                onClick={() => {
+                  showToast('Request draft captured. Continue in Procurement for sourcing and PO execution.', {
+                    variant: 'success',
+                  });
+                  setShowStockRequest(false);
+                }}
+              >
+                Submit request draft
               </Button>
               <Button
                 type="button"

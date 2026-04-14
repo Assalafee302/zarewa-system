@@ -59,6 +59,15 @@ function displayCuttingListStatus(s) {
   return s;
 }
 
+function cuttingListMinPaidFractionFromSession(session) {
+  const bid = String(session?.currentBranchId || '').trim();
+  const branches = Array.isArray(session?.branches) ? session.branches : [];
+  const row = branches.find((b) => String(b.id) === bid);
+  const f = Number(row?.cuttingListMinPaidFraction);
+  if (Number.isFinite(f) && f >= 0.05 && f <= 1) return f;
+  return 0.7;
+}
+
 function branchCodeForDraft(session) {
   const bid = String(session?.currentBranchId || '').trim();
   const branches = Array.isArray(session?.branches) ? session.branches : [];
@@ -134,12 +143,16 @@ function cashPaidOnQuotation(quotationId, receiptRows, ledgerEntries) {
   return s;
 }
 
-/** 70% gate: actual cash in, or book allocation, or manager override. */
-function meetsCuttingListPayThreshold(q, receiptRows, ledgerEntries) {
+/** Paid fraction gate (branch setting): actual cash in, or book allocation, or manager override. */
+function meetsCuttingListPayThreshold(q, receiptRows, ledgerEntries, minPaidFraction = 0.7) {
   if (q.manager_production_approved_at_iso || q.managerProductionApprovedAtISO) return true;
   const total = Number(q.totalNgn ?? q.total_ngn) || 0;
   if (total <= 0) return false;
-  const threshold = total * 0.7 - 1e-6;
+  const mf =
+    Number.isFinite(minPaidFraction) && minPaidFraction >= 0.05 && minPaidFraction <= 1
+      ? minPaidFraction
+      : 0.7;
+  const threshold = total * mf - 1e-6;
   const book = bookPaidTowardQuotation(q);
   const cash = cashPaidOnQuotation(q.id, receiptRows, ledgerEntries);
   return cash >= threshold || book >= threshold;
@@ -259,6 +272,8 @@ const CuttingListModal = ({
 }) => {
   const { show: showToast } = useToast();
   const ws = useWorkspace();
+  const minPaidFraction = useMemo(() => cuttingListMinPaidFractionFromSession(ws?.session), [ws?.session]);
+  const minPaidPercentLabel = Math.round(minPaidFraction * 100);
   const navigate = useNavigate();
   const productionLocked = Boolean(editData?.productionRegistered);
   const readOnly = accessMode === 'view' || productionLocked;
@@ -303,8 +318,8 @@ const CuttingListModal = ({
       return total > 0;
     });
     const sorted = [...base].sort((a, b) => {
-      const aOk = meetsCuttingListPayThreshold(a, receipts, ledgerEntries) ? 0 : 1;
-      const bOk = meetsCuttingListPayThreshold(b, receipts, ledgerEntries) ? 0 : 1;
+      const aOk = meetsCuttingListPayThreshold(a, receipts, ledgerEntries, minPaidFraction) ? 0 : 1;
+      const bOk = meetsCuttingListPayThreshold(b, receipts, ledgerEntries, minPaidFraction) ? 0 : 1;
       if (aOk !== bOk) return aOk - bOk;
       return a.id.localeCompare(b.id);
     });
@@ -315,7 +330,7 @@ const CuttingListModal = ({
       }
     }
     return sorted;
-  }, [quotations, cuttingLists, editData, receipts, ledgerEntries]);
+  }, [quotations, cuttingLists, editData, receipts, ledgerEntries, minPaidFraction]);
 
   const filteredQuotePicker = useMemo(() => {
     const s = quoteSearch.trim().toLowerCase();
@@ -336,6 +351,21 @@ const CuttingListModal = ({
   );
 
   const materialSpec = useMemo(() => materialSpecFromQuotation(selectedQuotation), [selectedQuotation]);
+
+  /** Master material type only (Aluzinc, Aluminium, Stone coated, …) — never product line names like "roofing sheet". */
+  const materialTypeLabel = useMemo(() => {
+    const q = selectedQuotation;
+    if (!q) return '';
+    const named = String(q.materialTypeName ?? q.material_type_name ?? '').trim();
+    if (named) return named;
+    const id = String(
+      q.materialTypeId ?? q.material_type_id ?? q.quotationLines?.materialTypeId ?? ''
+    ).trim();
+    if (!id) return '';
+    const types = ws?.snapshot?.masterData?.materialTypes ?? [];
+    const row = types.find((t) => String(t?.id ?? '').trim() === id);
+    return String(row?.name ?? '').trim();
+  }, [selectedQuotation, ws?.snapshot?.masterData?.materialTypes]);
 
   const draftBranchCode = useMemo(() => branchCodeForDraft(ws?.session), [ws?.session]);
 
@@ -399,6 +429,7 @@ const CuttingListModal = ({
       quotationRef,
       selectedQuotation,
       materialSpec,
+      materialTypeLabel,
       dateISO,
       machineName,
       operatorName: editData?.operatorName ?? '',
@@ -406,14 +437,15 @@ const CuttingListModal = ({
       sheetsToCut: editData?.sheetsToCut ?? computedSheets,
       linesByCat,
       receiptsForQuotation: quoteReceipts,
-      statusLabel: editData?.status ? displayCuttingListStatus(editData.status) : 'Draft',
       productionFooterName: editData?.handledBy || handledByLabel,
+      treasuryMovements: Array.isArray(ws?.snapshot?.treasuryMovements) ? ws.snapshot.treasuryMovements : [],
     }),
     [
       draftCuttingListId,
       quotationRef,
       selectedQuotation,
       materialSpec,
+      materialTypeLabel,
       dateISO,
       machineName,
       editData,
@@ -422,6 +454,7 @@ const CuttingListModal = ({
       computedSheets,
       linesByCat,
       quoteReceipts,
+      ws?.snapshot?.treasuryMovements,
     ]
   );
 
@@ -437,6 +470,23 @@ const CuttingListModal = ({
       setQuoteSearch('');
     }
   }, [isOpen, editData?.id, selectableQuotations, quotationRef]);
+
+  useEffect(() => {
+    if (!showPrintPreview) return undefined;
+    const tagPrintSession = () => {
+      document.documentElement.setAttribute('data-print-cutting-list-a4', '');
+    };
+    const clearPrintSession = () => {
+      document.documentElement.removeAttribute('data-print-cutting-list-a4');
+    };
+    window.addEventListener('beforeprint', tagPrintSession);
+    window.addEventListener('afterprint', clearPrintSession);
+    return () => {
+      window.removeEventListener('beforeprint', tagPrintSession);
+      window.removeEventListener('afterprint', clearPrintSession);
+      clearPrintSession();
+    };
+  }, [showPrintPreview]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -526,9 +576,13 @@ const CuttingListModal = ({
       showToast('Add at least one valid line (length and quantity) in any section.', { variant: 'error' });
       return;
     }
-    if (isCreate && selectedQuotation && !meetsCuttingListPayThreshold(selectedQuotation, receipts, ledgerEntries)) {
+    if (
+      isCreate &&
+      selectedQuotation &&
+      !meetsCuttingListPayThreshold(selectedQuotation, receipts, ledgerEntries, minPaidFraction)
+    ) {
       showToast(
-        'Under 70% paid: a manager must approve production on the Manager dashboard before you can save this cutting list.',
+        `Under ${minPaidPercentLabel}% paid: a manager must approve production on the Manager dashboard before you can save this cutting list.`,
         { variant: 'error' }
       );
       return;
@@ -598,7 +652,7 @@ const CuttingListModal = ({
   }, [editData?.id, editData?.productionReleasePending, productionLocked, machineName, ws, showToast, onCuttingListUpdated]);
 
   return (
-    <ModalFrame isOpen={isOpen} onClose={onClose}>
+    <ModalFrame isOpen={isOpen} onClose={onClose} modal={!showPrintPreview}>
       <form
         onSubmit={submit}
         className="z-modal-panel max-w-[min(100%,52rem)] w-full max-h-[min(92vh,860px)] flex flex-col"
@@ -688,7 +742,7 @@ const CuttingListModal = ({
                   <label className={label}>Quotation</label>
                   <p className="text-[9px] text-slate-500 leading-snug -mt-1 mb-1">
                     Search by quotation ID, customer, or customer code, then click a row to link. If less than{' '}
-                    <span className="font-semibold text-slate-700">70%</span> of the quote is paid on the customer ledger, a manager must use{' '}
+                    <span className="font-semibold text-slate-700">{minPaidPercentLabel}%</span> of the quote is paid on the customer ledger, a manager must use{' '}
                     <span className="font-semibold text-slate-700">Manager dashboard</span> → Transaction Intel →{' '}
                     <span className="font-semibold text-slate-700">Override</span> before you can save a cutting list here.
                   </p>
@@ -741,7 +795,7 @@ const CuttingListModal = ({
                           ) : (
                             filteredQuotePicker.map((q) => {
                               const cust = q.customer ?? q.customer_name ?? '';
-                              const okPay = meetsCuttingListPayThreshold(q, receipts, ledgerEntries);
+                              const okPay = meetsCuttingListPayThreshold(q, receipts, ledgerEntries, minPaidFraction);
                               return (
                                 <button
                                   key={q.id}
@@ -762,7 +816,7 @@ const CuttingListModal = ({
                                         okPay ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
                                       }`}
                                     >
-                                      {okPay ? '≥70% / ok' : 'Under 70%'}
+                                      {okPay ? `≥${minPaidPercentLabel}% / ok` : `Under ${minPaidPercentLabel}%`}
                                     </span>
                                   </div>
                                   <div className="flex items-center justify-between gap-2 mt-0.5">
@@ -815,12 +869,14 @@ const CuttingListModal = ({
                 {isCreate &&
                   quotationRef &&
                   selectedQuotation &&
-                  !meetsCuttingListPayThreshold(selectedQuotation, receipts, ledgerEntries) && (
+                  !meetsCuttingListPayThreshold(selectedQuotation, receipts, ledgerEntries, minPaidFraction) && (
                   <div className="md:col-span-2 p-4 rounded-xl border border-amber-200 bg-amber-50 space-y-3">
                     <div className="flex items-start gap-3">
                       <AlertTriangle className="text-amber-600 shrink-0 mt-0.5" size={20} />
                       <div className="min-w-0">
-                        <p className="text-xs font-bold text-amber-900">Low payment ({payPercentOnQuote}%)</p>
+                        <p className="text-xs font-bold text-amber-900">
+                          Low payment ({payPercentOnQuote}% book · need {minPaidPercentLabel}% for cutting without override)
+                        </p>
                         <p className="text-[10px] text-amber-800 leading-snug">
                           You cannot save this cutting list until a manager approves production for this quotation on the Manager dashboard
                           (Transaction Intel → Override). After approval, refresh and try again.
@@ -1035,29 +1091,42 @@ const CuttingListModal = ({
             <button
               type="button"
               aria-label="Close print preview"
-              className="no-print fixed inset-0 z-[10000] bg-black/50"
+              className="no-print fixed inset-0 z-[11060] bg-black/50"
               onClick={() => setShowPrintPreview(false)}
             />
-            <div className="no-print fixed inset-0 z-[10001] overflow-y-auto p-4 sm:p-8 pointer-events-none">
-              <div className="pointer-events-auto mx-auto max-w-[148mm] pb-16">
-                <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl print:rounded-none print:border-0 print:shadow-none">
+            <div
+              className="print-portal-scroll fixed inset-0 z-[11070] overflow-y-auto overscroll-y-contain p-4 sm:p-8"
+              onClick={() => setShowPrintPreview(false)}
+            >
+              <div
+                className="mx-auto max-w-[297mm] pb-16 print-cutting-list-a4-host"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="rounded-lg border border-slate-200 bg-white shadow-2xl print:rounded-none print:border-0 print:shadow-none">
                   <CuttingListReportPrintView {...printPayload} />
                 </div>
-                <div className="mt-4 flex flex-wrap justify-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => window.print()}
-                    className="rounded-lg bg-[#134e4a] px-5 py-2.5 text-[10px] font-semibold uppercase tracking-wide text-white shadow-lg"
-                  >
-                    Print / Save as PDF
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowPrintPreview(false)}
-                    className="rounded-lg border border-slate-200 bg-white px-5 py-2.5 text-[10px] font-semibold uppercase tracking-wide text-slate-700"
-                  >
-                    Close
-                  </button>
+                <div className="no-print mt-4 flex flex-col items-center gap-2">
+                  <div className="flex flex-wrap justify-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => window.print()}
+                      title="In the print dialog: paper A4, layout Landscape. If one sheet is slightly too tall, choose Scale → Fit to page."
+                      className="rounded-lg bg-[#134e4a] px-5 py-2.5 text-[10px] font-semibold uppercase tracking-wide text-white shadow-lg"
+                    >
+                      Print / Save PDF · A4 landscape
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowPrintPreview(false)}
+                      className="rounded-lg border border-slate-200 bg-white px-5 py-2.5 text-[10px] font-semibold uppercase tracking-wide text-slate-700"
+                    >
+                      Close
+                    </button>
+                  </div>
+                  <p className="text-center text-[9px] text-slate-500 max-w-sm leading-snug">
+                    A4 landscape · one sheet per section · use <span className="font-semibold text-slate-600">Fit to page</span> if the preview
+                    clips
+                  </p>
                 </div>
               </div>
             </div>

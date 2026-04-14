@@ -303,8 +303,8 @@ export function runFinanceImport(db, plan, branchId, opts = {}) {
 
   // --- Suppliers ---
   const upsertSup = db.prepare(`
-    INSERT INTO suppliers (supplier_id, name, city, payment_terms, quality_score, notes, branch_id)
-    VALUES (?,?,?,?,?,?,?)
+    INSERT INTO suppliers (supplier_id, name, city, payment_terms, quality_score, notes, branch_id, supplier_profile_json)
+    VALUES (?,?,?,?,?,?,?,?)
     ON CONFLICT(supplier_id) DO UPDATE SET
       name = excluded.name,
       city = excluded.city,
@@ -342,7 +342,8 @@ export function runFinanceImport(db, plan, branchId, opts = {}) {
       String(pick(row, ['PaymentTerms', 'Terms']) || 'Credit').trim(),
       Number(pick(row, ['QualityScore', 'Score']) || 80) || 80,
       String(pick(row, ['Notes', 'Note', 'Remark', 'Discription', 'Description']) || '').trim(),
-      branchId
+      branchId,
+      null
     );
     stats.suppliersUpserted += 1;
   }
@@ -467,8 +468,8 @@ export function runFinanceImport(db, plan, branchId, opts = {}) {
       supplierId = `SUP-LEGACY-${(supName || 'unknown').slice(0, 20).replace(/\W/g, '-') || 'x'}-${i}`;
       if (!db.prepare(`SELECT 1 FROM suppliers WHERE supplier_id = ?`).get(supplierId)) {
         db.prepare(
-          `INSERT INTO suppliers (supplier_id, name, city, payment_terms, quality_score, notes, branch_id) VALUES (?,?,?,?,?,?,?)`
-        ).run(supplierId, supName || supplierId, '', 'Credit', 80, 'Auto-created from purchase import', branchId);
+          `INSERT INTO suppliers (supplier_id, name, city, payment_terms, quality_score, notes, branch_id, supplier_profile_json) VALUES (?,?,?,?,?,?,?,?)`
+        ).run(supplierId, supName || supplierId, '', 'Credit', 80, 'Auto-created from purchase import', branchId, null);
       }
     }
 

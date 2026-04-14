@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS suppliers (
   payment_terms TEXT,
   quality_score INTEGER,
   notes TEXT,
-  branch_id TEXT NOT NULL
+  branch_id TEXT NOT NULL,
+  supplier_profile_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS transport_agents (
@@ -99,7 +100,8 @@ CREATE TABLE IF NOT EXISTS transport_agents (
   name TEXT NOT NULL,
   region TEXT,
   phone TEXT,
-  branch_id TEXT NOT NULL
+  branch_id TEXT NOT NULL,
+  profile_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS products (
@@ -130,8 +132,11 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
   transport_agent_name TEXT,
   transport_reference TEXT,
   transport_note TEXT,
+  transport_finance_advice TEXT,
   transport_treasury_movement_id TEXT,
   transport_amount_ngn INTEGER NOT NULL DEFAULT 0,
+  transport_advance_ngn INTEGER NOT NULL DEFAULT 0,
+  transport_paid_ngn INTEGER NOT NULL DEFAULT 0,
   transport_paid INTEGER NOT NULL DEFAULT 0,
   transport_paid_at_iso TEXT,
   supplier_paid_ngn INTEGER NOT NULL DEFAULT 0,
@@ -425,6 +430,7 @@ CREATE TABLE IF NOT EXISTS customer_refunds (
   amount_ngn INTEGER NOT NULL,
   calculation_lines_json TEXT,
   suggested_lines_json TEXT,
+  preview_snapshot_json TEXT,
   calculation_notes TEXT,
   status TEXT,
   requested_by TEXT,
@@ -717,11 +723,16 @@ CREATE TABLE IF NOT EXISTS coil_requests (
   status TEXT NOT NULL,
   created_at_iso TEXT NOT NULL,
   acknowledged_at_iso TEXT,
+  branch_id TEXT NOT NULL DEFAULT '',
+  requested_by_user_id TEXT,
+  requested_by_display TEXT,
   gauge TEXT,
   colour TEXT,
   material_type TEXT,
   requested_kg REAL,
-  note TEXT
+  note TEXT,
+  work_item_id TEXT,
+  material_request_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS yard_coils (
@@ -862,6 +873,453 @@ CREATE TABLE IF NOT EXISTS hr_requests (
 
 CREATE INDEX IF NOT EXISTS idx_hr_requests_branch ON hr_requests(branch_id);
 CREATE INDEX IF NOT EXISTS idx_hr_requests_user ON hr_requests(user_id);
+
+CREATE TABLE IF NOT EXISTS office_threads (
+  id TEXT PRIMARY KEY,
+  branch_id TEXT NOT NULL,
+  created_by_user_id TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'memo',
+  status TEXT NOT NULL DEFAULT 'open',
+  document_class TEXT NOT NULL DEFAULT 'correspondence',
+  office_key TEXT NOT NULL DEFAULT 'office_admin',
+  subject TEXT NOT NULL,
+  body TEXT,
+  to_user_ids_json TEXT,
+  cc_user_ids_json TEXT,
+  related_work_item_id TEXT,
+  related_payment_request_id TEXT,
+  payload_json TEXT,
+  created_at_iso TEXT NOT NULL,
+  updated_at_iso TEXT NOT NULL,
+  FOREIGN KEY (created_by_user_id) REFERENCES app_users(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_office_threads_branch_updated ON office_threads(branch_id, updated_at_iso DESC);
+CREATE INDEX IF NOT EXISTS idx_office_threads_created_by ON office_threads(created_by_user_id);
+-- idx_office_threads_work_item: created in migrateOfficeDesk after related_work_item_id exists (legacy DBs).
+
+CREATE TABLE IF NOT EXISTS office_messages (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  author_user_id TEXT,
+  body TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'user',
+  created_at_iso TEXT NOT NULL,
+  FOREIGN KEY (thread_id) REFERENCES office_threads(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_office_messages_thread ON office_messages(thread_id, created_at_iso);
+
+CREATE TABLE IF NOT EXISTS office_thread_reads (
+  user_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  last_read_at_iso TEXT NOT NULL,
+  PRIMARY KEY (user_id, thread_id),
+  FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE,
+  FOREIGN KEY (thread_id) REFERENCES office_threads(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS office_thread_filing (
+  thread_id TEXT PRIMARY KEY,
+  branch_id TEXT NOT NULL,
+  category_key TEXT NOT NULL,
+  category_label TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  cost_ngn INTEGER,
+  tags_json TEXT,
+  key_facts_json TEXT,
+  related_payment_request_id TEXT,
+  conversation_digest TEXT,
+  extracted_at_iso TEXT NOT NULL,
+  updated_at_iso TEXT NOT NULL,
+  model_hint TEXT,
+  FOREIGN KEY (thread_id) REFERENCES office_threads(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_office_thread_filing_branch ON office_thread_filing(branch_id, updated_at_iso DESC);
+CREATE INDEX IF NOT EXISTS idx_office_thread_filing_category ON office_thread_filing(category_key, branch_id);
+
+CREATE TABLE IF NOT EXISTS work_items (
+  id TEXT PRIMARY KEY,
+  reference_no TEXT NOT NULL UNIQUE,
+  branch_id TEXT NOT NULL,
+  office_key TEXT NOT NULL DEFAULT 'general',
+  document_class TEXT NOT NULL,
+  document_type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  priority TEXT NOT NULL DEFAULT 'normal',
+  confidentiality TEXT NOT NULL DEFAULT 'internal',
+  title TEXT NOT NULL,
+  summary TEXT,
+  body TEXT,
+  sender_user_id TEXT,
+  sender_display_name TEXT,
+  sender_role_key TEXT,
+  sender_office_key TEXT,
+  sender_branch_id TEXT,
+  responsible_office_key TEXT,
+  responsible_user_id TEXT,
+  due_at_iso TEXT,
+  created_at_iso TEXT NOT NULL,
+  updated_at_iso TEXT NOT NULL,
+  closed_at_iso TEXT,
+  archived_at_iso TEXT,
+  requires_response INTEGER NOT NULL DEFAULT 0,
+  requires_approval INTEGER NOT NULL DEFAULT 0,
+  key_decision_summary TEXT,
+  source_kind TEXT,
+  source_id TEXT,
+  linked_thread_id TEXT,
+  data_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_items_branch_updated ON work_items(branch_id, updated_at_iso DESC);
+CREATE INDEX IF NOT EXISTS idx_work_items_office_status ON work_items(responsible_office_key, status, updated_at_iso DESC);
+CREATE INDEX IF NOT EXISTS idx_work_items_source ON work_items(source_kind, source_id);
+CREATE INDEX IF NOT EXISTS idx_work_items_linked_thread ON work_items(linked_thread_id);
+
+CREATE TABLE IF NOT EXISTS work_item_visibility (
+  work_item_id TEXT NOT NULL,
+  visibility_kind TEXT NOT NULL,
+  visibility_value TEXT NOT NULL,
+  access_level TEXT NOT NULL DEFAULT 'view',
+  PRIMARY KEY (work_item_id, visibility_kind, visibility_value, access_level),
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_item_visibility_lookup
+  ON work_item_visibility(visibility_kind, visibility_value, access_level);
+
+CREATE TABLE IF NOT EXISTS work_item_links (
+  work_item_id TEXT NOT NULL,
+  entity_kind TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  note TEXT,
+  created_at_iso TEXT NOT NULL,
+  PRIMARY KEY (work_item_id, entity_kind, entity_id),
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_item_links_entity ON work_item_links(entity_kind, entity_id);
+
+CREATE TABLE IF NOT EXISTS work_item_decisions (
+  id TEXT PRIMARY KEY,
+  work_item_id TEXT NOT NULL,
+  decision_key TEXT NOT NULL,
+  outcome_status TEXT NOT NULL,
+  note TEXT,
+  actor_user_id TEXT,
+  actor_display_name TEXT,
+  actor_role_key TEXT,
+  actor_office_key TEXT,
+  actor_branch_id TEXT,
+  acted_at_iso TEXT NOT NULL,
+  data_json TEXT,
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_item_decisions_item ON work_item_decisions(work_item_id, acted_at_iso DESC);
+
+CREATE TABLE IF NOT EXISTS work_item_sla_events (
+  id TEXT PRIMARY KEY,
+  work_item_id TEXT NOT NULL,
+  event_kind TEXT NOT NULL,
+  due_at_iso TEXT,
+  occurred_at_iso TEXT,
+  state TEXT NOT NULL,
+  note TEXT,
+  created_at_iso TEXT NOT NULL,
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_item_sla_events_item ON work_item_sla_events(work_item_id, created_at_iso DESC);
+
+CREATE TABLE IF NOT EXISTS work_item_filing (
+  work_item_id TEXT PRIMARY KEY,
+  filing_reference TEXT,
+  filing_class TEXT,
+  retention_label TEXT,
+  archive_state TEXT NOT NULL DEFAULT 'open',
+  print_summary TEXT,
+  updated_at_iso TEXT NOT NULL,
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS work_item_print_snapshots (
+  id TEXT PRIMARY KEY,
+  work_item_id TEXT NOT NULL,
+  snapshot_kind TEXT NOT NULL,
+  title TEXT,
+  body_text TEXT,
+  created_at_iso TEXT NOT NULL,
+  created_by_user_id TEXT,
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_item_print_snapshots_item
+  ON work_item_print_snapshots(work_item_id, created_at_iso DESC);
+
+CREATE TABLE IF NOT EXISTS material_requests (
+  id TEXT PRIMARY KEY,
+  reference_no TEXT NOT NULL UNIQUE,
+  branch_id TEXT NOT NULL,
+  request_category TEXT NOT NULL,
+  status TEXT NOT NULL,
+  urgency TEXT NOT NULL DEFAULT 'normal',
+  requested_by_user_id TEXT,
+  requested_by_display TEXT,
+  requested_at_iso TEXT NOT NULL,
+  required_by_iso TEXT,
+  acknowledged_at_iso TEXT,
+  approved_at_iso TEXT,
+  approved_by_user_id TEXT,
+  approved_by_display TEXT,
+  approval_note TEXT,
+  responsible_office_key TEXT,
+  summary TEXT NOT NULL,
+  note TEXT,
+  related_purchase_order_id TEXT,
+  related_work_item_id TEXT,
+  source_kind TEXT,
+  source_id TEXT,
+  data_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_material_requests_branch_status
+  ON material_requests(branch_id, status, requested_at_iso DESC);
+CREATE INDEX IF NOT EXISTS idx_material_requests_work_item ON material_requests(related_work_item_id);
+
+CREATE TABLE IF NOT EXISTS material_request_lines (
+  material_request_id TEXT NOT NULL,
+  line_no INTEGER NOT NULL,
+  item_category TEXT NOT NULL,
+  product_id TEXT,
+  item_name TEXT,
+  gauge TEXT,
+  colour TEXT,
+  material_type TEXT,
+  unit TEXT NOT NULL,
+  qty_requested REAL NOT NULL DEFAULT 0,
+  qty_approved REAL,
+  qty_received REAL NOT NULL DEFAULT 0,
+  note TEXT,
+  PRIMARY KEY (material_request_id, line_no),
+  FOREIGN KEY (material_request_id) REFERENCES material_requests(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS in_transit_loads (
+  id TEXT PRIMARY KEY,
+  reference_no TEXT NOT NULL UNIQUE,
+  branch_id TEXT NOT NULL,
+  destination_branch_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  source_kind TEXT NOT NULL DEFAULT 'purchase_order',
+  source_id TEXT,
+  purchase_order_id TEXT,
+  material_request_id TEXT,
+  transport_agent_id TEXT,
+  transport_agent_name TEXT,
+  transport_reference TEXT,
+  waybill_ref TEXT,
+  eta_date_iso TEXT,
+  loaded_at_iso TEXT,
+  posted_at_iso TEXT,
+  received_at_iso TEXT,
+  delay_reason TEXT,
+  exception_note TEXT,
+  haulage_cost_ngn INTEGER NOT NULL DEFAULT 0,
+  treasury_movement_id TEXT,
+  related_work_item_id TEXT,
+  data_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_in_transit_loads_branch_status
+  ON in_transit_loads(destination_branch_id, status, posted_at_iso DESC);
+
+CREATE TABLE IF NOT EXISTS in_transit_load_lines (
+  load_id TEXT NOT NULL,
+  line_no INTEGER NOT NULL,
+  purchase_order_line_key TEXT,
+  material_request_line_no INTEGER,
+  product_id TEXT,
+  item_name TEXT,
+  unit TEXT NOT NULL,
+  qty_loaded REAL NOT NULL DEFAULT 0,
+  qty_received REAL NOT NULL DEFAULT 0,
+  short_landed_qty REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (load_id, line_no),
+  FOREIGN KEY (load_id) REFERENCES in_transit_loads(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS machines (
+  id TEXT PRIMARY KEY,
+  reference_no TEXT NOT NULL UNIQUE,
+  branch_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  machine_code TEXT,
+  line_name TEXT,
+  machine_type TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  asset_category TEXT,
+  serial_no TEXT,
+  model_no TEXT,
+  manufacturer TEXT,
+  installed_at_iso TEXT,
+  commissioned_at_iso TEXT,
+  legacy_machine_name TEXT,
+  notes TEXT,
+  created_at_iso TEXT NOT NULL,
+  updated_at_iso TEXT NOT NULL,
+  created_by_user_id TEXT,
+  updated_by_user_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_machines_branch_name ON machines(branch_id, name);
+
+CREATE TABLE IF NOT EXISTS machine_asset_links (
+  machine_id TEXT NOT NULL,
+  asset_id TEXT NOT NULL,
+  relation_kind TEXT NOT NULL DEFAULT 'primary',
+  PRIMARY KEY (machine_id, asset_id),
+  FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE,
+  FOREIGN KEY (asset_id) REFERENCES fixed_assets(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS machine_meter_logs (
+  id TEXT PRIMARY KEY,
+  machine_id TEXT NOT NULL,
+  reading_date_iso TEXT NOT NULL,
+  output_meters REAL NOT NULL DEFAULT 0,
+  note TEXT,
+  source_kind TEXT,
+  source_id TEXT,
+  created_at_iso TEXT NOT NULL,
+  created_by_user_id TEXT,
+  FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_machine_meter_logs_machine
+  ON machine_meter_logs(machine_id, reading_date_iso DESC);
+
+CREATE TABLE IF NOT EXISTS maintenance_plans (
+  id TEXT PRIMARY KEY,
+  reference_no TEXT NOT NULL UNIQUE,
+  branch_id TEXT NOT NULL,
+  machine_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  plan_kind TEXT NOT NULL DEFAULT 'preventive',
+  summary TEXT NOT NULL,
+  calendar_interval_days INTEGER,
+  meter_interval REAL,
+  next_due_date_iso TEXT,
+  next_due_meter REAL,
+  last_service_at_iso TEXT,
+  last_service_meter REAL,
+  approval_required INTEGER NOT NULL DEFAULT 1,
+  responsible_office_key TEXT NOT NULL DEFAULT 'operations',
+  notes TEXT,
+  created_at_iso TEXT NOT NULL,
+  updated_at_iso TEXT NOT NULL,
+  created_by_user_id TEXT,
+  updated_by_user_id TEXT,
+  FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_maintenance_plans_branch_status
+  ON maintenance_plans(branch_id, status, next_due_date_iso);
+
+CREATE TABLE IF NOT EXISTS maintenance_work_orders (
+  id TEXT PRIMARY KEY,
+  reference_no TEXT NOT NULL UNIQUE,
+  branch_id TEXT NOT NULL,
+  machine_id TEXT NOT NULL,
+  plan_id TEXT,
+  status TEXT NOT NULL,
+  priority TEXT NOT NULL DEFAULT 'normal',
+  kind TEXT NOT NULL DEFAULT 'corrective',
+  summary TEXT NOT NULL,
+  symptom TEXT,
+  diagnosis TEXT,
+  resolution TEXT,
+  incident_date_iso TEXT,
+  opened_at_iso TEXT NOT NULL,
+  acknowledged_at_iso TEXT,
+  approved_at_iso TEXT,
+  closed_at_iso TEXT,
+  opened_by_user_id TEXT,
+  acknowledged_by_user_id TEXT,
+  approved_by_user_id TEXT,
+  closed_by_user_id TEXT,
+  assigned_to_user_id TEXT,
+  downtime_hours REAL NOT NULL DEFAULT 0,
+  vendor_name TEXT,
+  replacement_required INTEGER NOT NULL DEFAULT 0,
+  related_material_request_id TEXT,
+  related_payment_request_id TEXT,
+  related_work_item_id TEXT,
+  data_json TEXT,
+  FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE,
+  FOREIGN KEY (plan_id) REFERENCES maintenance_plans(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_maintenance_work_orders_branch_status
+  ON maintenance_work_orders(branch_id, status, opened_at_iso DESC);
+
+CREATE TABLE IF NOT EXISTS maintenance_events (
+  id TEXT PRIMARY KEY,
+  work_order_id TEXT NOT NULL,
+  event_kind TEXT NOT NULL,
+  note TEXT,
+  at_iso TEXT NOT NULL,
+  actor_user_id TEXT,
+  actor_display_name TEXT,
+  actor_office_key TEXT,
+  data_json TEXT,
+  FOREIGN KEY (work_order_id) REFERENCES maintenance_work_orders(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_maintenance_events_work_order
+  ON maintenance_events(work_order_id, at_iso DESC);
+
+CREATE TABLE IF NOT EXISTS maintenance_cost_lines (
+  id TEXT PRIMARY KEY,
+  work_order_id TEXT NOT NULL,
+  cost_kind TEXT NOT NULL,
+  amount_ngn INTEGER NOT NULL DEFAULT 0,
+  expense_category TEXT,
+  note TEXT,
+  posted_at_iso TEXT NOT NULL,
+  created_by_user_id TEXT,
+  source_kind TEXT,
+  source_id TEXT,
+  FOREIGN KEY (work_order_id) REFERENCES maintenance_work_orders(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_maintenance_cost_lines_work_order
+  ON maintenance_cost_lines(work_order_id, posted_at_iso DESC);
+
+CREATE TABLE IF NOT EXISTS hr_performance_reviews (
+  id TEXT PRIMARY KEY,
+  reference_no TEXT NOT NULL UNIQUE,
+  branch_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  machine_id TEXT,
+  department_key TEXT,
+  period_key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  review_type TEXT NOT NULL DEFAULT 'periodic',
+  reviewer_user_id TEXT,
+  branch_recommendation TEXT,
+  hr_final_note TEXT,
+  score_json TEXT,
+  linked_work_item_id TEXT,
+  created_at_iso TEXT NOT NULL,
+  updated_at_iso TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES app_users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_hr_performance_reviews_branch_period
+  ON hr_performance_reviews(branch_id, period_key, updated_at_iso DESC);
 
 CREATE TABLE IF NOT EXISTS hr_payroll_runs (
   id TEXT PRIMARY KEY,
@@ -1081,5 +1539,60 @@ CREATE TABLE IF NOT EXISTS product_standard_costs (
   notes TEXT,
   updated_at_iso TEXT NOT NULL,
   updated_by_user_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS org_policy_kv (
+  policy_key TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL,
+  updated_at_iso TEXT NOT NULL,
+  updated_by_user_id TEXT,
+  updated_by_display TEXT
+);
+CREATE TABLE IF NOT EXISTS org_policy_audit (
+  id TEXT PRIMARY KEY,
+  policy_key TEXT NOT NULL,
+  old_value_json TEXT,
+  new_value_json TEXT,
+  actor_user_id TEXT,
+  actor_display TEXT,
+  created_at_iso TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reference_counters (
+  scope_key TEXT PRIMARY KEY,
+  last_seq INTEGER NOT NULL DEFAULT 0,
+  updated_at_iso TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS office_dossiers (
+  id TEXT PRIMARY KEY,
+  branch_id TEXT NOT NULL,
+  dossier_type TEXT NOT NULL,
+  dossier_key TEXT NOT NULL,
+  title TEXT,
+  created_at_iso TEXT NOT NULL,
+  updated_at_iso TEXT NOT NULL,
+  UNIQUE(branch_id, dossier_type, dossier_key)
+);
+CREATE TABLE IF NOT EXISTS office_dossier_links (
+  dossier_id TEXT NOT NULL,
+  entity_kind TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  linked_at_iso TEXT NOT NULL,
+  note TEXT,
+  PRIMARY KEY (dossier_id, entity_kind, entity_id),
+  FOREIGN KEY (dossier_id) REFERENCES office_dossiers(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS office_inter_branch_requests (
+  id TEXT PRIMARY KEY,
+  from_branch_id TEXT NOT NULL,
+  to_branch_id TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_by_user_id TEXT NOT NULL,
+  created_by_role_key TEXT,
+  created_at_iso TEXT NOT NULL,
+  updated_at_iso TEXT NOT NULL,
+  resolved_at_iso TEXT,
+  resolved_note TEXT
 );
 `;

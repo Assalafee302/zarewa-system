@@ -17,7 +17,7 @@ export function PageShell({ children, blurred = false, className = '' }) {
           ? { duration: 0 }
           : { duration: 0.6, type: 'spring', bounce: 0, ease: 'easeOut' }
       }
-      className={`relative min-h-0 w-full max-w-[min(100%,1400px)] mx-auto ${className}`}
+      className={`relative mx-auto min-h-0 w-full min-w-0 max-w-[min(100%,1400px)] ${className}`}
       aria-hidden={blurred ? 'true' : undefined}
     >
       {children}

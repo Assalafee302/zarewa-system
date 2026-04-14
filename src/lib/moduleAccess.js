@@ -5,57 +5,46 @@ export function hasPermissionInList(permissions, permission) {
   return permissions.includes('*') || permissions.includes(permission);
 }
 
+/** Canonical client-side RBAC matrix for module visibility. */
+export const MODULE_ACCESS_POLICY = {
+  sales: ['sales.view', 'sales.manage', 'quotations.manage', 'receipts.post'],
+  procurement: ['procurement.view', 'purchase_orders.manage'],
+  operations: ['operations.view', 'production.manage'],
+  finance: [
+    'finance.view',
+    'finance.post',
+    'finance.pay',
+    'finance.approve',
+    'finance.reverse',
+    'treasury.manage',
+  ],
+  reports: ['reports.view'],
+  edit_approvals: ['dashboard.view'],
+  settings: ['settings.view', 'period.manage'],
+  office: ['office.use'],
+};
+
 export function canAccessModuleWithPermissions(permissions, moduleKey) {
   const has = (p) => hasPermissionInList(permissions, p);
   switch (moduleKey) {
     case 'sales':
-      return (
-        has('sales.view') ||
-        has('sales.manage') ||
-        has('quotations.manage') ||
-        has('receipts.post')
-      );
+      return MODULE_ACCESS_POLICY.sales.some(has);
     case 'procurement':
-      return has('procurement.view') || has('purchase_orders.manage');
+      return MODULE_ACCESS_POLICY.procurement.some(has);
     case 'operations':
-      return has('operations.view') || has('production.manage');
+      return MODULE_ACCESS_POLICY.operations.some(has);
     case 'finance':
-      return (
-        has('finance.view') ||
-        has('finance.post') ||
-        has('finance.pay') ||
-        has('finance.approve') ||
-        has('finance.reverse') ||
-        has('treasury.manage')
-      );
+      return MODULE_ACCESS_POLICY.finance.some(has);
     case 'reports':
-      return has('reports.view');
+      return MODULE_ACCESS_POLICY.reports.some(has);
     case 'edit_approvals':
       // Route is further restricted by role in WorkspaceContext (edit approvers only).
-      return has('dashboard.view');
+      return MODULE_ACCESS_POLICY.edit_approvals.some(has);
     case 'settings':
       // Settings is an administrative module; audit viewers should not automatically gain access.
-      return has('settings.view') || has('period.manage');
-    case 'hr':
-      // HR is restricted to HR staff (and admins via '*').
-      // Non-HR modules (finance/ops/audit/settings) must not grant HR tab access.
-      return (
-        has('*') ||
-        has('hr.self') ||
-        has('hr.directory.view') ||
-        has('hr.staff.manage') ||
-        has('hr.requests.hr_review') ||
-        has('hr.requests.gm_approve') ||
-        has('hr.requests.final_approve') ||
-        has('hr.branch.endorse_staff') ||
-        has('hr.payroll.manage') ||
-        has('hr.payroll.md_approve') ||
-        has('hr.attendance.upload') ||
-        has('hr.daily_roll.mark') ||
-        has('hr.loan_maintain') ||
-        has('hr.letters.generate') ||
-        has('hr.compliance')
-      );
+      return MODULE_ACCESS_POLICY.settings.some(has);
+    case 'office':
+      return MODULE_ACCESS_POLICY.office.some(has) || has('*');
     default:
       return true;
   }

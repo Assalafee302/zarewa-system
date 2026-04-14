@@ -44,6 +44,8 @@ const baseProps = {
   receipts: [],
   cuttingLists: [],
   availableStock: [],
+  refunds: [],
+  productionJobs: [],
 };
 
 const pendingApproveRecord = {
@@ -199,11 +201,12 @@ describe('RefundModal', () => {
 
     renderWithToast(<RefundModal {...baseProps} mode="create" />);
 
+    await user.click(screen.getByTitle('How refunds work'));
     expect(await screen.findByText(/Suggested amounts are not final/i)).toBeInTheDocument();
 
     const select = await screen.findByRole('combobox');
     await user.selectOptions(select, 'QT-SEED');
-    await user.click(screen.getByRole('button', { name: 'Overpayment' }));
+    await user.click(screen.getByRole('checkbox', { name: /^Overpayment$/i }));
 
     expect((await screen.findAllByText(/Test audit flag: verify receipts/i)).length).toBeGreaterThanOrEqual(1);
   });
@@ -263,7 +266,7 @@ describe('RefundModal', () => {
 
     const select = await screen.findByRole('combobox');
     await user.selectOptions(select, 'QT-SEED');
-    await user.click(screen.getByRole('button', { name: 'Overpayment' }));
+    await user.click(screen.getByRole('checkbox', { name: /^Overpayment$/i }));
 
     await screen.findByDisplayValue('100');
 

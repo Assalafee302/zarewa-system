@@ -2,8 +2,10 @@ import { companionOverpayNgnByReceiptId } from '../src/lib/customerLedgerCore.js
 import { accessoryFulfillmentSummaryForQuotation } from './accessoryFulfillment.js';
 import { publicUserFromRow } from './auth.js';
 import { procurementKindFromPoRow } from './procurementPoKind.js';
+import { parseSupplierProfileJson, stripAgreementBodiesForList } from './supplierProfile.js';
 import { listBranches } from './branches.js';
 import { branchPredicate } from './branchSql.js';
+import { listInTransitLoads } from './inTransitOps.js';
 /** @param {import('better-sqlite3').Database} db */
 
 function hasColumn(db, table, column) {
@@ -213,7 +215,7 @@ export function listManagementItems(db, branchScope = 'ALL') {
 
   // 1. Quotations requiring clearance (Not cleared, not flagged yet, and has payments)
   const pendingClearance = db.prepare(`
-    SELECT id, customer_name, total_ngn, paid_ngn, date_iso, status
+    SELECT id, customer_name, total_ngn, paid_ngn, date_iso, status, branch_id
     FROM quotations 
     WHERE manager_cleared_at_iso IS NULL 
       AND manager_flagged_at_iso IS NULL
@@ -224,7 +226,7 @@ export function listManagementItems(db, branchScope = 'ALL') {
 
   // 2. Flagged transactions
   const flagged = db.prepare(`
-    SELECT id, customer_name, total_ngn, manager_flag_reason, manager_flagged_at_iso
+    SELECT id, customer_name, total_ngn, manager_flag_reason, manager_flagged_at_iso, branch_id
     FROM quotations 
     WHERE manager_flagged_at_iso IS NOT NULL
       ${bQuo.sql}
@@ -233,7 +235,7 @@ export function listManagementItems(db, branchScope = 'ALL') {
 
   // 3. Production Overrides (70% threshold bypass requirements)
   const productionOverrides = db.prepare(`
-    SELECT cl.id, cl.customer_name, cl.quotation_ref, cl.total_meters, q.paid_ngn, q.total_ngn
+    SELECT cl.id, cl.customer_name, cl.quotation_ref, cl.total_meters, q.paid_ngn, q.total_ngn, cl.branch_id
     FROM cutting_lists cl
     JOIN quotations q ON cl.quotation_ref = q.id
     WHERE cl.status = 'Draft' 
@@ -245,7 +247,7 @@ export function listManagementItems(db, branchScope = 'ALL') {
 
   // 4. Refund Requests
   const pendingRefunds = db.prepare(`
-    SELECT refund_id, customer_name, quotation_ref, amount_ngn, requested_at_iso, reason_category
+    SELECT refund_id, customer_name, quotation_ref, amount_ngn, requested_at_iso, reason_category, branch_id
     FROM customer_refunds
     WHERE status = 'Pending'
       ${bRef.sql}
@@ -256,7 +258,7 @@ export function listManagementItems(db, branchScope = 'ALL') {
   const pendingExpensesRaw = db.prepare(`
     SELECT pr.request_id, pr.expense_id, pr.amount_requested_ngn, pr.request_date, pr.description, pr.approval_status,
            pr.request_reference, pr.line_items_json, pr.attachment_name, pr.attachment_data_b64,
-           e.category AS expense_category
+           e.category AS expense_category, e.branch_id AS branch_id
     FROM payment_requests pr
     LEFT JOIN expenses e ON e.expense_id = pr.expense_id
     WHERE pr.approval_status = 'Pending'
@@ -274,12 +276,13 @@ export function listManagementItems(db, branchScope = 'ALL') {
     attachment_present: Boolean(row.attachment_data_b64 && String(row.attachment_data_b64).trim()),
     attachment_name: row.attachment_name ?? '',
     expense_category: row.expense_category ?? '',
+    branch_id: row.branch_id ?? '',
   }));
 
   // 6. Completed production jobs awaiting conversion / manager review sign-off (High/Low or flag)
   const pendingConversionReviews = db.prepare(`
     SELECT job_id, cutting_list_id, quotation_ref, customer_name, product_name,
-      conversion_alert_state, manager_review_required, actual_meters, actual_weight_kg, completed_at_iso
+      conversion_alert_state, manager_review_required, actual_meters, actual_weight_kg, completed_at_iso, branch_id
     FROM production_jobs
     WHERE status = 'Completed'
       AND (manager_review_signed_at_iso IS NULL OR TRIM(COALESCE(manager_review_signed_at_iso, '')) = '')
@@ -406,7 +409,12 @@ export function listManagerQuotationAudit(db, quotationRef) {
     .all(qid);
 
   const orderTotal = Number(qRow?.total_ngn) || 0;
-  const paid = Number(qRow?.paid_ngn) || 0;
+  const bookedPaid = Number(qRow?.paid_ngn) || 0;
+  const ledgerInflowSum = ledgerEntries
+    .filter((e) => LEDGER_INFLOW_TYPES.has(String(e.type || '').toUpperCase()))
+    .reduce((s, e) => s + (Number(e.amount_ngn) || 0), 0);
+  /** Prefer ledger receipts/advances when higher than booked paid (stale quotation row). */
+  const paid = Math.max(bookedPaid, ledgerInflowSum);
   const outstanding = Math.max(0, orderTotal - paid);
   const completedMeters = productionLogs
     .filter((j) => String(j.status || '').toLowerCase() === 'completed')
@@ -550,14 +558,21 @@ export function listSuppliers(db, branchScope = 'ALL') {
   return db
     .prepare(`SELECT * FROM suppliers WHERE 1=1${b.sql} ORDER BY name COLLATE NOCASE`)
     .all(...b.args)
-    .map((row) => ({
-      supplierID: row.supplier_id,
-      name: row.name,
-      city: row.city,
-      paymentTerms: row.payment_terms,
-      qualityScore: row.quality_score,
-      notes: row.notes,
-    }));
+    .map((row) => {
+      const rawProfile = hasColumn(db, 'suppliers', 'supplier_profile_json')
+        ? parseSupplierProfileJson(row.supplier_profile_json)
+        : {};
+      const supplierProfile = stripAgreementBodiesForList(rawProfile);
+      return {
+        supplierID: row.supplier_id,
+        name: row.name,
+        city: row.city,
+        paymentTerms: row.payment_terms,
+        qualityScore: row.quality_score,
+        notes: row.notes,
+        supplierProfile,
+      };
+    });
 }
 
 export function listTransportAgents(db, branchScope = 'ALL') {
@@ -565,12 +580,21 @@ export function listTransportAgents(db, branchScope = 'ALL') {
   return db
     .prepare(`SELECT * FROM transport_agents WHERE 1=1${b.sql} ORDER BY name`)
     .all(...b.args)
-    .map((row) => ({
-      id: row.id,
-      name: row.name,
-      region: row.region,
-      phone: row.phone,
-    }));
+    .map((row) => {
+      let profile = {};
+      try {
+        profile = JSON.parse(row.profile_json || '{}');
+      } catch {
+        profile = {};
+      }
+      return {
+        id: row.id,
+        name: row.name,
+        region: row.region,
+        phone: row.phone,
+        profile,
+      };
+    });
 }
 
 export function listProducts(db, branchScope = 'ALL') {
@@ -632,8 +656,11 @@ export function listPurchaseOrders(db, branchScope = 'ALL') {
       transportAgentName: row.transport_agent_name ?? '',
       transportReference: row.transport_reference ?? '',
       transportNote: row.transport_note ?? '',
+      transportFinanceAdvice: row.transport_finance_advice ?? '',
       transportTreasuryMovementId: row.transport_treasury_movement_id ?? '',
       transportAmountNgn: Number(row.transport_amount_ngn) || 0,
+      transportAdvanceNgn: Number(row.transport_advance_ngn) || 0,
+      transportPaidNgn: Number(row.transport_paid_ngn) || 0,
       transportPaid: Boolean(row.transport_paid),
       transportPaidAtISO: row.transport_paid_at_iso ?? '',
       supplierPaidNgn: row.supplier_paid_ngn ?? 0,
@@ -653,6 +680,46 @@ export function listPurchaseOrders(db, branchScope = 'ALL') {
       })),
     };
   });
+}
+
+export function listCoilControlEvents(db, branchScope = 'ALL') {
+  if (!hasColumn(db, 'coil_control_events', 'branch_id')) return [];
+  const b = branchWhere(db, 'coil_control_events', branchScope);
+  const lim = 2000;
+  return db
+    .prepare(
+      `SELECT * FROM coil_control_events WHERE 1=1${b.sql} ORDER BY datetime(created_at_iso) DESC, id DESC LIMIT ?`
+    )
+    .all(...b.args, lim)
+    .map((row) => ({
+      id: row.id,
+      branchId: row.branch_id ?? '',
+      eventKind: row.event_kind ?? '',
+      coilNo: row.coil_no ?? '',
+      productID: row.product_id ?? '',
+      gaugeLabel: row.gauge_label ?? '',
+      colour: row.colour ?? '',
+      meters: row.meters != null ? Number(row.meters) : null,
+      kgCoilDelta: Number(row.kg_coil_delta) || 0,
+      kgBook: row.kg_book != null ? Number(row.kg_book) : null,
+      bookRef: row.book_ref ?? '',
+      cuttingListRef: row.cutting_list_ref ?? '',
+      quotationRef: row.quotation_ref ?? '',
+      customerLabel: row.customer_label ?? '',
+      supplierID: row.supplier_id ?? '',
+      defectMFrom: row.defect_m_from != null ? Number(row.defect_m_from) : null,
+      defectMTo: row.defect_m_to != null ? Number(row.defect_m_to) : null,
+      supplierResolution: row.supplier_resolution ?? '',
+      outboundDestination: row.outbound_destination ?? '',
+      creditScrapInventory: Boolean(row.credit_scrap_inventory),
+      scrapProductID: row.scrap_product_id ?? '',
+      scrapReason: row.scrap_reason ?? '',
+      note: row.note ?? '',
+      dateISO: row.date_iso ?? '',
+      createdAtISO: row.created_at_iso ?? '',
+      actorUserId: row.actor_user_id ?? '',
+      actorDisplay: row.actor_display ?? '',
+    }));
 }
 
 export function listCoilLots(db, branchScope = 'ALL') {
@@ -1076,6 +1143,12 @@ export function listRefunds(db, branchScope = 'ALL') {
       } catch {
         /* ignore */
       }
+      let previewSnapshot = null;
+      try {
+        previewSnapshot = JSON.parse(row.preview_snapshot_json || 'null');
+      } catch {
+        previewSnapshot = null;
+      }
       const approvedAmountNgn = row.approved_amount_ngn != null ? Number(row.approved_amount_ngn) || 0 : 0;
       const paidAmountNgn = Number(row.paid_amount_ngn) || 0;
       const finalApprovedAmountNgn =
@@ -1103,6 +1176,7 @@ export function listRefunds(db, branchScope = 'ALL') {
         amountNgn: row.amount_ngn,
         calculationLines,
         suggestedLines,
+        previewSnapshot,
         calculationNotes: row.calculation_notes,
         status: row.status,
         requestedBy: row.requested_by,
@@ -1231,6 +1305,59 @@ export function listPaymentRequests(db, branchScope = 'ALL') {
     });
 }
 
+/** Single payment request for approval/detail UIs (no attachment bytes). */
+export function getPaymentRequestDetail(db, requestId) {
+  const rid = String(requestId || '').trim();
+  if (!rid) return null;
+  const row = db
+    .prepare(
+      `SELECT pr.*, e.branch_id AS expense_branch_id, e.category AS expense_category, e.reference AS expense_reference,
+              hr.user_id AS staff_user_id, u.display_name AS staff_display_name
+       FROM payment_requests pr
+       LEFT JOIN expenses e ON e.expense_id = pr.expense_id
+       LEFT JOIN hr_requests hr ON hr.id = e.reference
+       LEFT JOIN app_users u ON u.id = hr.user_id
+       WHERE pr.request_id = ?`
+    )
+    .get(rid);
+  if (!row) return null;
+  const b64 = row.attachment_data_b64;
+  const hasAttachment = Boolean(b64 && String(b64).length > 0);
+  return {
+    requestID: row.request_id,
+    expenseID: row.expense_id,
+    amountRequestedNgn: row.amount_requested_ngn,
+    requestDate: row.request_date,
+    approvalStatus: row.approval_status,
+    description: row.description,
+    approvedBy: row.approved_by ?? '',
+    approvedAtISO: row.approved_at_iso ?? '',
+    approvalNote: row.approval_note ?? '',
+    paidAmountNgn: row.paid_amount_ngn ?? 0,
+    paidAtISO: row.paid_at_iso ?? '',
+    paidBy: row.paid_by ?? '',
+    paymentNote: row.payment_note ?? '',
+    branchId: row.expense_branch_id ?? '',
+    expenseCategory: row.expense_category ?? '',
+    isStaffLoan: String(row.expense_category || '').toLowerCase().includes('staff loan'),
+    hrRequestId: row.expense_reference ?? '',
+    staffUserId: row.staff_user_id ?? '',
+    staffDisplayName: row.staff_display_name ?? '',
+    requestReference: row.request_reference ?? '',
+    lineItems: parsePaymentRequestLineItemsJson(row.line_items_json),
+    attachmentName: row.attachment_name ?? '',
+    attachmentMime: row.attachment_mime ?? '',
+    attachmentPresent: hasAttachment,
+  };
+}
+
+/** Full refund row for review/detail UIs. */
+export function getCustomerRefundDetail(db, refundId) {
+  const id = String(refundId || '').trim();
+  if (!id) return null;
+  return db.prepare(`SELECT * FROM customer_refunds WHERE refund_id = ?`).get(id) || null;
+}
+
 export function listAccountsPayable(db, branchScope = 'ALL') {
   const b = branchPredicate(db, 'purchase_orders', branchScope, 'po');
   return db
@@ -1288,11 +1415,16 @@ export function listCoilRequests(db) {
       status: row.status,
       createdAtISO: row.created_at_iso,
       acknowledgedAtISO: row.acknowledged_at_iso,
+      branchId: row.branch_id ?? '',
+      requestedByUserId: row.requested_by_user_id ?? '',
+      requestedByDisplay: row.requested_by_display ?? '',
       gauge: row.gauge,
       colour: row.colour,
       materialType: row.material_type,
       requestedKg: row.requested_kg,
       note: row.note,
+      workItemId: row.work_item_id ?? '',
+      materialRequestId: row.material_request_id ?? '',
     }));
 }
 
@@ -1473,6 +1605,350 @@ export function computeProductionMetricsRollup(db, branchScope = 'ALL') {
     totalActualMeters,
     completedActualMeters,
   };
+}
+
+const OPS_STALE_PLANNED_DAYS = 5;
+const OPS_STALE_RUNNING_DAYS = 4;
+const OPS_ATTENTION_SAMPLES = 10;
+
+function dayIsoFromTimestamp(raw) {
+  const t = String(raw || '').trim().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(t) ? t : '';
+}
+
+function ageUtcDaysFromDayIso(dayIso) {
+  if (!dayIso) return 0;
+  const t0 = Date.UTC(
+    Number(dayIso.slice(0, 4)),
+    Number(dayIso.slice(5, 7)) - 1,
+    Number(dayIso.slice(8, 10))
+  );
+  const now = new Date();
+  const t1 = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  return Math.max(0, Math.floor((t1 - t0) / 86400000));
+}
+
+function mapProductionAttentionSample(row, kind) {
+  const anchorRaw = kind === 'runningStale' ? row.start_date_iso : row.created_at_iso;
+  const day = dayIsoFromTimestamp(anchorRaw) || dayIsoFromTimestamp(row.created_at_iso);
+  return {
+    kind,
+    jobID: row.job_id,
+    cuttingListId: row.cutting_list_id ?? '',
+    customerName: row.customer_name ?? '',
+    quotationRef: row.quotation_ref ?? '',
+    status: row.status ?? '',
+    anchorDayISO: day,
+    ageDays: ageUtcDaysFromDayIso(day),
+  };
+}
+
+/** Empty payload when user cannot read production snapshot (matches bootstrap guard). */
+export function emptyOperationsInventoryAttention() {
+  return {
+    ok: true,
+    thresholds: { stalePlannedDays: OPS_STALE_PLANNED_DAYS, staleRunningDays: OPS_STALE_RUNNING_DAYS },
+    stuckProductionAttentionDistinctJobCount: 0,
+    stuckProduction: {
+      plannedWithoutCoils: { count: 0, samples: [] },
+      plannedStale: { count: 0, samples: [] },
+      runningStale: { count: 0, samples: [] },
+      managerReviewOpen: { count: 0, samples: [] },
+      coilSpecMismatchPending: { count: 0, samples: [] },
+    },
+    inventoryChain: {
+      wipProductsNonZero: 0,
+      completionAdjustmentsLast30d: 0,
+      deliveriesInProgress: { count: 0, samples: [] },
+    },
+    crossModule: {
+      partialPurchaseOrderCount: 0,
+      openInTransitLoadCount: 0,
+    },
+  };
+}
+
+/**
+ * Branch-scoped “hygiene” signals for production + inventory + procurement hand-offs.
+ * Intended for bootstrap (small JSON) and Operations attention UI — keep queries bounded.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {string | import('./branchScope.js').BranchScope} [branchScope]
+ */
+export function computeOperationsInventoryAttention(db, branchScope = 'ALL') {
+  const empty = () => emptyOperationsInventoryAttention();
+  try {
+    const b = branchWhere(db, 'production_jobs', branchScope);
+    const plannedMod = `-${OPS_STALE_PLANNED_DAYS} days`;
+    const runningMod = `-${OPS_STALE_RUNNING_DAYS} days`;
+
+    const plannedNoCoilCount =
+      Number(
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM production_jobs j
+             WHERE j.status = 'Planned'
+               AND NOT EXISTS (SELECT 1 FROM production_job_coils c WHERE c.job_id = j.job_id)
+               AND 1=1${b.sql}`
+          )
+          .get(...b.args)?.c
+      ) || 0;
+
+    const plannedNoCoilRows = db
+      .prepare(
+        `SELECT j.job_id, j.cutting_list_id, j.customer_name, j.quotation_ref, j.created_at_iso, j.start_date_iso, j.status
+           FROM production_jobs j
+          WHERE j.status = 'Planned'
+            AND NOT EXISTS (SELECT 1 FROM production_job_coils c WHERE c.job_id = j.job_id)
+            AND 1=1${b.sql}
+          ORDER BY datetime(COALESCE(j.created_at_iso, '')) ASC, j.job_id ASC
+          LIMIT ?`
+      )
+      .all(...b.args, OPS_ATTENTION_SAMPLES);
+
+    const plannedStaleCount =
+      Number(
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM production_jobs j
+             WHERE j.status = 'Planned'
+               AND date(j.created_at_iso) <= date('now', ?)
+               AND 1=1${b.sql}`
+          )
+          .get(plannedMod, ...b.args)?.c
+      ) || 0;
+
+    const plannedStaleRows = db
+      .prepare(
+        `SELECT j.job_id, j.cutting_list_id, j.customer_name, j.quotation_ref, j.created_at_iso, j.start_date_iso, j.status
+           FROM production_jobs j
+          WHERE j.status = 'Planned'
+            AND date(j.created_at_iso) <= date('now', ?)
+            AND 1=1${b.sql}
+          ORDER BY datetime(COALESCE(j.created_at_iso, '')) ASC, j.job_id ASC
+          LIMIT ?`
+      )
+      .all(plannedMod, ...b.args, OPS_ATTENTION_SAMPLES);
+
+    const runningStaleCount =
+      Number(
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM production_jobs j
+             WHERE j.status = 'Running'
+               AND TRIM(IFNULL(j.start_date_iso,'')) != ''
+               AND date(j.start_date_iso) <= date('now', ?)
+               AND 1=1${b.sql}`
+          )
+          .get(runningMod, ...b.args)?.c
+      ) || 0;
+
+    const runningStaleRows = db
+      .prepare(
+        `SELECT j.job_id, j.cutting_list_id, j.customer_name, j.quotation_ref, j.created_at_iso, j.start_date_iso, j.status
+           FROM production_jobs j
+          WHERE j.status = 'Running'
+            AND TRIM(IFNULL(j.start_date_iso,'')) != ''
+            AND date(j.start_date_iso) <= date('now', ?)
+            AND 1=1${b.sql}
+          ORDER BY datetime(COALESCE(j.start_date_iso, j.created_at_iso, '')) ASC, j.job_id ASC
+          LIMIT ?`
+      )
+      .all(runningMod, ...b.args, OPS_ATTENTION_SAMPLES);
+
+    const mgrOpenCount =
+      Number(
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM production_jobs j
+             WHERE j.status IN ('Planned','Running')
+               AND j.manager_review_required = 1
+               AND 1=1${b.sql}`
+          )
+          .get(...b.args)?.c
+      ) || 0;
+
+    const mgrOpenRows = db
+      .prepare(
+        `SELECT j.job_id, j.cutting_list_id, j.customer_name, j.quotation_ref, j.created_at_iso, j.start_date_iso, j.status
+           FROM production_jobs j
+          WHERE j.status IN ('Planned','Running')
+            AND j.manager_review_required = 1
+            AND 1=1${b.sql}
+          ORDER BY datetime(COALESCE(j.created_at_iso, '')) DESC, j.job_id DESC
+          LIMIT ?`
+      )
+      .all(...b.args, OPS_ATTENTION_SAMPLES);
+
+    const specMismatchCount =
+      Number(
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM production_jobs j
+             WHERE j.status IN ('Planned','Running')
+               AND j.coil_spec_mismatch_pending = 1
+               AND 1=1${b.sql}`
+          )
+          .get(...b.args)?.c
+      ) || 0;
+
+    const specMismatchRows = db
+      .prepare(
+        `SELECT j.job_id, j.cutting_list_id, j.customer_name, j.quotation_ref, j.created_at_iso, j.start_date_iso, j.status
+           FROM production_jobs j
+          WHERE j.status IN ('Planned','Running')
+            AND j.coil_spec_mismatch_pending = 1
+            AND 1=1${b.sql}
+          ORDER BY j.job_id DESC
+          LIMIT ?`
+      )
+      .all(...b.args, OPS_ATTENTION_SAMPLES);
+
+    const distinctStuck =
+      Number(
+        db
+          .prepare(
+            `SELECT COUNT(DISTINCT j.job_id) AS c FROM production_jobs j
+             WHERE j.status IN ('Planned','Running')
+               AND 1=1${b.sql}
+               AND (
+                 (j.status = 'Planned' AND NOT EXISTS (SELECT 1 FROM production_job_coils c WHERE c.job_id = j.job_id))
+                 OR (j.status = 'Planned' AND date(j.created_at_iso) <= date('now', ?))
+                 OR (j.status = 'Running' AND TRIM(IFNULL(j.start_date_iso,'')) != ''
+                     AND date(j.start_date_iso) <= date('now', ?))
+                 OR j.manager_review_required = 1
+                 OR j.coil_spec_mismatch_pending = 1
+               )`
+          )
+          .get(plannedMod, runningMod, ...b.args)?.c
+      ) || 0;
+
+    let wipProductsNonZero = 0;
+    if (hasColumn(db, 'wip_balances', 'branch_id')) {
+      const bw = branchWhere(db, 'wip_balances', branchScope);
+      wipProductsNonZero =
+        Number(
+          db
+            .prepare(
+              `SELECT COUNT(*) AS c FROM wip_balances WHERE ABS(COALESCE(qty,0)) > 0.0001 AND 1=1${bw.sql}`
+            )
+            .get(...bw.args)?.c
+        ) || 0;
+    }
+
+    let completionAdjustmentsLast30d = 0;
+    if (db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='production_completion_adjustments'`).get()) {
+      const ba = branchWhere(db, 'production_jobs', branchScope);
+      const branchSqlA = ba.sql ? ba.sql.replace(/\bbranch_id\b/g, 'j.branch_id') : '';
+      completionAdjustmentsLast30d =
+        Number(
+          db
+            .prepare(
+              `SELECT COUNT(*) AS c
+                 FROM production_completion_adjustments a
+                 INNER JOIN production_jobs j ON j.job_id = a.job_id
+                WHERE date(a.at_iso) >= date('now', '-30 day')
+                  AND 1=1${branchSqlA}`
+            )
+            .get(...ba.args)?.c
+        ) || 0;
+    }
+
+    const bd = branchWhere(db, 'deliveries', branchScope);
+    const deliveriesInProgressCount =
+      Number(
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM deliveries d
+              WHERE LOWER(TRIM(IFNULL(d.status,''))) NOT IN ('delivered','cancelled','void')
+                AND 1=1${bd.sql}`
+          )
+          .get(...bd.args)?.c
+      ) || 0;
+
+    const deliveriesInProgressRows = db
+      .prepare(
+        `SELECT d.id, d.cutting_list_id, d.customer_name, d.status, d.ship_date, d.eta
+           FROM deliveries d
+          WHERE LOWER(TRIM(IFNULL(d.status,''))) NOT IN ('delivered','cancelled','void')
+            AND 1=1${bd.sql}
+          ORDER BY datetime(COALESCE(d.ship_date, d.eta, '')) DESC, d.id DESC
+          LIMIT ?`
+      )
+      .all(...bd.args, OPS_ATTENTION_SAMPLES);
+
+    const bpo = branchWhere(db, 'purchase_orders', branchScope);
+    const partialPurchaseOrderCount =
+      Number(
+        db
+          .prepare(
+            `SELECT COUNT(DISTINCT po.po_id) AS c
+               FROM purchase_orders po
+               INNER JOIN purchase_order_lines l ON l.po_id = po.po_id
+              WHERE LOWER(TRIM(IFNULL(po.status,''))) NOT IN ('cancelled','void','draft','rejected')
+                AND (IFNULL(l.qty_received,0) + 0.001) < IFNULL(l.qty_ordered,0)
+                AND 1=1${bpo.sql}`
+          )
+          .get(...bpo.args)?.c
+      ) || 0;
+
+    const inLoads = listInTransitLoads(db, branchScope);
+    const openInTransitLoadCount = inLoads.filter((x) => {
+      const s = String(x.status || '').trim().toLowerCase();
+      if (!s) return true;
+      return !['received', 'closed', 'cancelled', 'complete', 'completed'].includes(s);
+    }).length;
+
+    return {
+      ok: true,
+      thresholds: { stalePlannedDays: OPS_STALE_PLANNED_DAYS, staleRunningDays: OPS_STALE_RUNNING_DAYS },
+      stuckProductionAttentionDistinctJobCount: distinctStuck,
+      stuckProduction: {
+        plannedWithoutCoils: {
+          count: plannedNoCoilCount,
+          samples: plannedNoCoilRows.map((r) => mapProductionAttentionSample(r, 'plannedWithoutCoils')),
+        },
+        plannedStale: {
+          count: plannedStaleCount,
+          samples: plannedStaleRows.map((r) => mapProductionAttentionSample(r, 'plannedStale')),
+        },
+        runningStale: {
+          count: runningStaleCount,
+          samples: runningStaleRows.map((r) => mapProductionAttentionSample(r, 'runningStale')),
+        },
+        managerReviewOpen: {
+          count: mgrOpenCount,
+          samples: mgrOpenRows.map((r) => mapProductionAttentionSample(r, 'managerReviewOpen')),
+        },
+        coilSpecMismatchPending: {
+          count: specMismatchCount,
+          samples: specMismatchRows.map((r) => mapProductionAttentionSample(r, 'coilSpecMismatch')),
+        },
+      },
+      inventoryChain: {
+        wipProductsNonZero,
+        completionAdjustmentsLast30d,
+        deliveriesInProgress: {
+          count: deliveriesInProgressCount,
+          samples: deliveriesInProgressRows.map((row) => ({
+            id: row.id,
+            cuttingListId: row.cutting_list_id ?? '',
+            customerName: row.customer_name ?? '',
+            status: row.status ?? '',
+            shipDate: row.ship_date ?? '',
+            eta: row.eta ?? '',
+          })),
+        },
+      },
+      crossModule: {
+        partialPurchaseOrderCount,
+        openInTransitLoadCount,
+      },
+    };
+  } catch (e) {
+    console.error('[zarewa] computeOperationsInventoryAttention', e);
+    return empty();
+  }
 }
 
 /**

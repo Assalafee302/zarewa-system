@@ -286,7 +286,7 @@ function SetupCollectionCard({
       </form>
 
       {tableLayout ? (
-        <div className="mt-3 overflow-x-auto rounded-xl border border-slate-200/90">
+        <div className="z-scroll-x mt-3 overflow-x-auto rounded-xl border border-slate-200/90">
           <table className="w-full min-w-[520px] text-left text-sm">
             <thead className="border-b border-slate-200 bg-slate-50/90 text-xs font-bold uppercase tracking-wide text-slate-600">
               <tr>

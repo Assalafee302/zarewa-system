@@ -6,7 +6,15 @@ import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
  * Full-viewport modal shell rendered via Radix Portal.
  * Handles accessible focus-trapping, escape-to-close, and Framer Motion layout transitions.
  */
-export function ModalFrame({ isOpen, onClose, children, title = 'Dialog', description }) {
+export function ModalFrame({
+  isOpen,
+  onClose,
+  children,
+  title = 'Dialog',
+  description,
+  /** When false, no overlay / scroll lock (e.g. while a body-portaled print preview is open). */
+  modal = true,
+}) {
   const reduceMotion = useReducedMotion();
   const overlayTransition = reduceMotion ? { duration: 0 } : { duration: 0.3 };
   const contentTransition = reduceMotion
@@ -14,7 +22,13 @@ export function ModalFrame({ isOpen, onClose, children, title = 'Dialog', descri
     : { type: 'spring', bounce: 0, duration: 0.45 };
 
   return (
-    <DialogPrimitive.Root open={isOpen} onOpenChange={(open) => { if (!open) onClose?.(); }}>
+    <DialogPrimitive.Root
+      modal={modal}
+      open={isOpen}
+      onOpenChange={(open) => {
+        if (!open) onClose?.();
+      }}
+    >
       <AnimatePresence>
         {isOpen && (
           <DialogPrimitive.Portal forceMount>
@@ -28,7 +42,7 @@ export function ModalFrame({ isOpen, onClose, children, title = 'Dialog', descri
               />
             </DialogPrimitive.Overlay>
             <DialogPrimitive.Content asChild>
-              <div className="fixed inset-0 z-[1060] flex items-start justify-center sm:items-center px-4 py-10 sm:px-6 sm:py-12 overflow-y-auto overscroll-contain outline-none">
+              <div className="fixed inset-0 z-[1060] flex items-start justify-center overflow-y-auto overscroll-y-contain px-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pb-8 pt-[max(1.25rem,env(safe-area-inset-top))] outline-none sm:items-center sm:px-6 sm:py-12">
                 <DialogPrimitive.Title className="sr-only">{title}</DialogPrimitive.Title>
                 <DialogPrimitive.Description className="sr-only">
                   {description ?? 'Modal dialog content.'}
@@ -38,7 +52,7 @@ export function ModalFrame({ isOpen, onClose, children, title = 'Dialog', descri
                   animate={{ opacity: 1, scale: 1, y: 0 }}
                   exit={reduceMotion ? undefined : { opacity: 0, scale: 0.96, y: 10 }}
                   transition={contentTransition}
-                  className="relative z-10 w-full max-w-[min(100%,1200px)] flex justify-center items-start min-h-0 outline-none rounded-[32px] shadow-[0_28px_80px_-36px_rgba(15,23,42,0.45)]"
+                  className="relative z-10 flex min-h-0 w-full max-w-[min(1200px,calc(100dvw-1.5rem))] items-start justify-center rounded-2xl shadow-[0_28px_80px_-36px_rgba(15,23,42,0.45)] outline-none sm:rounded-[32px]"
                 >
                   {children}
                 </motion.div>

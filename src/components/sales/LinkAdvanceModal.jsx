@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { X } from 'lucide-react';
 import { ModalFrame } from '../layout/ModalFrame';
 import { useToast } from '../../context/ToastContext';
+import { useWorkspace } from '../../context/WorkspaceContext';
+import { guidanceForLedgerPostFailure, isVoucherDateInLockedPeriod } from '../../lib/ledgerPostingGuidance';
 import { amountDueOnQuotation, recordAdvanceAppliedToQuotation } from '../../lib/customerLedgerStore';
 import { formatNgn } from '../../Data/mockData';
 import { apiFetch } from '../../lib/apiBase';
@@ -19,13 +22,28 @@ export default function LinkAdvanceModal({
   useLedgerApi = false,
 }) {
   const { show: showToast } = useToast();
+  const ws = useWorkspace();
   const [quotationRef, setQuotationRef] = useState('');
   const [amount, setAmount] = useState('');
+  const [postingHint, setPostingHint] = useState(null);
+
+  const applyDateISO = useMemo(() => {
+    const raw = advanceEntry?.atISO || advanceEntry?.at_iso;
+    if (raw && typeof raw === 'string') return raw.slice(0, 10);
+    return new Date().toISOString().slice(0, 10);
+  }, [advanceEntry?.atISO, advanceEntry?.at_iso]);
+
+  const periodLocks = ws?.snapshot?.periodLocks ?? [];
+  const dateLocked = useMemo(
+    () => Boolean(useLedgerApi && isVoucherDateInLockedPeriod(applyDateISO, periodLocks)),
+    [useLedgerApi, applyDateISO, periodLocks]
+  );
 
    
   useEffect(() => {
     if (!isOpen || !advanceEntry) return;
     setQuotationRef('');
+    setPostingHint(null);
     setAmount(
       advanceEntry.amountNgn != null ? String(Math.min(Number(advanceEntry.amountNgn) || 0, 999999999)) : ''
     );
@@ -77,12 +95,15 @@ export default function LinkAdvanceModal({
           customerName: advanceEntry.customerName ?? '',
           quotationRef,
           amountNgn: n,
+          dateISO: applyDateISO,
         }),
       });
       if (!ok || !data?.ok) {
+        setPostingHint(guidanceForLedgerPostFailure(data) || null);
         showToast(data?.error || 'Could not apply advance.', { variant: 'error' });
         return;
       }
+      setPostingHint(null);
     } else {
       const res = recordAdvanceAppliedToQuotation({
         customerID: advanceEntry.customerID,
@@ -126,6 +147,30 @@ export default function LinkAdvanceModal({
             <X size={20} />
           </button>
         </div>
+        {useLedgerApi && dateLocked ? (
+          <div className="px-5 py-2 bg-amber-50 border-b border-amber-200 text-[10px] text-amber-950">
+            <p className="font-bold">Ledger date is in a locked period</p>
+            <p className="mt-0.5 leading-snug">Applying advance uses the advance line date ({applyDateISO}). Change period lock or use a different advance line.</p>
+            <Link to="/settings/governance" className="mt-1 inline-block font-semibold text-amber-900 underline underline-offset-2">
+              Period controls
+            </Link>
+          </div>
+        ) : null}
+        {postingHint ? (
+          <div className="px-5 py-2.5 bg-rose-50 border-b border-rose-200 text-[10px] text-rose-950 space-y-1">
+            <p className="font-bold">{postingHint.title}</p>
+            <p className="leading-snug">{postingHint.detail}</p>
+            {postingHint.links?.length ? (
+              <div className="flex flex-wrap gap-x-2">
+                {postingHint.links.map((l) => (
+                  <Link key={l.to} to={l.to} className="font-semibold underline underline-offset-2">
+                    {l.label}
+                  </Link>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         <div className="p-5 space-y-4">
           <div>
             <label className="text-[9px] font-semibold text-slate-400 uppercase mb-1 block">Quotation</label>

@@ -154,6 +154,56 @@ describe('Inventory scenarios (simulated flows)', () => {
     openDbs.length = 0;
   });
 
+  it('S1b — GRN qty may exceed open balance on line (over-delivery)', async () => {
+    const app = makeApp();
+    const agent = request.agent(app);
+    await loginAs(agent);
+    const sup = await agent.post('/api/suppliers').send({ name: 'Over-deliver Supplier', city: 'Jos' });
+    expect(sup.status).toBe(201);
+    const po = await agent.post('/api/purchase-orders').send({
+      supplierID: sup.body.supplierID,
+      supplierName: 'Over-deliver Supplier',
+      orderDateISO: '2026-04-01',
+      expectedDeliveryISO: '',
+      status: 'Approved',
+      lines: [
+        {
+          lineKey: 'L-OVER',
+          productID: 'COIL-ALU',
+          productName: 'Aluminium coil (kg)',
+          color: 'TB',
+          gauge: '0.22',
+          metersOffered: null,
+          conversionKgPerM: null,
+          qtyOrdered: 1000,
+          unitPricePerKgNgn: 100,
+          unitPriceNgn: 100,
+          qtyReceived: 0,
+        },
+      ],
+    });
+    expect(po.status).toBe(201);
+    const grn = await agent.post(`/api/purchase-orders/${encodeURIComponent(po.body.poID)}/grn`).send({
+      entries: [
+        {
+          lineKey: 'L-OVER',
+          productID: 'COIL-ALU',
+          qtyReceived: 1500,
+          coilNo: 'CL-INV-OVER',
+          location: 'Bay',
+        },
+      ],
+      supplierID: sup.body.supplierID,
+      supplierName: 'Over-deliver Supplier',
+    });
+    expect(grn.status).toBe(200);
+    expect(grn.body.ok).toBe(true);
+    const boot = await agent.get('/api/bootstrap');
+    const poRow = boot.body.purchaseOrders.find((p) => p.poID === po.body.poID);
+    const line = poRow?.lines?.find((l) => l.lineKey === 'L-OVER');
+    expect(Number(line?.qtyReceived)).toBe(1500);
+  });
+
   it('S1 — GRN: coil remaining and COIL-ALU stock increase together', async () => {
     const app = makeApp();
     const agent = request.agent(app);
@@ -390,6 +440,37 @@ describe('Inventory scenarios (simulated flows)', () => {
     expect(b1.body.products.find((p) => p.productID === 'COIL-ALU').stockLevel).toBeCloseTo(raw0 - 100, 2);
     expect(b1.body.products.find((p) => p.productID === 'FG-101').stockLevel).toBeCloseTo(fg0 + 40, 2);
     expect(b1.body.wipByProduct['COIL-ALU'] ?? 0).toBeCloseTo((b0.body.wipByProduct['COIL-ALU'] || 0) + 20, 2);
+  });
+
+  it('S7b — Manual coil finish: closes lot and reconciles COIL-ALU (metre qty must not inflate kg stock)', async () => {
+    const app = makeApp();
+    const agent = request.agent(app);
+    await loginAs(agent);
+    await seedOneCoil(agent, 'CL-INV-S7B', 72);
+    const b0 = await agent.get('/api/bootstrap');
+    const sum0 = sumCoilKgRemainingForProduct(b0.body, 'COIL-ALU');
+
+    const fg = await agent.post('/api/inventory/finished-goods').send({
+      productID: 'COIL-ALU',
+      qty: 500,
+      unitPriceNgn: 0,
+      productionOrderId: 'CL-INV-S7B',
+      dateISO: '2026-04-01',
+      extras: { markSourceCoilFinished: true, sourceCoilNo: 'CL-INV-S7B', spoolKg: 40 },
+    });
+    expect(fg.status).toBe(200);
+    expect(fg.body.ok).toBe(true);
+
+    const b1 = await agent.get('/api/bootstrap');
+    const coil = b1.body.coilLots.find((c) => c.coilNo === 'CL-INV-S7B');
+    expect(coil.qtyRemaining).toBeCloseTo(0, 3);
+    const sum1 = sumCoilKgRemainingForProduct(b1.body, 'COIL-ALU');
+    expect(sum1).toBeCloseTo(sum0 - 72, 2);
+    /** `products` may list the same SKU once per branch; roll-up stock should match coil sum. */
+    const coAluStocks = b1.body.products
+      .filter((p) => p.productID === 'COIL-ALU')
+      .map((p) => Number(p.stockLevel) || 0);
+    expect(Math.max(...coAluStocks, 0)).toBeCloseTo(sum1, 2);
   });
 
   it('S8 — Stone PO + GRN: procurement_kind stone, stock metres up, movements list GRN', async () => {

@@ -66,6 +66,8 @@ const RUN_KEY = String(RUN_KEY_RAW).replace(/[^A-Za-z0-9_-]/g, '');
 const RUN_PHONE_SUFFIX = String(hashToInt(RUN_KEY) % 100000).padStart(5, '0');
 
 const SUPPLIER_KG_PER_M_REF = 3000 / 1327;
+/** Must match `COIL_TAIL_FINISH_MAX_KG` in `server/productionTraceability.js` (tail / spool acknowledgement). */
+const COIL_TAIL_FINISH_MAX_KG = 85;
 
 function statsFromTimes(ms) {
   if (!ms.length) return { n: 0 };
@@ -184,6 +186,7 @@ function normalCompletionRows(allocRows, totalMeters, mode) {
       coilNo: a.coilNo,
       closingWeightKg: closing,
       metersProduced: metersEach,
+      ...(closing < COIL_TAIL_FINISH_MAX_KG ? { finishCoil: true } : {}),
     };
   });
 }
@@ -203,7 +206,13 @@ function stressCompletionRows(allocRows, plannedMeters, coilMode, conversionStre
       const idealKg = kgM * meters;
       const consumed = Math.min(open * 0.97, Math.max(idealKg * 1.35, open * 0.25));
       const closing = Math.max(0, open - consumed);
-      return { allocationId: a.id, coilNo: a.coilNo, closingWeightKg: closing, metersProduced: meters };
+      return {
+        allocationId: a.id,
+        coilNo: a.coilNo,
+        closingWeightKg: closing,
+        metersProduced: meters,
+        ...(closing < COIL_TAIL_FINISH_MAX_KG ? { finishCoil: true } : {}),
+      };
     });
   }
   return allocRows.map((a) => {
@@ -211,7 +220,13 @@ function stressCompletionRows(allocRows, plannedMeters, coilMode, conversionStre
     const meters = Math.max(metersShare * 2.4, 50);
     const consumed = Math.min(open * 0.2, Math.max(kgM * meters * 0.35, 25));
     const closing = Math.max(0, open - consumed);
-    return { allocationId: a.id, coilNo: a.coilNo, closingWeightKg: closing, metersProduced: meters };
+    return {
+      allocationId: a.id,
+      coilNo: a.coilNo,
+      closingWeightKg: closing,
+      metersProduced: meters,
+      ...(closing < COIL_TAIL_FINISH_MAX_KG ? { finishCoil: true } : {}),
+    };
   });
 }
 
@@ -883,28 +898,6 @@ async function runScenario(session, scenario) {
       });
       if (!sign.ok) {
         throw new Error(`manager-review-signoff: ${sign.status} ${JSON.stringify(sign.data)}`);
-      }
-    }
-
-    // Deliveries: ship & confirm after production completion (some scenarios only).
-    if (n % 2 === 0) {
-      const del = await api('/api/deliveries', {
-        method: 'POST',
-        session,
-        body: {
-          cuttingListId: ids.cuttingListId,
-          destination: `${scenario.city} site — ${slug}`,
-          method: n % 4 === 0 ? 'Company truck' : '3rd party',
-          shipDate: scenario.dateISO,
-          eta: scenario.dateISO,
-        },
-      });
-      if (del.ok && del.data?.id) {
-        await api(`/api/deliveries/${encodeURIComponent(del.data.id)}/confirm`, {
-          method: 'PATCH',
-          session,
-          body: { status: 'Delivered', deliveredDateISO: scenario.dateISO, customerSignedPod: true },
-        });
       }
     }
 

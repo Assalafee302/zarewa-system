@@ -142,8 +142,8 @@ export function PriceListPanel({ embedded = false }) {
     ? 'space-y-3 rounded-xl border border-slate-200/80 bg-white/90 p-3'
     : 'mb-8 space-y-4 rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm';
   const tableWrap = embedded
-    ? 'overflow-x-auto rounded-xl border border-slate-200/80 bg-white/90 shadow-sm'
-    : 'overflow-x-auto rounded-2xl border border-slate-200/90 bg-white shadow-sm';
+    ? 'z-scroll-x max-w-full overflow-x-auto rounded-xl border border-slate-200/80 bg-white/90 shadow-sm'
+    : 'z-scroll-x max-w-full overflow-x-auto rounded-2xl border border-slate-200/90 bg-white shadow-sm';
 
   const exportCsv = async () => {
     try {

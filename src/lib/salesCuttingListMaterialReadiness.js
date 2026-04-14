@@ -2,7 +2,8 @@ import {
   buildExpectedCoilSpecFromQuotation,
   coilSpecMismatchIssues,
   expectedGaugeBoundsMm,
-} from './coilSpecVersusProduct';
+  quotationExpectsCoilAllocation,
+} from './coilSpecVersusProduct.js';
 
 function skipMaterialCompareToCoil(expectedMaterialType) {
   const m = String(expectedMaterialType ?? '').toLowerCase();
@@ -59,25 +60,54 @@ export function quotationHasComparableCoilSpec(quotation) {
   return gBounds != null || cExp.length > 0 || mExp.length > 0;
 }
 
+const EM_DASH = '—';
+
+/**
+ * One-line explanation for Sales sidebar when a waiting list has quote spec but no matching coil.
+ * @param {Record<string, unknown>} cl
+ * @param {Record<string, unknown>} quotation
+ */
+export function formatNoCoilMatchAlertForCuttingList(cl, quotation) {
+  const exp = buildExpectedCoilSpecFromQuotation(quotation, null);
+  const colour = String(exp.colour || '').trim() || EM_DASH;
+  const gauge = String(exp.gauge || '').trim() || EM_DASH;
+  const mat =
+    String(
+      quotation?.materialTypeName ?? quotation?.material_type_name ?? exp.materialType ?? ''
+    ).trim() || EM_DASH;
+  const id = String(cl?.id || 'Cutting list').trim();
+  return `${id} does not have a coil match for colour ${colour}, gauge ${gauge}, material ${mat}.`;
+}
+
 /**
  * @param {object[]} cuttingLists
  * @param {object[]} quotations
  * @param {object[]} coilInventoryRows — from Sales.jsx coilInventoryRows
- * @returns {{ ready: Array<{ cl: object, quotation: object, matches: object[], totalKg: number, totalEstM: number, needM: number, meterCoverageOk: boolean }>, waitingWithSpecNoStock: number }}
+ * @returns {{
+ *   ready: Array<{ cl: object, quotation: object, matches: object[], totalKg: number, totalEstM: number, needM: number, meterCoverageOk: boolean }>,
+ *   waitingWithSpecNoStock: number,
+ *   waitingNoMatch: Array<{ cl: object, quotation: object, alertText: string }>,
+ * }}
  */
 export function computeCuttingListMaterialReadiness(cuttingLists, quotations, coilInventoryRows) {
   const byQ = new Map(quotations.map((q) => [String(q.id), q]));
   const ready = [];
-  let waitingWithSpecNoStock = 0;
+  const waitingNoMatch = [];
 
   for (const cl of cuttingLists || []) {
     if (!isWaitingCuttingListForMaterial(cl)) continue;
     const q = byQ.get(String(cl.quotationRef || '').trim());
-    if (!q || !quotationHasComparableCoilSpec(q)) continue;
+    if (!q) continue;
+    if (!quotationExpectsCoilAllocation(q)) continue;
+    if (!quotationHasComparableCoilSpec(q)) continue;
 
     const matches = (coilInventoryRows || []).filter((r) => inventoryRowMatchesQuotationCoilSpec(r, q));
     if (matches.length === 0) {
-      waitingWithSpecNoStock += 1;
+      waitingNoMatch.push({
+        cl,
+        quotation: q,
+        alertText: formatNoCoilMatchAlertForCuttingList(cl, q),
+      });
       continue;
     }
 
@@ -94,5 +124,13 @@ export function computeCuttingListMaterialReadiness(cuttingLists, quotations, co
     return b.totalEstM - a.totalEstM;
   });
 
-  return { ready, waitingWithSpecNoStock };
+  waitingNoMatch.sort((a, b) =>
+    String(a.cl?.id || '').localeCompare(String(b.cl?.id || ''), undefined, { numeric: true })
+  );
+
+  return {
+    ready,
+    waitingWithSpecNoStock: waitingNoMatch.length,
+    waitingNoMatch,
+  };
 }

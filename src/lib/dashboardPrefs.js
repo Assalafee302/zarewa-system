@@ -1,4 +1,4 @@
-import { apiFetch } from './apiBase';
+import { apiFetch } from './apiBase.js';
 
 /** Per-calendar-month baselines for Manager dashboard progress bars (scaled when period is multi-month). */
 export const DEFAULT_MANAGER_TARGETS_PER_MONTH = {

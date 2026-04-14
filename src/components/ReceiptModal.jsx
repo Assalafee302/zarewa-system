@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { Link } from 'react-router-dom';
 import {
   X,
   Trash2,
@@ -20,10 +21,9 @@ import {
 import { quotationReceiptPrintHistory } from '../lib/salesReceiptsList';
 import { formatNgn } from '../Data/mockData';
 import { apiFetch } from '../lib/apiBase';
+import { guidanceForLedgerPostFailure, isVoucherDateInLockedPeriod } from '../lib/ledgerPostingGuidance';
 import { treasuryAccountsFromSnapshot } from '../lib/treasuryAccountsStore';
 import { ReceiptPrintQuick, ReceiptPrintFull } from './receipt/ReceiptPrintViews';
-import QuotationPrintView, { normalizeQuotationLinesForPrint } from './QuotationPrintView';
-import { ZAREWA_COMPANY_ACCOUNT_NAME } from '../Data/companyQuotation';
 
 function newLineId() {
   return `pl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -81,6 +81,13 @@ const ReceiptModal = ({
 
   const [qSearch, setQSearch] = useState('');
   const [showQSearch, setShowQSearch] = useState(false);
+  const [postingHint, setPostingHint] = useState(null);
+
+  const periodLocks = ws?.snapshot?.periodLocks ?? [];
+  const voucherInLockedPeriod = useMemo(
+    () => Boolean(useLedgerApi && isVoucherDateInLockedPeriod(voucherDate, periodLocks)),
+    [useLedgerApi, voucherDate, periodLocks]
+  );
 
    
   useEffect(() => {
@@ -105,29 +112,86 @@ const ReceiptModal = ({
     setQSearch(initialQuotationRef);
     setShowPrint(false);
     setShowQSearch(false);
+    setPostingHint(null);
+
+    const sourceIds = new Set(
+      [editData?.id, editData?.ledgerEntryId, le?.id]
+        .map((v) => String(v || '').trim())
+        .filter(Boolean)
+    );
+    const treasuryMovements = Array.isArray(ws?.snapshot?.treasuryMovements) ? ws.snapshot.treasuryMovements : [];
+    const fromTreasury = treasuryMovements
+      .filter(
+        (mv) =>
+          String(mv?.sourceKind || '').trim() === 'LEDGER_RECEIPT' &&
+          sourceIds.has(String(mv?.sourceId || '').trim()) &&
+          Number(mv?.amountNgn) > 0
+      )
+      .sort((a, b) => String(a?.id || '').localeCompare(String(b?.id || '')))
+      .map((mv) => ({
+        id: newLineId(),
+        payeeName: String(mv?.counterpartyName || editData?.customer || le?.customerName || 'Payer').trim() || 'Payer',
+        treasuryAccountId: Number(mv?.treasuryAccountId) || defaultAccountId,
+        lineDate: String(mv?.postedAtISO || vd).slice(0, 10) || vd,
+        amount: String(Math.round(Number(mv?.amountNgn) || 0)),
+      }));
+
+    const fromPayload = Array.isArray(editData?.paymentLines)
+      ? editData.paymentLines
+          .map((line) => ({
+            id: newLineId(),
+            payeeName: String(editData?.customer || le?.customerName || 'Payer').trim() || 'Payer',
+            treasuryAccountId: Number(line?.treasuryAccountId) || defaultAccountId,
+            lineDate: vd,
+            amount: String(Math.round(Number(line?.amountNgn) || 0)),
+          }))
+          .filter((line) => parseNum(line.amount) > 0)
+      : [];
+    const fromLedgerPayload = Array.isArray(le?.paymentLines)
+      ? le.paymentLines
+          .map((line) => ({
+            id: newLineId(),
+            payeeName: String(le?.customerName || editData?.customer || 'Payer').trim() || 'Payer',
+            treasuryAccountId: Number(line?.treasuryAccountId) || defaultAccountId,
+            lineDate: vd,
+            amount: String(Math.round(Number(line?.amountNgn) || 0)),
+          }))
+          .filter((line) => parseNum(line.amount) > 0)
+      : [];
+
+    const hydratedLines =
+      fromTreasury.length > 0 ? fromTreasury : fromPayload.length > 0 ? fromPayload : fromLedgerPayload;
 
     if (isRc) {
       const showAmt =
         editData.cashReceivedNgn != null ? editData.cashReceivedNgn : editData.amountNgn;
-      setPaymentLines([
-        {
-          id: newLineId(),
-          payeeName: editData.handledBy ?? '',
-          treasuryAccountId: defaultAccountId,
-          lineDate: vd,
-          amount: showAmt != null ? String(showAmt) : '',
-        },
-      ]);
+      setPaymentLines(
+        hydratedLines.length > 0
+          ? hydratedLines
+          : [
+              {
+                id: newLineId(),
+                payeeName: editData.handledBy ?? '',
+                treasuryAccountId: defaultAccountId,
+                lineDate: vd,
+                amount: showAmt != null ? String(showAmt) : '',
+              },
+            ]
+      );
     } else if (isLedgerRow) {
-      setPaymentLines([
-        {
-          id: newLineId(),
-          payeeName: (le.customerName || editData.customer || '').trim() || 'Payer',
-          treasuryAccountId: defaultAccountId,
-          lineDate: vd,
-          amount: le.amountNgn != null ? String(le.amountNgn) : '',
-        },
-      ]);
+      setPaymentLines(
+        hydratedLines.length > 0
+          ? hydratedLines
+          : [
+              {
+                id: newLineId(),
+                payeeName: (le.customerName || editData.customer || '').trim() || 'Payer',
+                treasuryAccountId: defaultAccountId,
+                lineDate: vd,
+                amount: le.amountNgn != null ? String(le.amountNgn) : '',
+              },
+            ]
+      );
     } else {
       setPaymentLines([emptyPaymentLine(vd, defaultAccountId)]);
     }
@@ -143,6 +207,7 @@ const ReceiptModal = ({
     editData?.customer,
     editData?._ledgerEntry,
     defaultAccountId,
+    ws?.snapshot?.treasuryMovements,
     ledgerNonce,
   ]);
    
@@ -152,16 +217,21 @@ const ReceiptModal = ({
     [quotations, quotationRef]
   );
 
+  const selectableQuotations = useMemo(
+    () => quotations.filter((qt) => (Number(amountDueOnQuotation(qt)) || 0) > 0.0001),
+    [quotations]
+  );
+
   const filteredQSearch = useMemo(() => {
-    if (!qSearch.trim()) return quotations.slice(0, 10);
+    if (!qSearch.trim()) return selectableQuotations.slice(0, 10);
     const s = qSearch.toLowerCase();
-    return quotations.filter(
+    return selectableQuotations.filter(
       (qt) =>
-        qt.id.toLowerCase().includes(s) ||
-        qt.customer.toLowerCase().includes(s) ||
-        (qt.customerID || '').toLowerCase().includes(s)
+        String(qt.id || '').toLowerCase().includes(s) ||
+        String(qt.customer || '').toLowerCase().includes(s) ||
+        String(qt.customerID || '').toLowerCase().includes(s)
     ).slice(0, 15);
-  }, [quotations, qSearch]);
+  }, [selectableQuotations, qSearch]);
 
   const customerID = selectedQuotation?.customerID ?? '';
   const customerName = useMemo(() => {
@@ -188,19 +258,6 @@ const ReceiptModal = ({
     if (dueNgn == null) return null;
     return Math.max(0, dueNgn - lineTotalNgn);
   }, [dueNgn, lineTotalNgn]);
-
-  /** Linked quotation context for UI + print — no amounts (B&W / privacy friendly on receipt). */
-  const quotationContextText = useMemo(() => {
-    if (!selectedQuotation) return '';
-    const parts = [
-      `Quotation: ${selectedQuotation.id}`,
-      `Customer: ${selectedQuotation.customer}`,
-      selectedQuotation.projectName ? `Project: ${selectedQuotation.projectName}` : null,
-      `Approval: ${selectedQuotation.status ?? '—'}`,
-      `Payment status: ${selectedQuotation.paymentStatus ?? '—'}`,
-    ];
-    return parts.filter(Boolean).join(' · ');
-  }, [selectedQuotation]);
 
   const treasuryById = useMemo(() => {
     const m = new Map();
@@ -289,9 +346,11 @@ const ReceiptModal = ({
         }),
       });
       if (!ok || !data?.ok) {
+        setPostingHint(guidanceForLedgerPostFailure(data) || null);
         showToast(data?.error || 'Could not post receipt.', { variant: 'error' });
         return;
       }
+      setPostingHint(null);
       showToast(`Receipt ${formatNgn(total)} posted against ${selectedQuotation.id}.`);
     } else {
       const res = recordReceiptWithQuotation({
@@ -331,30 +390,12 @@ const ReceiptModal = ({
 
   const receiptIdPreview = isEdit ? editData.id : `RC-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-NEW`;
 
-  const payAccountForOfficial = useMemo(() => {
-    const acc = treasuryList.find((a) => a.accNo && String(a.accNo).trim() && a.accNo !== 'N/A');
-    if (!acc) return null;
-    return {
-      bankName: acc.bankName?.trim() || acc.name,
-      accNo: acc.accNo,
-      accountName: ZAREWA_COMPANY_ACCOUNT_NAME,
-    };
-  }, [treasuryList]);
-
-  const officialReceiptLines = useMemo(
-    () => normalizeQuotationLinesForPrint(selectedQuotation?.quotationLines),
-    [selectedQuotation?.quotationLines]
-  );
-
-  const receiptPaidPreviewNgn = displayPaid + lineTotalNgn;
-  const receiptBalancePreviewNgn = Math.max(0, displayTotal - receiptPaidPreviewNgn);
-
   const openPrint = (kind) => {
     if (!quotationRef) {
       showToast('Select a quotation before printing.', { variant: 'error' });
       return;
     }
-    if (kind !== 'official' && lineTotalNgn <= 0) {
+    if (lineTotalNgn <= 0) {
       showToast('Enter payment amounts to print.', { variant: 'error' });
       return;
     }
@@ -370,12 +411,12 @@ const ReceiptModal = ({
     setPaymentLines((prev) => (prev.length <= 1 ? prev : prev.filter((r) => r.id !== id)));
 
   return (
-    <ModalFrame isOpen={isOpen} onClose={onClose}>
+    <ModalFrame isOpen={isOpen} onClose={onClose} modal={!showPrint}>
       <>
       <form
         key={`${editData?.id ?? 'new'}-${ledgerNonce}`}
         onSubmit={saveReceipt}
-        className="z-modal-panel max-w-[min(100%,44rem)] w-full max-h-[min(92vh,820px)] flex flex-col"
+        className="z-modal-panel max-w-[min(100%,56rem)] w-full max-h-[min(92vh,820px)] flex flex-col"
       >
         <div className="px-5 py-4 border-b border-slate-200 flex justify-between items-center bg-white shrink-0 gap-3">
           <div className="flex items-center gap-3 min-w-0">
@@ -417,6 +458,42 @@ const ReceiptModal = ({
           </div>
         ) : null}
 
+        {!readOnly && useLedgerApi && voucherInLockedPeriod ? (
+          <div className="px-5 py-2.5 bg-amber-50 border-b border-amber-200 text-[10px] text-amber-950 space-y-1">
+            <p className="font-bold">Voucher month is locked for posting</p>
+            <p className="leading-snug">
+              The receipt date falls in a closed accounting period. Change the voucher date to an open month, or ask finance to unlock the
+              period before posting.
+            </p>
+            <Link to="/settings/governance" className="inline-flex font-semibold text-amber-900 underline underline-offset-2">
+              Open period controls
+            </Link>
+          </div>
+        ) : null}
+
+        {!readOnly && postingHint ? (
+          <div className="px-5 py-3 bg-rose-50/90 border-b border-rose-200 text-[10px] text-rose-950 space-y-2">
+            <p className="text-[11px] font-bold">{postingHint.title}</p>
+            <p className="leading-snug opacity-95">{postingHint.detail}</p>
+            {postingHint.steps?.length ? (
+              <ol className="list-decimal pl-4 space-y-1">
+                {postingHint.steps.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ol>
+            ) : null}
+            {postingHint.links?.length ? (
+              <div className="flex flex-wrap gap-x-3 gap-y-1">
+                {postingHint.links.map((l) => (
+                  <Link key={l.to} to={l.to} className="font-semibold text-rose-900 underline underline-offset-2">
+                    {l.label}
+                  </Link>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="flex-1 overflow-hidden flex flex-col md:flex-row bg-white min-h-0">
           <div
             className={`flex-1 overflow-y-auto p-5 custom-scrollbar border-r border-slate-100 ${readOnly ? 'pointer-events-none opacity-75' : ''}`}
@@ -435,7 +512,7 @@ const ReceiptModal = ({
                     className={`${field} cursor-pointer`}
                   />
                 </div>
-                <div className="relative sm:col-span-2">
+                <div className="relative">
                   <label className={label}>Link quotation (search ID, customer, etc.)</label>
                   <div className="relative">
                     <input
@@ -467,7 +544,7 @@ const ReceiptModal = ({
                     <div className="absolute z-10 left-0 right-0 mt-1 max-h-[220px] overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-xl custom-scrollbar p-1">
                       {filteredQSearch.length === 0 ? (
                         <div className="p-3 text-center text-[10px] font-semibold text-slate-400 uppercase">
-                          No quotations found
+                          No unpaid quotations found
                         </div>
                       ) : (
                         filteredQSearch.map((qt) => (
@@ -504,9 +581,38 @@ const ReceiptModal = ({
                   )}
                 </div>
                 {selectedQuotation ? (
-                  <div className="sm:col-span-2 rounded-lg border border-emerald-100 bg-emerald-50/40 p-3 text-[10px] text-slate-700 leading-relaxed">
+                  <div className="sm:col-span-2 rounded-lg border border-emerald-100 bg-emerald-50/40 p-3 text-[10px] text-slate-700">
                     <p className="text-[8px] font-bold uppercase text-emerald-800 mb-1">Linked quotation</p>
-                    <p>{quotationContextText}</p>
+                    <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                      <p className="min-w-0">
+                        <span className="font-semibold text-emerald-900">Quotation:</span>{' '}
+                        <span className="font-bold text-[#134e4a]">{selectedQuotation.id ?? '—'}</span>
+                      </p>
+                      <p className="min-w-0">
+                        <span className="font-semibold text-emerald-900">Approval:</span>{' '}
+                        <span className="font-medium">{selectedQuotation.status ?? '—'}</span>
+                      </p>
+                      <p className="sm:col-span-2 min-w-0 truncate">
+                        <span className="font-semibold text-emerald-900">Customer:</span>{' '}
+                        <span className="font-medium">{selectedQuotation.customer ?? '—'}</span>
+                      </p>
+                      <p className="min-w-0 truncate">
+                        <span className="font-semibold text-emerald-900">Project:</span>{' '}
+                        <span className="font-medium">{selectedQuotation.projectName?.trim() || '—'}</span>
+                      </p>
+                      <p className="min-w-0">
+                        <span className="font-semibold text-emerald-900">Payment:</span>{' '}
+                        <span className="font-medium">{selectedQuotation.paymentStatus ?? '—'}</span>
+                      </p>
+                      <p className="min-w-0">
+                        <span className="font-semibold text-emerald-900">Gauge:</span>{' '}
+                        <span className="font-medium">{selectedQuotation.materialGauge?.trim() || '—'}</span>
+                      </p>
+                      <p className="min-w-0 truncate">
+                        <span className="font-semibold text-emerald-900">Color:</span>{' '}
+                        <span className="font-medium">{selectedQuotation.materialColor?.trim() || '—'}</span>
+                      </p>
+                    </div>
                   </div>
                 ) : null}
                 <div className="sm:col-span-2">
@@ -533,33 +639,33 @@ const ReceiptModal = ({
                 No treasury accounts on file. Add accounts under Finance so receipts can post to bank or cash.
               </p>
             ) : null}
-            <div className="rounded-xl border border-slate-200/90 bg-slate-50/80 p-3 space-y-2">
-              <div className="grid grid-cols-12 gap-2 px-1 text-[8px] font-semibold text-slate-400 uppercase tracking-wider">
+            <div className="rounded-xl border border-slate-200/90 bg-slate-50/80 p-3.5 space-y-2.5">
+              <div className="grid grid-cols-12 gap-2.5 px-1 text-[9px] font-semibold text-slate-500 uppercase tracking-wider">
                 <div className="col-span-12 sm:col-span-3">Payee name</div>
-                <div className="col-span-6 sm:col-span-3">Account</div>
+                <div className="col-span-6 sm:col-span-2">Account</div>
                 <div className="col-span-4 sm:col-span-2">Date</div>
-                <div className="col-span-2 sm:col-span-2 text-center">Amount ₦</div>
-                <div className="col-span-12 sm:col-span-2 text-right"> </div>
+                <div className="col-span-2 sm:col-span-3 text-center">Amount ₦</div>
+                <div className="hidden sm:block sm:col-span-2 text-right">Actions</div>
               </div>
               {paymentLines.map((line, idx) => {
                 const isLast = idx === paymentLines.length - 1;
                 return (
                   <div
                     key={line.id}
-                    className="grid grid-cols-12 gap-2 items-center bg-white p-2 rounded-lg border border-slate-200"
+                    className="grid grid-cols-12 gap-2.5 items-center bg-white p-2.5 rounded-lg border border-slate-200"
                   >
                     <input
                       type="text"
                       placeholder="Who paid / depositor"
                       value={line.payeeName}
                       onChange={(e) => updateLine(line.id, { payeeName: e.target.value })}
-                      className="col-span-12 sm:col-span-3 border border-slate-200 rounded-lg py-1.5 px-2 text-[11px] font-semibold text-[#134e4a] outline-none"
+                      className="col-span-12 sm:col-span-3 border border-slate-200 rounded-lg py-2 px-2.5 text-[12px] font-semibold text-[#134e4a] outline-none"
                     />
-                    <div className="col-span-6 sm:col-span-3 relative">
+                    <div className="col-span-6 sm:col-span-2 relative">
                       <select
                         value={String(line.treasuryAccountId)}
                         onChange={(e) => updateLine(line.id, { treasuryAccountId: Number(e.target.value) })}
-                        className="w-full border border-slate-200 rounded-lg py-1.5 px-2 text-[11px] font-semibold text-[#134e4a] appearance-none outline-none"
+                        className="w-full border border-slate-200 rounded-lg py-2 px-2.5 text-[12px] font-semibold text-[#134e4a] appearance-none outline-none"
                       >
                         {treasuryList.map((a) => (
                           <option key={a.id} value={String(a.id)}>
@@ -577,10 +683,10 @@ const ReceiptModal = ({
                         type="date"
                         value={line.lineDate}
                         onChange={(e) => updateLine(line.id, { lineDate: e.target.value })}
-                        className="w-full border border-slate-200 rounded-lg py-1.5 px-1 text-[11px] font-semibold text-[#134e4a]"
+                        className="w-full border border-slate-200 rounded-lg py-2 px-2 text-[12px] font-semibold text-[#134e4a]"
                       />
                     </div>
-                    <div className="col-span-2 sm:col-span-2">
+                    <div className="col-span-2 sm:col-span-3">
                       <input
                         type="number"
                         min="0"
@@ -588,10 +694,10 @@ const ReceiptModal = ({
                         placeholder="0"
                         value={line.amount}
                         onChange={(e) => updateLine(line.id, { amount: e.target.value })}
-                        className="w-full border border-slate-200 rounded-lg py-1.5 px-2 text-[11px] text-center font-bold text-emerald-700 tabular-nums"
+                        className="w-full border border-slate-200 rounded-lg py-2 px-2.5 text-[12px] text-center font-bold text-emerald-700 tabular-nums"
                       />
                     </div>
-                    <div className="col-span-12 sm:col-span-2 flex justify-end items-center gap-1">
+                    <div className="col-span-12 sm:col-span-2 flex sm:justify-end items-center gap-1.5 sm:pl-3 sm:border-l sm:border-slate-100">
                       <button
                         type="button"
                         onClick={() => removeLine(line.id)}
@@ -623,7 +729,7 @@ const ReceiptModal = ({
           </div>
 
           <div
-            className={`w-full md:w-72 bg-slate-50/90 p-4 flex flex-col gap-3 shrink-0 border-t md:border-t-0 md:border-l border-slate-100 ${readOnly ? 'opacity-85' : ''}`}
+            className={`w-full md:w-56 bg-slate-50/90 p-3 flex flex-col gap-2.5 shrink-0 self-start md:self-start border-t md:border-t-0 md:border-l border-slate-100 ${readOnly ? 'opacity-85' : ''}`}
           >
             <p className="text-[9px] font-semibold text-slate-500 uppercase tracking-widest flex items-center gap-1.5">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
@@ -631,35 +737,35 @@ const ReceiptModal = ({
             </p>
             {selectedQuotation ? (
               <>
-                <div className="rounded-lg border border-slate-200 bg-white p-3">
+                <div className="rounded-lg border border-slate-200 bg-white p-2.5">
                   <p className="text-[8px] font-semibold text-slate-400 uppercase mb-1">Customer (from quote)</p>
-                  <p className="text-sm font-bold text-[#134e4a]">{customerName}</p>
-                  <p className="text-[10px] text-slate-500">{customerPhone}</p>
+                  <p className="text-[13px] font-bold leading-snug text-[#134e4a]">{customerName}</p>
+                  <p className="text-[9px] text-slate-500">{customerPhone}</p>
                 </div>
-                <div className="rounded-lg border border-slate-200 bg-white p-3">
+                <div className="rounded-lg border border-slate-200 bg-white p-2.5">
                   <p className="text-[8px] font-semibold text-slate-400 uppercase mb-1">Quotation total</p>
-                  <p className="text-lg font-bold text-[#134e4a] tabular-nums">{formatNgn(displayTotal)}</p>
+                  <p className="text-[17px] font-bold leading-none text-[#134e4a] tabular-nums">{formatNgn(displayTotal)}</p>
                 </div>
-                <div className="rounded-lg border border-slate-200 bg-white p-3">
+                <div className="rounded-lg border border-slate-200 bg-white p-2.5">
                   <p className="text-[8px] font-semibold text-slate-400 uppercase mb-1">Paid on file</p>
-                  <p className="text-lg font-bold text-sky-700 tabular-nums">{formatNgn(displayPaid)}</p>
+                  <p className="text-[17px] font-bold leading-none text-sky-700 tabular-nums">{formatNgn(displayPaid)}</p>
                 </div>
-                <div className="rounded-lg border border-[#134e4a]/30 bg-[#134e4a] p-3 text-white">
+                <div className="rounded-lg border border-[#134e4a]/30 bg-[#134e4a] p-2.5 text-white">
                   <p className="text-[8px] font-semibold text-white/50 uppercase mb-1">Balance due (ledger)</p>
-                  <p className="text-lg font-bold text-emerald-200 tabular-nums">{formatNgn(displayBalance)}</p>
+                  <p className="text-[17px] font-bold leading-none text-emerald-200 tabular-nums">{formatNgn(displayBalance)}</p>
                 </div>
-                <div className="rounded-lg border border-slate-200 bg-white p-3">
+                <div className="rounded-lg border border-slate-200 bg-white p-2.5">
                   <p className="text-[8px] font-semibold text-slate-400 uppercase mb-1">This voucher total</p>
-                  <p className="text-xl font-black text-emerald-700 tabular-nums">{formatNgn(lineTotalNgn)}</p>
+                  <p className="text-[20px] font-black leading-none text-emerald-700 tabular-nums">{formatNgn(lineTotalNgn)}</p>
                   {balanceAfterNgn != null ? (
-                    <p className="text-[9px] text-slate-500 mt-1">
+                    <p className="text-[8px] text-slate-500 mt-1">
                       Est. balance after post: <span className="font-bold tabular-nums">{formatNgn(balanceAfterNgn)}</span>
                     </p>
                   ) : null}
                 </div>
               </>
             ) : (
-              <div className="rounded-lg border border-amber-200 bg-amber-50/80 p-3 text-[10px] text-amber-950 leading-snug">
+              <div className="rounded-lg border border-amber-200 bg-amber-50/80 p-2.5 text-[9px] text-amber-950 leading-snug">
                 Select a quotation to load customer, balances, and print-ready totals.
               </div>
             )}
@@ -686,21 +792,14 @@ const ReceiptModal = ({
               onClick={() => openPrint('quick')}
               className="bg-white/90 text-emerald-800 px-3 py-2.5 rounded-lg text-[9px] font-semibold uppercase tracking-wide shadow-sm"
             >
-              <Printer size={14} className="inline mr-1" /> Quick print
+              <Printer size={14} className="inline mr-1" /> Summary (A4)
             </button>
             <button
               type="button"
               onClick={() => openPrint('full')}
               className="bg-white text-emerald-700 px-3 py-2.5 rounded-lg text-[9px] font-semibold uppercase tracking-wide shadow-sm"
             >
-              <Printer size={14} className="inline mr-1" /> Full (A5 landscape)
-            </button>
-            <button
-              type="button"
-              onClick={() => openPrint('official')}
-              className="bg-white text-emerald-900 px-3 py-2.5 rounded-lg text-[9px] font-semibold uppercase tracking-wide shadow-sm ring-1 ring-white/40"
-            >
-              <Printer size={14} className="inline mr-1" /> Company A4
+              <Printer size={14} className="inline mr-1" /> Full detail (A4)
             </button>
           </div>
         </div>
@@ -713,45 +812,16 @@ const ReceiptModal = ({
             <button
               type="button"
               aria-label="Close print preview"
-              className="no-print fixed inset-0 z-[10000] bg-black/50"
+              className="no-print fixed inset-0 z-[11060] bg-black/50"
               onClick={() => setShowPrint(false)}
             />
-            <div className="no-print fixed inset-0 z-[10001] overflow-y-auto p-4 sm:p-8 pointer-events-none">
-              <div
-                className={`pointer-events-auto mx-auto pb-16 ${
-                  printKind === 'quick'
-                    ? 'max-w-[88mm]'
-                    : printKind === 'official'
-                      ? 'max-w-[210mm]'
-                      : 'max-w-[min(100%,220mm)]'
-                }`}
-              >
-                <div
-                  className={`overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl print:rounded-none print:border-0 print:shadow-none ${
-                    printKind === 'official' ? 'quotation-print-root' : 'receipt-print-root'
-                  }`}
-                >
-                  {printKind === 'official' ? (
-                    <QuotationPrintView
-                      documentKind="receipt"
-                      quotationId={selectedQuotation?.id ?? '—'}
-                      receiptRef={receiptIdPreview}
-                      linkedQuotationId={quotationRef || ''}
-                      dateStr={formatDisplayDate(voucherDate)}
-                      customerName={customerName || '—'}
-                      customerPhone={customerPhone}
-                      terms="100%"
-                      gauge={selectedQuotation?.materialGauge || '—'}
-                      design={selectedQuotation?.materialDesign || '—'}
-                      color={selectedQuotation?.materialColor || '—'}
-                      payAccount={payAccountForOfficial}
-                      lines={officialReceiptLines}
-                      salesperson={handledByLabel}
-                      projectName={selectedQuotation?.projectName?.trim() || '—'}
-                      amountPaidNgn={receiptPaidPreviewNgn}
-                      balanceDueNgn={receiptBalancePreviewNgn}
-                    />
-                  ) : printKind === 'quick' ? (
+            <div
+              className="print-portal-scroll fixed inset-0 z-[11070] overflow-y-auto overscroll-y-contain p-4 sm:p-8"
+              onClick={() => setShowPrint(false)}
+            >
+              <div className="mx-auto max-w-4xl pb-16" onClick={(e) => e.stopPropagation()}>
+                <div className="quotation-print-root quotation-print-preview-mode rounded-lg border border-slate-200 bg-white shadow-2xl print:rounded-none print:border-0 print:shadow-none">
+                  {printKind === 'quick' ? (
                     <ReceiptPrintQuick
                       receiptId={receiptIdPreview}
                       dateStr={formatDisplayDate(voucherDate)}
@@ -780,7 +850,7 @@ const ReceiptModal = ({
                     />
                   )}
                 </div>
-                <div className="mt-4 flex flex-wrap justify-center gap-2 pointer-events-auto">
+                <div className="no-print mt-4 flex flex-wrap justify-center gap-2">
                   <button
                     type="button"
                     onClick={() => window.print()}

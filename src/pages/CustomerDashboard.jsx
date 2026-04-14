@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams, Link } from 'react-router-dom';
+import { useNavigate, useParams, Link, useLocation } from 'react-router-dom';
 import {
   ArrowLeft,
   User,
@@ -17,8 +17,8 @@ import {
   CheckCircle2,
   Clock,
   MessageSquarePlus,
-  Download,
   BarChart3,
+  Printer,
   ChevronRight,
   X,
   LayoutDashboard,
@@ -27,6 +27,7 @@ import {
   Scissors,
   RotateCcw,
   Trash2,
+  Info,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -38,6 +39,7 @@ import {
   Tooltip,
 } from 'recharts';
 import { PageHeader, PageShell, MainPanel, ModalFrame } from '../components/layout';
+import { ReportPrintModal } from '../components/reports/ReportPrintModal';
 import { EditSecondApprovalInline } from '../components/EditSecondApprovalInline';
 import { useCustomers } from '../context/CustomersContext';
 import { useToast } from '../context/ToastContext';
@@ -53,6 +55,18 @@ import {
 } from '../lib/customerLedgerStore';
 import { mergeReceiptRowsForSales, receiptCashReceivedNgn } from '../lib/salesReceiptsList';
 import {
+  SALES_TABLE_SORT_FIELD_OPTIONS,
+  sortQuotationsList,
+  sortReceiptsList,
+  sortCuttingLists,
+  sortRefundsList,
+} from '../lib/salesListSorting';
+import {
+  SalesListTableFrame,
+  SalesListSearchInput,
+  SalesListSortBar,
+} from '../components/sales/SalesListTableFrame';
+import {
   allocatedQuotationRevenueForProductionJob,
   metersProducedByQuotationRef,
   productionOutputDateISO,
@@ -62,6 +76,30 @@ import {
 function localDateISO(d = new Date()) {
   const z = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`;
+}
+
+/**
+ * Six consecutive calendar months ending with the month of `anchorIso` (YYYY-MM-DD), oldest first.
+ * Each entry: `{ ym: 'YYYY-MM', month: 'Jan' }` for chart axis labels.
+ */
+function lastSixCalendarMonthBuckets(anchorIso) {
+  const m = String(anchorIso || '').match(/^(\d{4})-(\d{2})/);
+  const y = m ? Number(m[1]) : null;
+  const mo = m ? Number(m[2]) : null;
+  if (!y || !mo || mo < 1 || mo > 12) {
+    return lastSixCalendarMonthBuckets(localDateISO());
+  }
+  const end = new Date(y, mo - 1, 1);
+  const out = [];
+  for (let i = 0; i < 6; i += 1) {
+    const d = new Date(end.getFullYear(), end.getMonth() - (5 - i), 1);
+    const yy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const ym = `${yy}-${mm}`;
+    const month = d.toLocaleDateString('en-GB', { month: 'short' });
+    out.push({ ym, month });
+  }
+  return out;
 }
 
 const EMPTY_CUSTOMER_CRM = { orders: [], interactions: [], salesTrendByCustomer: {} };
@@ -75,8 +113,19 @@ const NAV = [
   { id: 'reports', label: 'Reports', icon: BarChart3 },
 ];
 
-function scrollToId(id) {
-  document.getElementById(`cd-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+/** DOM ids allowed in the URL hash (e.g. `#cd-financial`) for deep links and refresh. */
+const CD_SECTION_IDS = new Set([
+  ...NAV.map((n) => `cd-${n.id}`),
+  'cd-cutting',
+  'cd-refunds',
+]);
+
+function customerDashboardHashToSectionId(hash) {
+  const raw = String(hash || '').trim();
+  if (!raw || raw === '#') return null;
+  const id = raw.startsWith('#') ? raw.slice(1) : raw;
+  if (!id || !CD_SECTION_IDS.has(id)) return null;
+  return id;
 }
 
 function quotationUiStatus(q, todayIso) {
@@ -148,6 +197,7 @@ const emptyEdit = (c) => ({
 const CustomerDashboard = () => {
   const { customerId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const { customers, setCustomers, deleteCustomer } = useCustomers();
   const { show: showToast } = useToast();
   const ws = useWorkspace();
@@ -237,6 +287,14 @@ const CustomerDashboard = () => {
   );
 
   const [payWindow, setPayWindow] = useState('all');
+  const [cdQuoteSearch, setCdQuoteSearch] = useState('');
+  const [cdQuoteSort, setCdQuoteSort] = useState({ field: 'date', dir: 'desc' });
+  const [cdCutSearch, setCdCutSearch] = useState('');
+  const [cdCutSort, setCdCutSort] = useState({ field: 'date', dir: 'desc' });
+  const [cdRcptSearch, setCdRcptSearch] = useState('');
+  const [cdRcptSort, setCdRcptSort] = useState({ field: 'date', dir: 'desc' });
+  const [cdRfSearch, setCdRfSearch] = useState('');
+  const [cdRfSort, setCdRfSort] = useState({ field: 'date', dir: 'desc' });
   const [showEdit, setShowEdit] = useState(false);
   const [customerEditApprovalId, setCustomerEditApprovalId] = useState('');
   const [editForm, setEditForm] = useState(() => emptyEdit(customer));
@@ -244,6 +302,8 @@ const CustomerDashboard = () => {
   const [showReports, setShowReports] = useState(false);
   const [reportFrom, setReportFrom] = useState('2026-01-01');
   const [reportTo, setReportTo] = useState(() => localDateISO());
+  const [reportPreviewOpen, setReportPreviewOpen] = useState(false);
+  const [reportPreview, setReportPreview] = useState(null);
   const [noteDraft, setNoteDraft] = useState('');
   const [staffNotes, setStaffNotes] = useState([]);
   const [refundAdvanceOpen, setRefundAdvanceOpen] = useState(false);
@@ -253,6 +313,25 @@ const CustomerDashboard = () => {
   useEffect(() => {
     if (customer) setEditForm(emptyEdit(customer));
   }, [customer]);
+
+  /** Deep links: `/customers/CUS-001#cd-financial` — keep section on refresh; shareable URLs. */
+  useEffect(() => {
+    if (!customer) return;
+    const sectionId = customerDashboardHashToSectionId(location.hash);
+    if (!sectionId) return;
+    let cancelled = false;
+    const run = () => {
+      if (cancelled) return;
+      document.getElementById(sectionId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    };
+    const t1 = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(run);
+    });
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(t1);
+    };
+  }, [location.hash, location.pathname, customer?.customerID]);
 
   useEffect(() => {
     if (!customerKey) return;
@@ -378,13 +457,18 @@ const CustomerDashboard = () => {
     setLedgerViewNonce((x) => x + 1);
   };
 
-  const sortedQuotations = useMemo(
-    () =>
-      [...quotations].sort(
-        (a, b) => (b.dateISO || '').localeCompare(a.dateISO || '')
-      ),
-    [quotations]
-  );
+  const quotationTableRows = useMemo(() => {
+    const q = cdQuoteSearch.trim().toLowerCase();
+    let rows = [...quotations];
+    if (q) {
+      rows = rows.filter((row) =>
+        `${row.id} ${row.date} ${row.dateISO} ${row.total} ${row.status} ${row.paymentStatus} ${row.handledBy || ''}`
+          .toLowerCase()
+          .includes(q)
+      );
+    }
+    return sortQuotationsList(rows, cdQuoteSort.field, cdQuoteSort.dir);
+  }, [quotations, cdQuoteSearch, cdQuoteSort]);
 
   const sortedOrders = useMemo(
     () => [...orders].sort((a, b) => safeIso(b.dateISO).localeCompare(safeIso(a.dateISO))),
@@ -445,16 +529,50 @@ const CustomerDashboard = () => {
   }, [quotations, totalInvoicedNgn]);
 
   const filteredReceipts = useMemo(() => {
-    const sorted = [...receipts].sort(
-      (a, b) => (b.dateISO || '').localeCompare(a.dateISO || '')
-    );
-    if (payWindow === 'all') return sorted;
-    const days = payWindow === '30' ? 30 : 60;
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - days);
-    const ciso = localDateISO(cutoff);
-    return sorted.filter((r) => (r.dateISO || '') >= ciso);
-  }, [receipts, payWindow]);
+    let rows = [...receipts];
+    if (payWindow !== 'all') {
+      const days = payWindow === '30' ? 30 : 60;
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - days);
+      const ciso = localDateISO(cutoff);
+      rows = rows.filter((r) => (r.dateISO || '') >= ciso);
+    }
+    const q = cdRcptSearch.trim().toLowerCase();
+    if (q) {
+      rows = rows.filter((r) =>
+        `${r.id} ${r.date} ${r.dateISO} ${r.amount} ${r.method} ${r.quotationRef} ${r.source}`
+          .toLowerCase()
+          .includes(q)
+      );
+    }
+    return sortReceiptsList(rows, cdRcptSort.field, cdRcptSort.dir);
+  }, [receipts, payWindow, cdRcptSearch, cdRcptSort]);
+
+  const cuttingTableRows = useMemo(() => {
+    const q = cdCutSearch.trim().toLowerCase();
+    let rows = [...cuttingLists];
+    if (q) {
+      rows = rows.filter((row) =>
+        `${row.id} ${row.date} ${row.dateISO} ${row.total} ${row.status} ${row.handledBy || ''}`
+          .toLowerCase()
+          .includes(q)
+      );
+    }
+    return sortCuttingLists(rows, cdCutSort.field, cdCutSort.dir);
+  }, [cuttingLists, cdCutSearch, cdCutSort]);
+
+  const refundTableRows = useMemo(() => {
+    const q = cdRfSearch.trim().toLowerCase();
+    let rows = [...refundsForCustomer];
+    if (q) {
+      rows = rows.filter((row) =>
+        `${row.refundID} ${row.customer} ${row.quotationRef} ${row.status} ${row.reason} ${row.reasonCategory} ${formatNgn(row.amountNgn)}`
+          .toLowerCase()
+          .includes(q)
+      );
+    }
+    return sortRefundsList(rows, cdRfSort.field, cdRfSort.dir);
+  }, [refundsForCustomer, cdRfSearch, cdRfSort]);
 
   const outstandingLines = useMemo(() => {
     return quotations
@@ -468,22 +586,43 @@ const CustomerDashboard = () => {
       .sort((a, b) => (a.due || '').localeCompare(b.due || ''));
   }, [quotations, todayIso]);
 
+  /** Cash received per calendar month from this customer’s sales receipts (ledger + imported), last 6 months. */
   const trendData = useMemo(() => {
-    const series =
-      crm.salesTrendByCustomer?.[customerKey] ||
-      [
-        { month: 'Oct', amountNgn: 0 },
-        { month: 'Nov', amountNgn: 0 },
-        { month: 'Dec', amountNgn: 0 },
-        { month: 'Jan', amountNgn: 0 },
-        { month: 'Feb', amountNgn: 0 },
-        { month: 'Mar', amountNgn: 0 },
-      ];
-    return series.map((row) => ({
-      ...row,
-      amountM: Math.round(row.amountNgn / 100_000) / 10,
-    }));
-  }, [customerKey, crm.salesTrendByCustomer]);
+    const months = lastSixCalendarMonthBuckets(todayIso);
+    const buckets = new Map(months.map(({ ym }) => [ym, 0]));
+    for (const r of receipts) {
+      const iso = String(r.dateISO || '').slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) continue;
+      const ym = iso.slice(0, 7);
+      if (!buckets.has(ym)) continue;
+      const cash = receiptCashReceivedNgn(r);
+      if (!Number.isFinite(cash) || cash <= 0) continue;
+      buckets.set(ym, (buckets.get(ym) || 0) + Math.round(cash));
+    }
+    return months.map(({ ym, month }) => {
+      const amountNgn = buckets.get(ym) || 0;
+      return {
+        month,
+        monthKey: ym,
+        amountNgn,
+        amountM: Math.round(amountNgn / 100_000) / 10,
+      };
+    });
+  }, [receipts, todayIso]);
+
+  /** `amountM` is millions of ₦; avoid axis labels like "₦0m" (reads as "metres"). */
+  const salesTrendAxisTick = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return '';
+    if (n === 0) return '0';
+    return `${n}M`;
+  };
+  const salesTrendTooltipVolume = (v) => {
+    const m = Number(v);
+    if (!Number.isFinite(m)) return ['—', 'Volume'];
+    const ngn = Math.round(m * 1_000_000);
+    return [`₦${ngn.toLocaleString()}`, 'Volume'];
+  };
 
   const mergedTimeline = useMemo(() => {
     const qSorted = [...quotations].sort((a, b) =>
@@ -519,6 +658,8 @@ const CustomerDashboard = () => {
       title: `Cutting list ${cl.id}`,
       detail: `${cl.total} · ${cl.status} · ${cl.handledBy ? `By ${cl.handledBy}` : '—'}`,
       source: 'tx',
+      txType: 'cutting',
+      txId: cl.id,
     }));
     const rfSorted = [...refundsForCustomer].sort((a, b) =>
       (b.requestedAtISO || '').localeCompare(a.requestedAtISO || '')
@@ -571,6 +712,12 @@ const CustomerDashboard = () => {
   const goSalesRefund = (id) => {
     navigate('/sales', {
       state: { focusSalesTab: 'refund', openSalesRecord: { type: 'refund', id } },
+    });
+  };
+
+  const goSalesCutting = (id) => {
+    navigate('/sales', {
+      state: { focusSalesTab: 'cuttinglist', openSalesRecord: { type: 'cutting', id } },
     });
   };
 
@@ -671,12 +818,10 @@ const CustomerDashboard = () => {
     }
   };
 
-  const downloadReport = (kind) => {
-    const lines = [];
-    lines.push(`Zarewa — Customer report (${kind})`);
-    lines.push(`Customer: ${customer?.name} (${customerKey})`);
-    lines.push(`Period: ${reportFrom} → ${reportTo}`);
-    lines.push('');
+  const openCustomerReportPreview = (kind) => {
+    const customerLine = `${customer?.name || 'Customer'} · ${customerKey}`;
+    const periodLabel = `${reportFrom} → ${reportTo}`;
+
     if (kind === 'sales') {
       const inRangeQuotes = quotations.filter(
         (q) =>
@@ -689,48 +834,103 @@ const CustomerDashboard = () => {
         const iso = productionOutputDateISO(j);
         return iso && iso >= reportFrom && iso <= reportTo;
       });
-      lines.push('Quotation pipeline (by quote date — not sales until produced):');
-      lines.push(`  Quotations in range: ${inRangeQuotes.length}`);
-      inRangeQuotes.forEach((q) => {
-        lines.push(`    ${q.id}  ${q.date}  ${q.total}  ${q.status}`);
-      });
-      lines.push('');
-      lines.push('Production completions in range (production completion date; ₦ share by actual metres per quote):');
-      lines.push(`  Jobs completed in range: ${jobsInRange.length}`);
-      jobsInRange.forEach((j) => {
+      const quoteRows = inRangeQuotes.map((q) => ({
+        section: 'Quotation',
+        ref: String(q.id || '—'),
+        date: q.date || q.dateISO || '—',
+        detail: `${q.status || '—'} · ${q.paymentStatus || '—'}`,
+        value: q.total || formatNgn(q.totalNgn || 0),
+      }));
+      const prodRows = jobsInRange.map((j) => {
         const ref = String(j.quotationRef || '').trim();
         const q = quoteById.get(ref);
         const ngn = Math.round(allocatedQuotationRevenueForProductionJob(j, q, metersByRef));
         const m = Number(j.actualMeters) || 0;
-        lines.push(
-          `    ${j.jobID || '—'}  quote ${ref || '—'}  ${productionOutputDateISO(j)}  ${m} m  ${formatNgn(ngn)}`
-        );
+        return {
+          section: 'Produced',
+          ref: String(j.jobID || '—'),
+          date: productionOutputDateISO(j) || '—',
+          detail: `${m} m · Quote ${ref || '—'}`,
+          value: formatNgn(ngn),
+        };
+      });
+      const prodTotalNgn = jobsInRange.reduce((s, j) => {
+        const ref = String(j.quotationRef || '').trim();
+        const q = quoteById.get(ref);
+        return s + Math.round(allocatedQuotationRevenueForProductionJob(j, q, metersByRef));
+      }, 0);
+      setReportPreview({
+        title: 'Quotations & produced sales',
+        periodLabel: `${periodLabel} · ${customerLine}`,
+        columns: [
+          { key: 'section', label: 'Section' },
+          { key: 'ref', label: 'Reference' },
+          { key: 'date', label: 'Date' },
+          { key: 'detail', label: 'Detail' },
+          { key: 'value', label: 'Amount / status' },
+        ],
+        rows: [...quoteRows, ...prodRows],
+        summaryLines: [
+          { label: 'Quotations in period (by quote date)', value: String(inRangeQuotes.length) },
+          { label: 'Production jobs completed in period', value: String(jobsInRange.length) },
+          { label: 'Allocated revenue from production (period)', value: formatNgn(prodTotalNgn) },
+        ],
       });
     } else if (kind === 'payments') {
       const inRange = receipts.filter(
         (r) =>
           (r.dateISO || '') >= reportFrom && (r.dateISO || '') <= reportTo
       );
-      lines.push(`Receipts in range: ${inRange.length}`);
-      inRange.forEach((r) => {
-        lines.push(`  ${r.id}  ${r.date}  ${r.amount}  ${r.method || '—'}`);
+      const totalNgn = inRange.reduce((s, r) => s + receiptCashReceivedNgn(r), 0);
+      setReportPreview({
+        title: 'Payment history',
+        periodLabel: `${periodLabel} · ${customerLine}`,
+        columns: [
+          { key: 'id', label: 'Receipt' },
+          { key: 'date', label: 'Date' },
+          { key: 'amount', label: 'Amount' },
+          { key: 'method', label: 'Method' },
+          { key: 'quote', label: 'Quotation' },
+        ],
+        rows: inRange.map((r) => ({
+          id: String(r.id || '—'),
+          date: r.date || r.dateISO || '—',
+          amount: r.amount || formatNgn(receiptCashReceivedNgn(r)),
+          method: r.method || '—',
+          quote: String(r.quotationRef || '—'),
+        })),
+        summaryLines: [
+          { label: 'Receipts in period', value: String(inRange.length) },
+          { label: 'Cash received (period, on file)', value: formatNgn(totalNgn) },
+        ],
       });
     } else {
-      lines.push(`Outstanding balance: ${formatNgn(outstandingNgn)}`);
-      outstandingLines.forEach((o) => {
-        lines.push(
-          `  ${o.id}  due ${o.due || '—'}  ${formatNgn(o.amountNgn)}${o.overdue ? '  OVERDUE' : ''}`
-        );
+      const overdueN = outstandingLines.filter((o) => o.overdue).length;
+      setReportPreview({
+        title: 'Outstanding & overdue',
+        periodLabel: `Open balances (current) · Range context ${periodLabel} · ${customerLine}`,
+        columns: [
+          { key: 'id', label: 'Quotation' },
+          { key: 'due', label: 'Due date' },
+          { key: 'amount', label: 'Balance due' },
+          { key: 'status', label: 'Status' },
+        ],
+        rows: outstandingLines.map((o) => ({
+          id: String(o.id || '—'),
+          due: o.due || '—',
+          amount: formatNgn(o.amountNgn),
+          status: o.overdue ? 'Overdue' : 'Open',
+        })),
+        summaryLines: [
+          { label: 'Total outstanding', value: formatNgn(outstandingNgn) },
+          { label: 'Open lines', value: String(outstandingLines.length) },
+          { label: 'Overdue lines', value: String(overdueN) },
+        ],
       });
     }
-    const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `zarewa-${customerKey}-${kind}-${reportFrom}.txt`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    showToast('Report file generated.');
+
     setShowReports(false);
+    setReportPreviewOpen(true);
   };
 
   if (!customer) {
@@ -764,7 +964,7 @@ const CustomerDashboard = () => {
         : { label: 'Up to date', tone: 'ok' };
 
   return (
-    <PageShell blurred={showEdit || !!detail || showReports}>
+    <PageShell blurred={showEdit || !!detail || showReports || reportPreviewOpen}>
       <PageHeader
         title={customer.name}
         subtitle={`${customer.customerID} · ${customer.tier} · ${customer.paymentTerms}`}
@@ -800,12 +1000,24 @@ const CustomerDashboard = () => {
           </p>
           {NAV.map((item) => {
             const NavIcon = item.icon;
+            const hash = `#cd-${item.id}`;
+            const isActive = location.hash === hash || (!location.hash && item.id === 'overview');
             return (
             <button
               key={item.id}
               type="button"
-              onClick={() => scrollToId(item.id)}
-              className="w-full flex items-center gap-2 rounded-xl px-3 py-2.5 text-left text-xs font-bold text-[#134e4a] hover:bg-white hover:shadow-sm border border-transparent hover:border-gray-100 transition-all"
+              onClick={() =>
+                navigate(
+                  { pathname: location.pathname, search: location.search, hash },
+                  { replace: true }
+                )
+              }
+              aria-current={isActive ? 'location' : undefined}
+              className={`w-full flex items-center gap-2 rounded-xl px-3 py-2.5 text-left text-xs font-bold border transition-all ${
+                isActive
+                  ? 'text-[#134e4a] bg-white shadow-sm border-gray-100'
+                  : 'text-[#134e4a] hover:bg-white hover:shadow-sm border-transparent hover:border-gray-100'
+              }`}
             >
               <NavIcon size={14} />
               {item.label}
@@ -981,33 +1193,49 @@ const CustomerDashboard = () => {
             </div>
           ) : null}
 
-          <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4 mb-8">
-            <div className="rounded-zarewa border border-gray-100 bg-white p-5 shadow-sm">
-              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">
+          <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-2.5 sm:gap-3 mb-8">
+            <div className="rounded-zarewa border border-gray-100 bg-white p-3 sm:p-3.5 shadow-sm">
+              <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1">
                 Outstanding balance
               </p>
-              <p className="text-2xl font-black text-[#134e4a] tabular-nums">
+              <p className="text-xl font-black text-[#134e4a] tabular-nums leading-tight">
                 {formatNgn(outstandingNgn)}
               </p>
-              <p className="text-[9px] text-gray-500 mt-2 leading-snug">
+              <p className="text-[8px] text-gray-500 mt-1.5 leading-snug">
                 Ledger-aware (advances applied & new receipts reduce this).
               </p>
             </div>
-            <div className="rounded-zarewa border border-amber-100 bg-amber-50/60 p-5 shadow-sm">
-              <p className="text-[10px] font-bold text-amber-800 uppercase tracking-widest mb-2">
-                Advance (deposit)
-              </p>
-              <p className="text-2xl font-black text-amber-950 tabular-nums">
+            <div className="rounded-zarewa border border-amber-100 bg-amber-50/60 p-3 sm:p-3.5 shadow-sm">
+              <div className="flex items-start justify-between gap-1 mb-1">
+                <p className="text-[9px] font-bold text-amber-800 uppercase tracking-widest">
+                  Advance (deposit)
+                </p>
+                <details className="relative shrink-0">
+                  <summary
+                    className="list-none cursor-pointer rounded-full p-0.5 text-amber-800/55 transition-colors hover:bg-amber-200/40 hover:text-amber-950 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 [&::-webkit-details-marker]:hidden"
+                    aria-label="About advance balance and using customer credit"
+                  >
+                    <Info className="size-3.5" strokeWidth={2.25} aria-hidden />
+                  </summary>
+                  <div
+                    className="absolute right-0 top-full z-40 mt-1.5 w-[min(calc(100vw-2rem),17.5rem)] rounded-lg border border-amber-200/90 bg-white p-2.5 text-[9px] leading-snug text-amber-950 shadow-lg ring-1 ring-black/5"
+                    role="note"
+                  >
+                    <p className="text-amber-900/90">
+                      Not revenue — liability until applied or refunded. Paying an approved{' '}
+                      <strong>sales refund</strong> to the customer reduces this when the money came from advance or
+                      overpay credit (see ledger timeline).
+                    </p>
+                    <p className="mt-2 border-t border-amber-200/70 pt-2 text-amber-900/85">
+                      <strong>Use credit on another job:</strong> in <strong>Sales → Quotations</strong>, open the new
+                      quote and use <strong>Apply customer advance</strong>. Unlinked deposits are listed under{' '}
+                      <strong>Sales → Receipts → Advance deposits</strong> (Link to attach to a quotation first if needed).
+                    </p>
+                  </div>
+                </details>
+              </div>
+              <p className="text-xl font-black text-amber-950 tabular-nums leading-tight">
                 {formatNgn(advanceBalNgn)}
-              </p>
-              <p className="text-[9px] text-amber-900/75 mt-2 leading-snug">
-                Not revenue — liability until applied or refunded. Paying an approved <strong>sales refund</strong> to the
-                customer reduces this when the money came from advance or overpay credit (see ledger timeline).
-              </p>
-              <p className="text-[9px] text-amber-900/70 mt-2 leading-snug border-t border-amber-200/60 pt-2">
-                <strong>Use credit on another job:</strong> in <strong>Sales → Quotations</strong>, open the new quote and
-                use <strong>Apply customer advance</strong>. Unlinked deposits are listed under{' '}
-                <strong>Sales → Receipts → Advance deposits</strong> (Link to attach to a quotation first if needed).
               </p>
               {advanceBalNgn > 0 ? (
                 <button
@@ -1016,54 +1244,58 @@ const CustomerDashboard = () => {
                     setRefundAdvanceAmt('');
                     setRefundAdvanceOpen(true);
                   }}
-                  className="mt-3 text-[9px] font-bold uppercase text-amber-900 hover:underline"
+                  className="mt-2 text-[8px] font-bold uppercase text-amber-900 hover:underline"
                 >
                   Refund advance (cash out)
                 </button>
               ) : null}
             </div>
-            <div className="rounded-zarewa border border-gray-100 bg-white p-5 shadow-sm">
-              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">
+            <div className="rounded-zarewa border border-gray-100 bg-white p-3 sm:p-3.5 shadow-sm">
+              <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1">
                 Total paid (receipts)
               </p>
-              <p className="text-2xl font-black text-[#134e4a] tabular-nums">
+              <p className="text-xl font-black text-[#134e4a] tabular-nums leading-tight">
                 {formatNgn(totalPaidReceiptsNgn)}
               </p>
-              <p className="text-[9px] text-gray-500 mt-2 leading-snug">
+              <p className="text-[8px] text-gray-500 mt-1.5 leading-snug">
                 Sales receipts and ledger posts, deduplicated (same basis as the Sales receipts list).
               </p>
             </div>
-            <div className="rounded-zarewa border border-gray-100 bg-white p-5 shadow-sm">
-              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">
+            <div className="rounded-zarewa border border-gray-100 bg-white p-3 sm:p-3.5 shadow-sm">
+              <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1">
                 Quotations
               </p>
-              <p className="text-2xl font-black text-[#134e4a]">{quotations.length}</p>
-              <p className="text-[10px] font-bold text-gray-500 mt-2">
+              <p className="text-xl font-black text-[#134e4a] leading-tight">{quotations.length}</p>
+              <p className="text-[9px] font-bold text-gray-500 mt-1.5">
                 {pendingQuotationsCount} pending / unpaid
               </p>
             </div>
-            <div className="rounded-zarewa border border-gray-100 bg-white p-5 shadow-sm">
-              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">
+            <div className="rounded-zarewa border border-gray-100 bg-white p-3 sm:p-3.5 shadow-sm">
+              <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1">
                 Payment coverage
               </p>
-              <p className="text-2xl font-black text-[#134e4a]">{paymentProgressPct}%</p>
-              <div className="mt-3 h-2 rounded-full bg-gray-100 overflow-hidden">
+              <p className="text-xl font-black text-[#134e4a] leading-tight">{paymentProgressPct}%</p>
+              <div className="mt-2 h-1.5 rounded-full bg-gray-100 overflow-hidden">
                 <div
                   className="h-full rounded-full bg-gradient-to-r from-[#134e4a] to-teal-400 transition-all"
                   style={{ width: `${paymentProgressPct}%` }}
                 />
               </div>
-              <p className="text-[9px] text-gray-500 mt-1.5">
+              <p className="text-[8px] text-gray-500 mt-1">
                 Share of invoice totals marked paid on file
               </p>
             </div>
           </section>
 
           <section className="mb-10 rounded-zarewa border border-gray-100 bg-white p-5 shadow-sm">
-            <h2 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest mb-4 flex items-center gap-2">
+            <h2 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest mb-1 flex items-center gap-2">
               <BarChart3 size={16} />
               Sales trend (last 6 months)
             </h2>
+            <p className="text-[10px] text-gray-500 mb-3">
+              Totals from this customer’s sales receipts (cash received), by calendar month. Axis in millions of naira
+              (e.g. 2M = ₦2,000,000).
+            </p>
             <div className="h-56 w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={trendData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
@@ -1077,11 +1309,18 @@ const CustomerDashboard = () => {
                   <XAxis dataKey="month" tick={{ fontSize: 10, fill: '#94a3b8' }} />
                   <YAxis
                     tick={{ fontSize: 10, fill: '#94a3b8' }}
-                    tickFormatter={(v) => `₦${v}m`}
+                    tickFormatter={salesTrendAxisTick}
                   />
                   <Tooltip
-                    formatter={(v) => [`₦${v}m`, 'Volume']}
-                    labelFormatter={(l) => l}
+                    formatter={salesTrendTooltipVolume}
+                    labelFormatter={(_, payload) => {
+                      const row = payload?.[0]?.payload;
+                      if (row?.monthKey) {
+                        const yy = String(row.monthKey).slice(0, 4);
+                        return `${row.month} ${yy}`;
+                      }
+                      return String(_ ?? '');
+                    }}
                     contentStyle={{ borderRadius: 12, border: '1px solid #e2e8f0' }}
                   />
                   <Area
@@ -1110,26 +1349,46 @@ const CustomerDashboard = () => {
                 Sales <ChevronRight size={14} />
               </button>
             </div>
-            <div className="rounded-zarewa border border-gray-100 overflow-hidden bg-white shadow-sm">
-              <div className="grid grid-cols-12 gap-2 px-4 py-2 bg-gray-50 text-[10px] font-bold text-gray-400 uppercase tracking-widest">
+            <SalesListTableFrame
+              toolbar={
+                <>
+                  <SalesListSearchInput
+                    value={cdQuoteSearch}
+                    onChange={setCdQuoteSearch}
+                    placeholder="Search quotation ID, date, total, status…"
+                  />
+                  <SalesListSortBar
+                    fields={SALES_TABLE_SORT_FIELD_OPTIONS.quotations}
+                    field={cdQuoteSort.field}
+                    dir={cdQuoteSort.dir}
+                    onFieldChange={(field) => setCdQuoteSort((s) => ({ ...s, field }))}
+                    onDirToggle={() =>
+                      setCdQuoteSort((s) => ({ ...s, dir: s.dir === 'asc' ? 'desc' : 'asc' }))
+                    }
+                  />
+                </>
+              }
+            >
+              <div className="grid grid-cols-12 gap-2 px-2 py-2 bg-slate-50 text-[10px] font-bold text-slate-400 uppercase tracking-widest rounded-t-lg border border-slate-100 border-b-0">
                 <div className="col-span-3">ID</div>
                 <div className="col-span-2">Date</div>
                 <div className="col-span-3 text-right">Total</div>
                 <div className="col-span-4">Status</div>
               </div>
-              {sortedQuotations.length === 0 ? (
-                <p className="p-8 text-center text-xs text-gray-400 font-bold uppercase tracking-widest">
-                  No quotations yet
+              {quotationTableRows.length === 0 ? (
+                <p className="p-8 text-center text-xs text-slate-400 font-bold uppercase tracking-widest border border-t-0 border-slate-100 rounded-b-lg">
+                  No quotations match
                 </p>
               ) : (
-                sortedQuotations.map((q) => {
+                <div className="rounded-b-lg border border-t-0 border-slate-100 divide-y divide-slate-100 overflow-hidden">
+                {quotationTableRows.map((q) => {
                   const st = quotationUiStatus(q, todayIso);
                   return (
                     <button
                       key={q.id}
                       type="button"
                       onClick={() => goSalesQuotation(q.id)}
-                      className="grid grid-cols-12 gap-2 w-full px-4 py-3 text-left border-t border-gray-50 hover:bg-teal-50/30 transition-colors items-center"
+                      className="grid grid-cols-12 gap-2 w-full px-4 py-3 text-left hover:bg-teal-50/30 transition-colors items-center"
                     >
                       <div className="col-span-3 text-xs font-bold text-[#134e4a]">{q.id}</div>
                       <div className="col-span-2 text-xs text-gray-500">{q.date}</div>
@@ -1151,9 +1410,10 @@ const CustomerDashboard = () => {
                       ) : null}
                     </button>
                   );
-                })
+                })}
+                </div>
               )}
-            </div>
+            </SalesListTableFrame>
           </section>
 
           <section id="cd-cutting" className="mb-10 scroll-mt-28">
@@ -1170,44 +1430,60 @@ const CustomerDashboard = () => {
                 Sales <ChevronRight size={14} />
               </button>
             </div>
-            <div className="rounded-zarewa border border-gray-100 overflow-hidden bg-white shadow-sm">
-              {cuttingLists.length === 0 ? (
-                <p className="p-8 text-center text-xs text-gray-400 font-bold uppercase tracking-widest">
-                  No cutting lists
+            <SalesListTableFrame
+              toolbar={
+                <>
+                  <SalesListSearchInput
+                    value={cdCutSearch}
+                    onChange={setCdCutSearch}
+                    placeholder="Search list ID, date, total, status…"
+                  />
+                  <SalesListSortBar
+                    fields={SALES_TABLE_SORT_FIELD_OPTIONS.cuttinglist}
+                    field={cdCutSort.field}
+                    dir={cdCutSort.dir}
+                    onFieldChange={(field) => setCdCutSort((s) => ({ ...s, field }))}
+                    onDirToggle={() =>
+                      setCdCutSort((s) => ({ ...s, dir: s.dir === 'asc' ? 'desc' : 'asc' }))
+                    }
+                  />
+                </>
+              }
+            >
+              {cuttingTableRows.length === 0 ? (
+                <p className="p-8 text-center text-xs text-slate-400 font-bold uppercase tracking-widest">
+                  No cutting lists match
                 </p>
               ) : (
-                <ul className="divide-y divide-gray-50">
-                  {cuttingLists
-                    .slice()
-                    .sort((a, b) => (b.dateISO || '').localeCompare(a.dateISO || ''))
-                    .map((cl) => (
-                      <li key={cl.id}>
-                        <button
-                          type="button"
-                          onClick={() => setDetail({ type: 'cutting', row: cl })}
-                          className="w-full grid grid-cols-12 gap-2 px-4 py-3 text-left hover:bg-teal-50/30 transition-colors items-center"
-                        >
-                          <div className="col-span-3 text-xs font-bold text-[#134e4a]">{cl.id}</div>
-                          <div className="col-span-3 text-xs text-gray-500">{cl.date}</div>
-                          <div className="col-span-3 text-right text-sm font-black text-[#134e4a]">
-                            {cl.total}
+                <ul className="divide-y divide-slate-100 rounded-lg border border-slate-100 overflow-hidden">
+                  {cuttingTableRows.map((cl) => (
+                    <li key={cl.id}>
+                      <button
+                        type="button"
+                        onClick={() => goSalesCutting(cl.id)}
+                        className="w-full grid grid-cols-12 gap-2 px-4 py-3 text-left hover:bg-teal-50/30 transition-colors items-center"
+                      >
+                        <div className="col-span-3 text-xs font-bold text-[#134e4a]">{cl.id}</div>
+                        <div className="col-span-3 text-xs text-gray-500">{cl.date}</div>
+                        <div className="col-span-3 text-right text-sm font-black text-[#134e4a]">
+                          {cl.total}
+                        </div>
+                        <div className="col-span-3">
+                          <span className="text-[9px] font-bold uppercase px-2 py-1 rounded-full bg-sky-100 text-sky-800">
+                            {cl.status}
+                          </span>
+                        </div>
+                        {cl.handledBy ? (
+                          <div className="col-span-12 text-[10px] text-gray-500">
+                            By <span className="font-semibold">{cl.handledBy}</span>
                           </div>
-                          <div className="col-span-3">
-                            <span className="text-[9px] font-bold uppercase px-2 py-1 rounded-full bg-sky-100 text-sky-800">
-                              {cl.status}
-                            </span>
-                          </div>
-                          {cl.handledBy ? (
-                            <div className="col-span-12 text-[10px] text-gray-500">
-                              By <span className="font-semibold">{cl.handledBy}</span>
-                            </div>
-                          ) : null}
-                        </button>
-                      </li>
-                    ))}
+                        ) : null}
+                      </button>
+                    </li>
+                  ))}
                 </ul>
               )}
-            </div>
+            </SalesListTableFrame>
           </section>
 
           <section id="cd-orders" className="mb-10 scroll-mt-28">
@@ -1282,31 +1558,52 @@ const CustomerDashboard = () => {
                     <option value="60">Last 60 days</option>
                   </select>
                 </div>
-                <ul className="space-y-2 max-h-64 overflow-y-auto">
-                  {filteredReceipts.length === 0 ? (
-                    <li className="text-xs text-gray-400 py-4 text-center">No receipts in range</li>
-                  ) : (
-                    filteredReceipts.map((r) => (
-                      <li key={r.id}>
-                        <button
-                          type="button"
-                          onClick={() => goSalesReceipt(r.id)}
-                          className="w-full flex items-center justify-between gap-2 rounded-xl border border-gray-50 bg-gray-50/50 px-3 py-2 text-left hover:border-teal-100 hover:bg-white transition-all"
-                        >
-                          <div>
-                            <p className="text-xs font-bold text-[#134e4a]">{r.id}</p>
-                            <p className="text-[10px] text-gray-500">
-                              {r.date} · {r.method || '—'}
-                            </p>
-                          </div>
-                          <span className="text-sm font-black text-[#134e4a] shrink-0">
-                            {r.amount}
-                          </span>
-                        </button>
-                      </li>
-                    ))
-                  )}
-                </ul>
+                <SalesListTableFrame
+                  toolbar={
+                    <>
+                      <SalesListSearchInput
+                        value={cdRcptSearch}
+                        onChange={setCdRcptSearch}
+                        placeholder="Search receipt ID, date, amount, method…"
+                      />
+                      <SalesListSortBar
+                        fields={SALES_TABLE_SORT_FIELD_OPTIONS.receipts}
+                        field={cdRcptSort.field}
+                        dir={cdRcptSort.dir}
+                        onFieldChange={(field) => setCdRcptSort((s) => ({ ...s, field }))}
+                        onDirToggle={() =>
+                          setCdRcptSort((s) => ({ ...s, dir: s.dir === 'asc' ? 'desc' : 'asc' }))
+                        }
+                      />
+                    </>
+                  }
+                >
+                  <ul className="space-y-2 max-h-64 overflow-y-auto">
+                    {filteredReceipts.length === 0 ? (
+                      <li className="text-xs text-slate-400 py-4 text-center">No receipts match</li>
+                    ) : (
+                      filteredReceipts.map((r) => (
+                        <li key={r.id}>
+                          <button
+                            type="button"
+                            onClick={() => goSalesReceipt(r.id)}
+                            className="w-full flex items-center justify-between gap-2 rounded-xl border border-slate-100 bg-slate-50/50 px-3 py-2 text-left hover:border-teal-100 hover:bg-white transition-all"
+                          >
+                            <div>
+                              <p className="text-xs font-bold text-[#134e4a]">{r.id}</p>
+                              <p className="text-[10px] text-gray-500">
+                                {r.date} · {r.method || '—'}
+                              </p>
+                            </div>
+                            <span className="text-sm font-black text-[#134e4a] shrink-0">
+                              {r.amount}
+                            </span>
+                          </button>
+                        </li>
+                      ))
+                    )}
+                  </ul>
+                </SalesListTableFrame>
               </div>
               <div className="rounded-zarewa border border-gray-100 bg-white p-5 shadow-sm">
                 <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-4">
@@ -1379,41 +1676,66 @@ const CustomerDashboard = () => {
             </div>
           </section>
 
-          {refundsForCustomer.length > 0 ? (
-            <section id="cd-refunds" className="mb-10 scroll-mt-28">
-              <h2 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest mb-4 flex items-center gap-2">
-                <RotateCcw size={16} />
-                Refunds
-              </h2>
-              <ul className="space-y-2">
-                {refundsForCustomer.map((r) => (
-                  <li key={r.refundID}>
-                    <button
-                      type="button"
-                      onClick={() => goSalesRefund(r.refundID)}
-                      className="w-full flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-100 bg-white px-4 py-3 text-left hover:border-rose-100 hover:bg-rose-50/20 transition-all"
-                    >
-                      <div>
-                        <p className="text-xs font-mono font-bold text-[#134e4a]">{r.refundID}</p>
-                        <p className="text-[10px] text-gray-500">{r.reasonCategory || r.reason}</p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-sm font-black text-[#134e4a] tabular-nums">
-                          {formatNgn(r.amountNgn)}
-                        </p>
-                        <p className="text-[9px] font-bold uppercase text-gray-400">{r.status}</p>
-                        {(r.status === 'Approved' || r.status === 'Paid') && (
-                          <p className="text-[9px] text-gray-500 tabular-nums">
-                            Bal {formatNgn(refundOutstandingAmount(r))}
+          <section id="cd-refunds" className="mb-10 scroll-mt-28">
+            <h2 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest mb-4 flex items-center gap-2">
+              <RotateCcw size={16} />
+              Refunds
+            </h2>
+            <SalesListTableFrame
+              toolbar={
+                <>
+                  <SalesListSearchInput
+                    value={cdRfSearch}
+                    onChange={setCdRfSearch}
+                    placeholder="Search refund ID, status, reason, amount…"
+                  />
+                  <SalesListSortBar
+                    fields={SALES_TABLE_SORT_FIELD_OPTIONS.refund}
+                    field={cdRfSort.field}
+                    dir={cdRfSort.dir}
+                    onFieldChange={(field) => setCdRfSort((s) => ({ ...s, field }))}
+                    onDirToggle={() =>
+                      setCdRfSort((s) => ({ ...s, dir: s.dir === 'asc' ? 'desc' : 'asc' }))
+                    }
+                  />
+                </>
+              }
+            >
+              {refundTableRows.length === 0 ? (
+                <p className="p-8 text-center text-xs text-slate-400 font-bold uppercase tracking-widest">
+                  No refunds match
+                </p>
+              ) : (
+                <ul className="space-y-2">
+                  {refundTableRows.map((r) => (
+                    <li key={r.refundID}>
+                      <button
+                        type="button"
+                        onClick={() => goSalesRefund(r.refundID)}
+                        className="w-full flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-100 bg-white px-4 py-3 text-left hover:border-rose-100 hover:bg-rose-50/20 transition-all"
+                      >
+                        <div>
+                          <p className="text-xs font-mono font-bold text-[#134e4a]">{r.refundID}</p>
+                          <p className="text-[10px] text-gray-500">{r.reasonCategory || r.reason}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-sm font-black text-[#134e4a] tabular-nums">
+                            {formatNgn(r.amountNgn)}
                           </p>
-                        )}
-                      </div>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
+                          <p className="text-[9px] font-bold uppercase text-gray-400">{r.status}</p>
+                          {(r.status === 'Approved' || r.status === 'Paid') && (
+                            <p className="text-[9px] text-gray-500 tabular-nums">
+                              Bal {formatNgn(refundOutstandingAmount(r))}
+                            </p>
+                          )}
+                        </div>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </SalesListTableFrame>
+          </section>
 
           <section id="cd-activity" className="mb-10 scroll-mt-28">
             <h2 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest mb-4 flex items-center gap-2">
@@ -1440,6 +1762,7 @@ const CustomerDashboard = () => {
                               if (item.txType === 'quotation') goSalesQuotation(item.txId);
                               if (item.txType === 'receipt') goSalesReceipt(item.txId);
                               if (item.txType === 'refund') goSalesRefund(item.txId);
+                              if (item.txType === 'cutting') goSalesCutting(item.txId);
                             }}
                           >
                             <p className="text-[10px] font-bold text-gray-400 uppercase">
@@ -1490,7 +1813,7 @@ const CustomerDashboard = () => {
 
           <section id="cd-reports" className="scroll-mt-28">
             <h2 className="text-xs font-bold text-[#134e4a] uppercase tracking-widest mb-4 flex items-center gap-2">
-              <Download size={16} />
+              <BarChart3 size={16} />
               Reporting
             </h2>
             <div className="rounded-zarewa border border-dashed border-gray-200 bg-white/80 p-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -1549,10 +1872,10 @@ const CustomerDashboard = () => {
           setCustomerEditApprovalId('');
         }}
       >
-        <div className="z-modal-panel max-w-lg p-8 overflow-y-auto max-h-[90vh]">
-          <div className="flex justify-between items-center mb-6">
-            <h3 className="text-xl font-bold text-[#134e4a] flex items-center gap-2">
-              <User size={22} />
+        <div className="z-modal-panel max-w-lg p-0 max-h-[min(90vh,900px)] flex flex-col min-h-0 overflow-hidden">
+          <div className="shrink-0 flex justify-between items-center gap-3 px-8 pt-8 pb-4 border-b border-gray-100">
+            <h3 className="text-xl font-bold text-[#134e4a] flex items-center gap-2 min-w-0">
+              <User size={22} className="shrink-0" />
               Edit customer
             </h3>
             <button
@@ -1561,12 +1884,13 @@ const CustomerDashboard = () => {
                 setShowEdit(false);
                 setCustomerEditApprovalId('');
               }}
-              className="p-2 text-gray-400 hover:text-red-500 rounded-xl hover:bg-red-50"
+              className="p-2 text-gray-400 hover:text-red-500 rounded-xl hover:bg-red-50 shrink-0"
             >
               <X size={22} />
             </button>
           </div>
-          <form onSubmit={saveProfile} className="space-y-4">
+          <div className="flex-1 min-h-0 min-w-0 overflow-y-auto overscroll-contain px-4 pb-8 pt-5 custom-scrollbar sm:px-8">
+            <form onSubmit={saveProfile} className="space-y-4">
             <div>
               <label className="z-field-label">Full name *</label>
               <input
@@ -1576,7 +1900,7 @@ const CustomerDashboard = () => {
                 className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold text-[#134e4a] outline-none focus:ring-2 focus:ring-[#134e4a]/15"
               />
             </div>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <label className="z-field-label">Phone *</label>
                 <input
@@ -1729,6 +2053,7 @@ const CustomerDashboard = () => {
               Save changes
             </button>
           </form>
+          </div>
         </div>
       </ModalFrame>
 
@@ -1921,64 +2246,143 @@ const CustomerDashboard = () => {
       </ModalFrame>
 
       <ModalFrame isOpen={showReports} onClose={() => setShowReports(false)}>
-        <div className="z-modal-panel max-w-md p-8">
-          <div className="flex justify-between items-center mb-6">
-            <h3 className="text-lg font-bold text-[#134e4a]">Generate report</h3>
-            <button
-              type="button"
-              onClick={() => setShowReports(false)}
-              className="p-2 text-gray-400 hover:text-red-500 rounded-xl hover:bg-red-50"
-            >
-              <X size={22} />
-            </button>
-          </div>
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="z-field-label">From</label>
-                <input
-                  type="date"
-                  value={reportFrom}
-                  onChange={(e) => setReportFrom(e.target.value)}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-2.5 px-3 text-xs font-bold"
-                />
+        <div className="z-modal-panel max-w-lg w-full p-0 overflow-hidden rounded-2xl border border-slate-200/90 shadow-xl bg-white">
+          <div className="px-6 pt-6 pb-4 border-b border-slate-100 bg-gradient-to-br from-[#134e4a]/[0.07] via-white to-white">
+            <div className="flex justify-between items-start gap-3">
+              <div className="flex gap-3 min-w-0">
+                <div
+                  className="h-11 w-11 rounded-xl bg-[#134e4a]/10 flex items-center justify-center shrink-0"
+                  aria-hidden
+                >
+                  <Printer className="text-[#134e4a]" size={22} strokeWidth={2} />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-lg font-bold text-[#134e4a] tracking-tight">Customer report</h3>
+                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                    Pick a date range, then open a print preview. Use your browser’s print dialog to print or save as PDF.
+                  </p>
+                </div>
               </div>
-              <div>
-                <label className="z-field-label">To</label>
-                <input
-                  type="date"
-                  value={reportTo}
-                  onChange={(e) => setReportTo(e.target.value)}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-2.5 px-3 text-xs font-bold"
-                />
+              <button
+                type="button"
+                onClick={() => setShowReports(false)}
+                className="p-2 text-gray-400 hover:text-red-500 rounded-xl hover:bg-red-50 shrink-0"
+                aria-label="Close"
+              >
+                <X size={22} />
+              </button>
+            </div>
+          </div>
+          <div className="p-6 space-y-6">
+            <div>
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">Period</p>
+              <div className="rounded-xl border border-slate-100 bg-slate-50/80 p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="z-field-label">From</label>
+                  <input
+                    type="date"
+                    value={reportFrom}
+                    onChange={(e) => setReportFrom(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded-xl py-2.5 px-3 text-xs font-bold text-[#134e4a] outline-none focus:ring-2 focus:ring-[#134e4a]/20"
+                  />
+                </div>
+                <div>
+                  <label className="z-field-label">To</label>
+                  <input
+                    type="date"
+                    value={reportTo}
+                    onChange={(e) => setReportTo(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded-xl py-2.5 px-3 text-xs font-bold text-[#134e4a] outline-none focus:ring-2 focus:ring-[#134e4a]/20"
+                  />
+                </div>
               </div>
             </div>
-            <div className="flex flex-col gap-2">
-              <button
-                type="button"
-                onClick={() => downloadReport('sales')}
-                className="z-btn-secondary w-full justify-center py-3"
-              >
-                Quotations & produced sales
-              </button>
-              <button
-                type="button"
-                onClick={() => downloadReport('payments')}
-                className="z-btn-secondary w-full justify-center py-3"
-              >
-                Payment history
-              </button>
-              <button
-                type="button"
-                onClick={() => downloadReport('outstanding')}
-                className="z-btn-secondary w-full justify-center py-3"
-              >
-                Outstanding & overdue
-              </button>
+            <div>
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">What to include</p>
+              <ul className="flex flex-col gap-2.5">
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => openCustomerReportPreview('sales')}
+                    className="w-full text-left rounded-xl border border-slate-200 bg-white px-4 py-3.5 shadow-sm hover:border-[#134e4a]/35 hover:bg-[#134e4a]/[0.03] transition-colors group"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-[#134e4a] group-hover:underline-offset-2">
+                          Quotations & produced sales
+                        </p>
+                        <p className="text-[11px] text-slate-500 mt-1 leading-snug">
+                          Quotes dated in range plus completed production with allocated revenue.
+                        </p>
+                      </div>
+                      <Printer
+                        size={18}
+                        className="text-slate-300 group-hover:text-[#134e4a] shrink-0 mt-0.5"
+                        aria-hidden
+                      />
+                    </div>
+                  </button>
+                </li>
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => openCustomerReportPreview('payments')}
+                    className="w-full text-left rounded-xl border border-slate-200 bg-white px-4 py-3.5 shadow-sm hover:border-[#134e4a]/35 hover:bg-[#134e4a]/[0.03] transition-colors group"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-[#134e4a]">Payment history</p>
+                        <p className="text-[11px] text-slate-500 mt-1 leading-snug">
+                          Receipts recorded between the dates you chose.
+                        </p>
+                      </div>
+                      <Printer
+                        size={18}
+                        className="text-slate-300 group-hover:text-[#134e4a] shrink-0 mt-0.5"
+                        aria-hidden
+                      />
+                    </div>
+                  </button>
+                </li>
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => openCustomerReportPreview('outstanding')}
+                    className="w-full text-left rounded-xl border border-slate-200 bg-white px-4 py-3.5 shadow-sm hover:border-[#134e4a]/35 hover:bg-[#134e4a]/[0.03] transition-colors group"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-[#134e4a]">Outstanding & overdue</p>
+                        <p className="text-[11px] text-slate-500 mt-1 leading-snug">
+                          Current open balances; period shows context only.
+                        </p>
+                      </div>
+                      <Printer
+                        size={18}
+                        className="text-slate-300 group-hover:text-[#134e4a] shrink-0 mt-0.5"
+                        aria-hidden
+                      />
+                    </div>
+                  </button>
+                </li>
+              </ul>
             </div>
           </div>
         </div>
       </ModalFrame>
+
+      <ReportPrintModal
+        isOpen={reportPreviewOpen}
+        onClose={() => {
+          setReportPreviewOpen(false);
+          setReportPreview(null);
+        }}
+        title={reportPreview?.title || 'Report'}
+        periodLabel={reportPreview?.periodLabel || ''}
+        columns={reportPreview?.columns || []}
+        rows={reportPreview?.rows || []}
+        summaryLines={reportPreview?.summaryLines || []}
+      />
 
       <ModalFrame isOpen={refundAdvanceOpen} onClose={() => setRefundAdvanceOpen(false)}>
         <form onSubmit={submitRefundAdvance} className="z-modal-panel max-w-sm p-6">

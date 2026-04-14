@@ -859,6 +859,30 @@ const Reports = () => {
     ]
   );
 
+  const downloadMonthEndBundle = useCallback(() => {
+    const packs = [
+      { sheet: 'Costs_inventory', name: PACK_PERIOD_COSTS_INVENTORY },
+      { sheet: 'Cash_bank_AR', name: PACK_CASH_BANK_AR },
+      { sheet: 'Sales_customer', name: PACK_SALES_CUSTOMER },
+      { sheet: 'Ops_procurement', name: PACK_OPS_PROCUREMENT },
+    ];
+    const wb = XLSX.utils.book_new();
+    let sheetCount = 0;
+    for (const p of packs) {
+      const rows = getExportRows(p.name);
+      if (!rows.length) continue;
+      const sheetName = p.sheet.slice(0, 31);
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), sheetName);
+      sheetCount += 1;
+    }
+    if (!sheetCount) {
+      showToast('No rows in any core pack for this period.', { variant: 'info' });
+      return;
+    }
+    XLSX.writeFile(wb, `month-end-${startDate}-to-${endDate}.xlsx`);
+    showToast(`Month-end bundle downloaded (${sheetCount} sheet(s)).`);
+  }, [endDate, getExportRows, showToast, startDate]);
+
   const downloadReport = async (name, fmt) => {
     const packSlug = name.toLowerCase().replace(/\s+/g, '-').replace(/[()]/g, '');
 
@@ -1209,7 +1233,7 @@ const Reports = () => {
               <p className="text-sm font-medium text-slate-500">Loading summary…</p>
             )}
             {aggregateSummary && (
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 {[
                   ['Customers', aggregateSummary.customersTotal],
                   ['Quotations', aggregateSummary.quotationsTotal],
@@ -1281,6 +1305,14 @@ const Reports = () => {
                 when cutting lists are dated in the period (metre share). Cash receipts are period cash, not the same as
                 sales.
               </p>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => downloadMonthEndBundle()} className="z-btn-primary !text-[11px]">
+                  Download month-end bundle (Excel)
+                </button>
+                <span className="text-[10px] text-slate-500 self-center">
+                  One workbook: costs &amp; inventory, cash/bank/AR, sales &amp; customer, operations &amp; procurement.
+                </span>
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
                 <div className="rounded-2xl border border-slate-100 bg-slate-50/80 p-4">
                   <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide mb-1">
@@ -1413,7 +1445,7 @@ const Reports = () => {
               Purchase orders with an order date in the selected range, grouped by procurement kind (coil kg, stone
               metres, accessories).
             </p>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
               {[
                 ['Coil', procurementMixInPeriod.coil],
                 ['Stone', procurementMixInPeriod.stone],
@@ -1623,7 +1655,7 @@ const Reports = () => {
                         <button
                           type="button"
                           onClick={runPrint}
-                          className="z-btn-secondary flex-1 min-w-[140px] justify-center"
+                          className="z-btn-secondary min-w-0 flex-1 justify-center sm:min-w-[10rem]"
                           title={`A4 print preview — ${r.title}`}
                         >
                           <Printer size={16} />
@@ -1634,7 +1666,7 @@ const Reports = () => {
                             key={fmt}
                             type="button"
                             onClick={() => runDownload(fmt)}
-                            className="z-btn-primary flex-1 min-w-[120px] justify-center"
+                            className="z-btn-primary min-w-0 flex-1 justify-center sm:min-w-[9rem]"
                             title={`Generate ${fmt} for ${r.title}`}
                           >
                             <FileSpreadsheet size={14} />
@@ -1689,7 +1721,7 @@ const Reports = () => {
                         <button
                           type="button"
                           onClick={() => openPrintSheet(r.title)}
-                          className="z-btn-secondary flex-1 min-w-[140px] justify-center"
+                          className="z-btn-secondary min-w-0 flex-1 justify-center sm:min-w-[10rem]"
                           title={`A4 print preview — ${r.title}`}
                         >
                           <Printer size={16} />
@@ -1700,7 +1732,7 @@ const Reports = () => {
                             key={fmt}
                             type="button"
                             onClick={() => downloadReport(r.title, fmt)}
-                            className="z-btn-primary flex-1 min-w-[120px] justify-center"
+                            className="z-btn-primary min-w-0 flex-1 justify-center sm:min-w-[9rem]"
                             title={`Generate ${fmt} for ${r.title}`}
                           >
                             <FileSpreadsheet size={14} />

@@ -59,6 +59,8 @@ export function normalizeRefund(r) {
     amountNgn,
     calculationLines: Array.isArray(r.calculationLines) ? r.calculationLines.map(normalizeLine) : [],
     suggestedLines: Array.isArray(r.suggestedLines) ? r.suggestedLines.map(normalizeLine) : [],
+    previewSnapshot:
+      r.previewSnapshot != null && typeof r.previewSnapshot === 'object' ? r.previewSnapshot : null,
     calculationNotes: r.calculationNotes ?? '',
     status: r.status === 'Paid' || r.status === 'Rejected' || r.status === 'Approved' ? r.status : 'Pending',
     requestedBy: r.requestedBy ?? '—',

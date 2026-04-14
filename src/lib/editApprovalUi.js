@@ -1,4 +1,4 @@
-import { hasPermissionInList } from './moduleAccess';
+import { hasPermissionInList } from './moduleAccess.js';
 
 /** Mirrors server: only admin and CEO may PATCH without a second-party token. */
 export function editMutationNeedsSecondApprovalRole(roleKey) {

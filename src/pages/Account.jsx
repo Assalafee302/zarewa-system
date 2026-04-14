@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Landmark,
   Plus,
@@ -18,15 +18,14 @@ import {
   AlertCircle,
   RotateCcw,
   Printer,
-  Paperclip,
   Banknote,
 } from 'lucide-react';
 
 import { MainPanel, PageHeader, PageShell, PageTabs, ModalFrame } from '../components/layout';
+import { AiAskButton } from '../components/AiAskButton';
 import { EditSecondApprovalInline } from '../components/EditSecondApprovalInline';
 import { formatNgn } from '../Data/mockData';
 import { useToast } from '../context/ToastContext';
-import { useInventory } from '../context/InventoryContext';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { apiFetch } from '../lib/apiBase';
 import {
@@ -36,108 +35,30 @@ import {
   refundOutstandingAmount,
 } from '../lib/refundsStore';
 import { liveReceivablesNgn, openAuditQueue } from '../lib/liveAnalytics';
-import { receiptCashReceivedNgn } from '../lib/salesReceiptsList';
+import {
+  receiptCashReceivedNgn,
+  receiptLedgerReceiptTreasurySplits,
+  firstBankReconSystemMatchToken,
+  findSalesReceiptByMatchToken,
+} from '../lib/salesReceiptsList';
 import { printExpenseRequestRecord } from '../lib/expenseRequestPrint';
+import { ExpenseRequestFormFields } from '../components/office/ExpenseRequestFormFields.jsx';
+import { buildPaymentRequestBodyFromForm, initialExpenseRequestFormState } from '../lib/expenseRequestFormCore.js';
 import { EXPENSE_CATEGORY_OPTIONS } from '../../shared/expenseCategories.js';
-
-const TAB_LABELS = {
-  treasury: 'Treasury',
-  receipts: 'Receipts & bank recon',
-  payables: 'Payables',
-  movements: 'Fund movements',
-  disbursements: 'Expenses & requests',
-  audit: 'Audit & reconciliation',
-};
-
-const nextExpenseId = (list) => {
-  const nums = list
-    .map((e) => parseInt(e.expenseID.replace(/\D/g, ''), 10))
-    .filter((n) => !Number.isNaN(n));
-  const n = nums.length ? Math.max(...nums) + 1 : 1;
-  return `EXP-2026-${String(n).padStart(3, '0')}`;
-};
-
-const normalizePaymentRequest = (row) => ({
-  ...row,
-  paidAmountNgn: Number(row?.paidAmountNgn) || 0,
-  paidAtISO: row?.paidAtISO || '',
-  paidBy: row?.paidBy || '',
-  paymentNote: row?.paymentNote || '',
-  branchId: row?.branchId || '',
-  expenseCategory: row?.expenseCategory || '',
-  isStaffLoan: Boolean(row?.isStaffLoan),
-  hrRequestId: row?.hrRequestId || '',
-  staffUserId: row?.staffUserId || '',
-  staffDisplayName: row?.staffDisplayName || '',
-  requestReference: row?.requestReference || '',
-  lineItems: Array.isArray(row?.lineItems) ? row.lineItems : [],
-  attachmentName: row?.attachmentName || '',
-  attachmentMime: row?.attachmentMime || '',
-  attachmentPresent: Boolean(row?.attachmentPresent),
-});
-
-const createRequestPayLine = (defaultAccountId = '', amount = '') => ({
-  id: `pay-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-  treasuryAccountId: String(defaultAccountId),
-  amount: amount === '' ? '' : String(amount),
-  reference: '',
-});
-
-const createExpenseRequestLineItem = () => ({
-  id: `li-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-  item: '',
-  unit: '',
-  unitPriceNgn: '',
-});
-
-function expenseRequestLineTotal(row) {
-  const u = Number(row.unit);
-  const p = Number(row.unitPriceNgn);
-  if (!u || Number.isNaN(p)) return 0;
-  return Math.round(u * p);
-}
-
-const TREASURY_STATEMENT_TYPE_LABEL = {
-  RECEIPT_IN: 'Customer receipt',
-  ADVANCE_IN: 'Advance deposit',
-  BANK_RECON_ADJUSTMENT: 'Bank reconciliation settlement',
-  INTERNAL_TRANSFER_IN: 'Transfer in',
-  INTERNAL_TRANSFER_OUT: 'Transfer out',
-  EXPENSE: 'Expense',
-  AP_PAYMENT: 'Accounts payable payment',
-  SUPPLIER_PAYMENT: 'Supplier payment',
-  PO_SUPPLIER_PAYMENT: 'Supplier payment',
-  REFUND_PAYOUT: 'Customer refund payout',
-  ADVANCE_REFUND_OUT: 'Advance refund',
-  PAYMENT_REQUEST_OUT: 'Payment request payout',
-  TRANSPORT_PAYMENT: 'Transport / haulage',
-};
-
-const TREASURY_SOURCE_KIND_LABEL = {
-  INTER_BRANCH_LOAN: 'Inter-branch lending (disbursement)',
-  INTER_BRANCH_LOAN_REPAY: 'Inter-branch lending (repayment)',
-};
-
-function treasuryMovementStatementLabel(m) {
-  const sourceLabel = TREASURY_SOURCE_KIND_LABEL[m.sourceKind];
-  const kind =
-    sourceLabel ||
-    TREASURY_STATEMENT_TYPE_LABEL[m.type] ||
-    m.type ||
-    'Treasury movement';
-  const bits = [kind];
-  if (m.counterpartyName) bits.push(m.counterpartyName);
-  if (m.reference) bits.push(`Ref ${m.reference}`);
-  if (m.note) bits.push(m.note);
-  return bits.join(' · ');
-}
+import {
+  ACCOUNT_TAB_LABELS as TAB_LABELS,
+  buildPaymentRequestAuditTrail,
+  createRequestPayLine,
+  nextExpenseId,
+  normalizePaymentRequest,
+  treasuryMovementStatementLabel,
+} from '../lib/accountCore';
 
 const Account = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { show: showToast } = useToast();
-  const { purchaseOrders, setPurchaseOrderStatus } = useInventory();
   const ws = useWorkspace();
 
   const [activeTab, setActiveTab] = useState('treasury');
@@ -147,7 +68,6 @@ const Account = () => {
   const [showExpenseModal, setShowExpenseModal] = useState(false);
   const [showPayRequestModal, setShowPayRequestModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
-  const [showApPaymentModal, setShowApPaymentModal] = useState(false);
   const [showRefundPayModal, setShowRefundPayModal] = useState(false);
   const [showBankReconModal, setShowBankReconModal] = useState(false);
   const [showBankImportModal, setShowBankImportModal] = useState(false);
@@ -158,9 +78,10 @@ const Account = () => {
     'bankDateISO,description,amountNgn\n2026-04-01,"Example inflow",100000\n2026-04-02,Bank charge,-2500'
   );
   const [bankCsvBusy, setBankCsvBusy] = useState(false);
+  /** all | review_queue | matched | excluded */
+  const [reconViewFilter, setReconViewFilter] = useState('all');
   const [statementAccount, setStatementAccount] = useState(null);
   const [selectedPayment, setSelectedPayment] = useState(null);
-  const [selectedAp, setSelectedAp] = useState(null);
   const [refundPayTarget, setRefundPayTarget] = useState(null);
   const [refundPaidBy, setRefundPaidBy] = useState('');
   const [refundPayLines, setRefundPayLines] = useState([]);
@@ -179,7 +100,6 @@ const Account = () => {
     balance: '',
   });
 
-  const [payables, setPayables] = useState([]);
   const [fundMovements, setFundMovements] = useState([]);
   const [transferForm, setTransferForm] = useState({
     fromId: '',
@@ -209,12 +129,6 @@ const Account = () => {
     toTreasuryAccountId: '',
     note: '',
   });
-  const [apPayForm, setApPayForm] = useState({
-    amountNgn: '',
-    paymentMethod: 'Bank Transfer',
-    debitAccountId: '',
-  });
-
   const [expenses, setExpenses] = useState([]);
   const [payRequests, setPayRequests] = useState([]);
   const [bankReconciliation, setBankReconciliation] = useState([]);
@@ -240,7 +154,6 @@ const Account = () => {
       setCustomerRefunds([]);
       setExpenses([]);
       setPayRequests([]);
-      setPayables([]);
       setFundMovements([]);
       setBankReconciliation([]);
       return;
@@ -265,11 +178,6 @@ const Account = () => {
       setPayRequests(s.paymentRequests.map((x) => normalizePaymentRequest(x)));
     } else {
       setPayRequests([]);
-    }
-    if (Array.isArray(s.accountsPayable)) {
-      setPayables(s.accountsPayable.map((x) => ({ ...x })));
-    } else {
-      setPayables([]);
     }
     if (Array.isArray(s.treasuryMovements)) {
       setFundMovements(
@@ -313,14 +221,14 @@ const Account = () => {
     reference: '',
   });
 
-  const [requestForm, setRequestForm] = useState({
-    lines: [createExpenseRequestLineItem()],
+  const [requestForm, setRequestForm] = useState(() => ({
+    ...initialExpenseRequestFormState(),
     requestDate: '',
     requestReference: '',
     expenseCategory: '',
     description: '',
     attachment: null,
-  });
+  }));
   const payRequestFileRef = useRef(null);
   const bankCsvFileRef = useRef(null);
   const activeActorLabel = ws?.session?.user?.displayName ?? 'Finance';
@@ -431,15 +339,6 @@ const Account = () => {
     [liveLedgerEntries, liveQuotations]
   );
 
-  const payablesOutstandingNgn = useMemo(
-    () =>
-      payables.reduce(
-        (s, r) => s + Math.max(0, r.amountNgn - (r.paidNgn || 0)),
-        0
-      ),
-    [payables]
-  );
-
   const reconciliationFlags = useMemo(
     () =>
       bankReconciliation.filter((l) => l.status === 'Review' || l.status === 'PendingManager').length,
@@ -452,7 +351,6 @@ const Account = () => {
     showExpenseModal ||
     showPayRequestModal ||
     showTransferModal ||
-    showApPaymentModal ||
     showRefundPayModal ||
     showBankReconModal ||
     showBankImportModal ||
@@ -730,7 +628,6 @@ const Account = () => {
     () => [
       { id: 'treasury', icon: <Landmark size={16} />, label: 'Treasury' },
       { id: 'receipts', icon: <Banknote size={16} />, label: 'Receipts & recon' },
-      { id: 'payables', icon: <Truck size={16} />, label: 'Payables' },
       { id: 'movements', icon: <ArrowRightLeft size={16} />, label: 'Movements' },
       { id: 'disbursements', icon: <ClipboardList size={16} />, label: 'Expenses & requests' },
       { id: 'audit', icon: <ShieldCheck size={16} />, label: 'Audit' },
@@ -757,17 +654,6 @@ const Account = () => {
 
   const headerAction = () => {
     if (activeTab === 'treasury') setShowAddBank(true);
-    if (activeTab === 'payables') {
-      const open = payables.find((p) => p.amountNgn > p.paidNgn);
-      if (open) {
-        setSelectedAp(open);
-        setApPayForm((f) => ({
-          ...f,
-          debitAccountId: String(bankAccounts[0]?.id ?? ''),
-        }));
-        setShowApPaymentModal(true);
-      } else showToast('No open supplier balances found.', { variant: 'info' });
-    }
     if (activeTab === 'movements') {
       setTransferForm({
         fromId: bankAccounts[0] ? String(bankAccounts[0].id) : '',
@@ -784,13 +670,7 @@ const Account = () => {
   };
 
   const newRecordLabel =
-    activeTab === 'treasury'
-      ? 'New account'
-      : activeTab === 'payables'
-        ? 'Pay supplier'
-        : activeTab === 'movements'
-          ? 'New transfer'
-          : null;
+    activeTab === 'treasury' ? 'New account' : activeTab === 'movements' ? 'New transfer' : null;
 
    
   useEffect(() => {
@@ -801,6 +681,12 @@ const Account = () => {
   }, [location.state, location.pathname, navigate, handleAccountTabChange]);
    
 
+  const ledgerEntriesForRecon = useMemo(
+    () =>
+      ws?.hasWorkspaceData && Array.isArray(ws?.snapshot?.ledgerEntries) ? ws.snapshot.ledgerEntries : [],
+    [ws?.hasWorkspaceData, ws?.snapshot?.ledgerEntries]
+  );
+
   const reconSuggestionsById = useMemo(() => {
     const rows = ws?.hasWorkspaceData ? liveTreasuryMovements : [];
     const toIso = (value) => String(value || '').slice(0, 10);
@@ -809,6 +695,7 @@ const Account = () => {
       const t = Date.parse(iso);
       return Number.isNaN(t) ? Number.NaN : t;
     };
+    const ledgerTypes = new Set(['RECEIPT', 'ADVANCE_IN', 'ADVANCE_APPLIED', 'RECEIPT_REVERSAL']);
     const out = {};
     for (const line of bankReconciliation) {
       const lineAmt = Math.abs(Number(line.amountNgn) || 0);
@@ -834,18 +721,42 @@ const Account = () => {
           best = {
             score,
             text: parts.filter(Boolean).join(' · ') || m.type || '',
+            source: 'treasury',
           };
+        }
+      }
+      if (!best?.text && ledgerEntriesForRecon.length) {
+        for (const e of ledgerEntriesForRecon) {
+          if (!ledgerTypes.has(String(e.type || '').trim())) continue;
+          const eAmt = Math.abs(Number(e.amountNgn) || 0);
+          if (Math.abs(eAmt - lineAmt) > 1) continue;
+          const eDate = toIso(e.atISO);
+          const eTs = toEpoch(eDate);
+          const dayDiff =
+            Number.isFinite(lineTs) && Number.isFinite(eTs)
+              ? Math.round(Math.abs(eTs - lineTs) / (1000 * 60 * 60 * 24))
+              : 999;
+          if (dayDiff > 5) continue;
+          const score = dayDiff + 1;
+          if (!best || score < best.score) {
+            const parts = [e.id, e.quotationRef, e.bankReference, e.customerName, e.purpose].filter(Boolean);
+            best = {
+              score,
+              text: parts.join(' · ') || String(e.type || ''),
+              source: 'ledger',
+            };
+          }
         }
       }
       if (best?.text) {
         out[line.id] = {
           text: best.text,
-          confidence: best.score === 0 ? 'High' : best.score === 1 ? 'Medium' : 'Low',
+          confidence: best.score === 0 ? 'High' : best.score <= 2 ? 'Medium' : 'Low',
         };
       }
     }
     return out;
-  }, [bankReconciliation, liveTreasuryMovements, ws?.hasWorkspaceData]);
+  }, [bankReconciliation, ledgerEntriesForRecon, liveTreasuryMovements, ws?.hasWorkspaceData]);
 
   const salesReceipts = useMemo(
     () =>
@@ -988,39 +899,14 @@ const Account = () => {
 
   const savePayRequest = async (e) => {
     e.preventDefault();
-    const expenseCategory = requestForm.expenseCategory.trim();
-    if (!expenseCategory) {
+    const body = buildPaymentRequestBodyFromForm(requestForm);
+    if (!String(body.expenseCategory || '').trim()) {
       showToast('Select an expense category from the list.', { variant: 'error' });
       return;
     }
-    const lineItems = requestForm.lines
-      .map((row) => {
-        const item = String(row.item || '').trim();
-        const unit = Number.parseFloat(String(row.unit ?? '').replace(/,/g, ''));
-        const unitPriceNgn = Number(row.unitPriceNgn);
-        return { item, unit, unitPriceNgn };
-      })
-      .filter((r) => r.item && r.unit > 0 && Number.isFinite(r.unitPriceNgn) && r.unitPriceNgn >= 0);
-    if (lineItems.length < 1) {
+    if (!body.lineItems?.length) {
       showToast('Add at least one line with description, quantity, and unit price.', { variant: 'error' });
       return;
-    }
-    const requestDate = requestForm.requestDate || new Date().toISOString().slice(0, 10);
-    const description = requestForm.description.trim() || '—';
-    const requestReference = requestForm.requestReference.trim();
-    const body = {
-      requestDate,
-      description,
-      requestReference,
-      expenseCategory,
-      lineItems,
-    };
-    if (requestForm.attachment?.dataBase64) {
-      body.attachment = {
-        name: requestForm.attachment.name,
-        mime: requestForm.attachment.mime,
-        dataBase64: requestForm.attachment.dataBase64,
-      };
     }
     if (ws?.canMutate) {
       const { ok, data } = await apiFetch('/api/payment-requests', {
@@ -1042,7 +928,7 @@ const Account = () => {
       return;
     }
     setRequestForm({
-      lines: [createExpenseRequestLineItem()],
+      ...initialExpenseRequestFormState(),
       requestDate: '',
       requestReference: '',
       expenseCategory: '',
@@ -1306,82 +1192,23 @@ const Account = () => {
     }));
   };
 
-  const saveApPayment = async (e) => {
-    e.preventDefault();
-    if (!selectedAp) return;
-    const invoiceRef = selectedAp.invoiceRef;
-    const amount = Number(apPayForm.amountNgn);
-    const debitId = Number(apPayForm.debitAccountId);
-    if (Number.isNaN(amount) || amount <= 0) {
-      showToast('Enter payment amount.', { variant: 'error' });
-      return;
-    }
-    const remaining = selectedAp.amountNgn - selectedAp.paidNgn;
-    const apply = Math.min(amount, remaining);
-    if (apply <= 0) {
-      showToast('This invoice is already fully paid on file.', { variant: 'info' });
-      return;
-    }
-    const acc = bankAccounts.find((a) => a.id === debitId);
-    if (!acc || acc.balance < apply) {
-      showToast('Selected account has insufficient balance.', { variant: 'error' });
-      return;
-    }
-    const method = apPayForm.paymentMethod;
-    const newPaidTotal = selectedAp.paidNgn + apply;
-    const fullySettled = newPaidTotal >= selectedAp.amountNgn;
-    const poRef = selectedAp.poRef?.trim?.() ?? '';
-    const shouldAdvancePo = Boolean(
-      fullySettled && poRef && purchaseOrders.find((p) => p.poID === poRef)?.status === 'Approved'
-    );
-    let procurementNote = '';
-    if (ws?.canMutate) {
-      const pay = await apiFetch(`/api/accounts-payable/${encodeURIComponent(selectedAp.apID)}/pay`, {
-        method: 'POST',
-        body: JSON.stringify({
-          amountNgn: apply,
-          paymentMethod: method,
-          treasuryAccountId: debitId,
-          reference: invoiceRef,
-          createdBy: activeActorLabel,
-        }),
-      });
-      if (!pay.ok || !pay.data?.ok) {
-        showToast(pay.data?.error || 'Could not sync supplier payment.', { variant: 'error' });
-        return;
-      }
-      if (shouldAdvancePo) {
-        const st = await setPurchaseOrderStatus(poRef, 'In Transit');
-        if (st.ok) procurementNote = ` ${poRef} → In Transit (await GRN in Operations).`;
-      }
-      await ws.refresh();
-    } else {
-      showToast(
-        ws?.usingCachedData
-          ? 'Reconnect to record supplier payments — workspace is read-only.'
-          : 'Connect to the API to record accounts payable payments.',
-        { variant: 'info' }
-      );
-      return;
-    }
-    setShowApPaymentModal(false);
-    setSelectedAp(null);
-    setApPayForm({
-      amountNgn: '',
-      paymentMethod: 'Bank Transfer',
-      debitAccountId: String(bankAccounts[0]?.id ?? ''),
-    });
-    showToast(`${formatNgn(apply)} recorded against ${invoiceRef} (${method}).${procurementNote}`);
-  };
-
-  const reviewPaymentRequest = async (requestID, status) => {
+  const reviewPaymentRequest = async (requestID, status, note) => {
     if (!requestID) return;
+    const cleanNote = String(note || '').trim();
+    if (status === 'Rejected' && !cleanNote) {
+      showToast('Rejection note is required for audit trace.', { variant: 'error' });
+      return;
+    }
     if (ws?.canMutate) {
       const { ok, data } = await apiFetch(`/api/payment-requests/${encodeURIComponent(requestID)}/decision`, {
         method: 'POST',
         body: JSON.stringify({
           status,
-          note: status === 'Approved' ? 'Approved for treasury action.' : 'Rejected during finance review.',
+          note:
+            cleanNote ||
+            (status === 'Approved'
+              ? 'Approved for treasury action.'
+              : 'Rejected during finance review.'),
         }),
       });
       if (!ok || !data?.ok) {
@@ -1438,15 +1265,6 @@ const Account = () => {
     });
   }, [payRequests, searchQuery]);
 
-  const filteredPayables = useMemo(() => {
-    const qq = searchQuery.trim().toLowerCase();
-    if (!qq) return payables;
-    return payables.filter((p) => {
-      const blob = [p.apID, p.supplierName, p.poRef, p.invoiceRef].join(' ').toLowerCase();
-      return blob.includes(qq);
-    });
-  }, [payables, searchQuery]);
-
   const filteredBankAccounts = useMemo(() => {
     const qq = searchQuery.trim().toLowerCase();
     if (!qq) return bankAccounts;
@@ -1457,13 +1275,21 @@ const Account = () => {
   }, [bankAccounts, searchQuery]);
 
   const filteredReconciliation = useMemo(() => {
+    let rows = bankReconciliation;
+    if (reconViewFilter === 'review_queue') {
+      rows = rows.filter((l) => l.status === 'Review' || l.status === 'PendingManager');
+    } else if (reconViewFilter === 'matched') {
+      rows = rows.filter((l) => l.status === 'Matched');
+    } else if (reconViewFilter === 'excluded') {
+      rows = rows.filter((l) => l.status === 'Excluded');
+    }
     const qq = searchQuery.trim().toLowerCase();
-    if (!qq) return bankReconciliation;
-    return bankReconciliation.filter((l) => {
+    if (!qq) return rows;
+    return rows.filter((l) => {
       const blob = [l.id, l.description, l.systemMatch || ''].join(' ').toLowerCase();
       return blob.includes(qq);
     });
-  }, [bankReconciliation, searchQuery]);
+  }, [bankReconciliation, reconViewFilter, searchQuery]);
 
   const saveBankReconLine = async (line, status, systemMatchOverride) => {
     if (!ws?.canMutate) {
@@ -1644,14 +1470,21 @@ const Account = () => {
       showToast('Import failed.', { variant: 'error' });
       return;
     }
+    const skipN = Number(data.skippedDuplicateCount || 0);
     if (data.errorCount > 0) {
       showToast(
-        `Imported ${data.createdCount} line(s); ${data.errorCount} row(s) failed. Check amounts and dates.`,
+        `Imported ${data.createdCount} line(s); ${data.errorCount} row(s) failed.${skipN ? ` ${skipN} duplicate(s) skipped.` : ''} Check amounts and dates.`,
         { variant: 'error' }
       );
     } else {
-      showToast(`Imported ${data.createdCount} statement line(s) — in review.`);
-      setShowBankImportModal(false);
+      const msg = [
+        data.createdCount ? `Imported ${data.createdCount} statement line(s) — in review.` : null,
+        skipN ? `${skipN} duplicate row(s) skipped (same date, description, amount).` : null,
+      ]
+        .filter(Boolean)
+        .join(' ');
+      showToast(msg || 'Import finished.');
+      if (data.createdCount > 0 || skipN) setShowBankImportModal(false);
     }
     await ws.refresh();
   };
@@ -1678,14 +1511,21 @@ const Account = () => {
       showToast('CSV import failed.', { variant: 'error' });
       return;
     }
+    const skipN = Number(data.skippedDuplicateCount || 0);
     if (data.errorCount > 0) {
       showToast(
-        `Imported ${data.createdCount} line(s); ${data.errorCount} row(s) failed. Check dates and amounts.`,
+        `Imported ${data.createdCount} line(s); ${data.errorCount} row(s) failed.${skipN ? ` ${skipN} duplicate(s) skipped.` : ''} Check dates and amounts.`,
         { variant: 'error' }
       );
     } else {
-      showToast(`Imported ${data.createdCount} line(s) from CSV.`);
-      setShowBankCsvModal(false);
+      const msg = [
+        data.createdCount ? `Imported ${data.createdCount} line(s) from CSV.` : null,
+        skipN ? `${skipN} duplicate row(s) skipped (same date, description, amount).` : null,
+      ]
+        .filter(Boolean)
+        .join(' ');
+      showToast(msg || 'Import finished.');
+      if (data.createdCount > 0 || skipN) setShowBankCsvModal(false);
     }
     await ws.refresh();
   };
@@ -1719,10 +1559,40 @@ const Account = () => {
           </div>
         ) : null}
       </div>
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {[
+          { id: 'all', label: 'All' },
+          { id: 'review_queue', label: 'Needs action' },
+          { id: 'matched', label: 'Matched' },
+          { id: 'excluded', label: 'Excluded' },
+        ].map((f) => (
+          <button
+            key={f.id}
+            type="button"
+            onClick={() => setReconViewFilter(f.id)}
+            className={`rounded-lg border px-2.5 py-1 text-[9px] font-black uppercase tracking-wide transition ${
+              reconViewFilter === f.id
+                ? 'border-[#134e4a] bg-[#134e4a] text-white'
+                : 'border-slate-200 bg-white text-slate-600 hover:border-teal-200'
+            }`}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
       <ul className="space-y-1.5">
         {filteredReconciliation.map((line) => {
           const amtLabel = `${formatNgn(Math.abs(line.amountNgn))}${line.amountNgn < 0 ? ' DR' : ' CR'}`;
           const matchText = line.systemMatch ?? reconSuggestionsById[line.id]?.text ?? '—';
+          const reconMatchField = reconDrafts[line.id] ?? line.systemMatch ?? '';
+          const reconReceiptToken = firstBankReconSystemMatchToken(reconMatchField);
+          const reconMatchedReceipt =
+            reconReceiptToken && salesReceipts.length
+              ? findSalesReceiptByMatchToken(salesReceipts, reconReceiptToken)
+              : null;
+          const reconReceiptPaySplits = reconMatchedReceipt
+            ? receiptLedgerReceiptTreasurySplits(reconMatchedReceipt, liveTreasuryMovements)
+            : [];
           const meta2 = [matchText, line.branchId ? branchNameById[line.branchId] || line.branchId : null]
             .filter(Boolean)
             .join(' · ');
@@ -1765,6 +1635,35 @@ const Account = () => {
                   <p className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2" title={meta2}>
                     {meta2}
                   </p>
+                  {reconReceiptPaySplits.length > 0 ? (
+                    <div className="mt-1.5 rounded-md border border-slate-200/80 bg-slate-50/80 px-2 py-1.5">
+                      <p className="text-[8px] font-bold uppercase tracking-wide text-slate-500 mb-1">
+                        Receipt payment splits ({reconMatchedReceipt?.id})
+                      </p>
+                      <ul className="space-y-0.5">
+                        {reconReceiptPaySplits.map((s) => (
+                          <li
+                            key={s.movementId}
+                            className="flex justify-between gap-2 text-[9px] text-slate-800"
+                          >
+                            <span className="min-w-0 truncate" title={s.accountLabel}>
+                              {s.accountLabel}
+                            </span>
+                            <span className="shrink-0 font-bold tabular-nums text-emerald-800">
+                              {formatNgn(s.amountNgn)}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                      <p className="text-[8px] text-slate-600 mt-1 tabular-nums">
+                        Sum of splits {formatNgn(reconReceiptPaySplits.reduce((sum, s) => sum + s.amountNgn, 0))}
+                      </p>
+                    </div>
+                  ) : reconMatchedReceipt && isCredit ? (
+                    <p className="text-[8px] text-slate-500 mt-1 italic">
+                      Matched receipt has no treasury split lines on file — reconcile to receipt total.
+                    </p>
+                  ) : null}
                   {line.matchedSystemAmountNgn != null &&
                   (line.status === 'Matched' ||
                     line.status === 'PendingManager' ||
@@ -1875,7 +1774,15 @@ const Account = () => {
                     </button>
                     <button
                       type="button"
-                      onClick={() => saveBankReconLine(line, 'Excluded', 'Excluded — not applicable')}
+                      onClick={() => {
+                        const reason = window.prompt(
+                          'Reason for exclusion (required for audit trace)',
+                          'Not applicable to company ledger'
+                        );
+                        const cleanReason = String(reason || '').trim();
+                        if (!cleanReason) return;
+                        saveBankReconLine(line, 'Excluded', `Excluded — ${cleanReason}`);
+                      }}
                       className="rounded-lg border border-gray-200 bg-white text-gray-600 px-3 py-2 text-[10px] font-bold uppercase tracking-wide"
                     >
                       Exclude
@@ -1905,8 +1812,30 @@ const Account = () => {
     <PageShell blurred={isAnyModalOpen}>
       <PageHeader
         title="Finance & accounts"
-        subtitle="Treasury, customer receipt settlement, bank reconciliation, payables, and approvals"
+        subtitle="Treasury, customer receipt settlement, bank reconciliation, and approvals"
         tabs={<PageTabs tabs={accountTabs} value={activeTab} onChange={handleAccountTabChange} />}
+        actions={
+          <AiAskButton
+            mode="finance"
+            prompt={
+              activeTab === 'treasury'
+                ? 'Give me a short treasury and payout summary from the live workspace.'
+                : activeTab === 'receipts'
+                  ? 'Explain the main receipt-settlement and bank-reconciliation issues visible right now.'
+                  : activeTab === 'audit'
+                      ? 'Summarize the audit and reconciliation queue and what needs action first.'
+                      : 'Summarize the current finance workload and the next best actions.'
+            }
+            pageContext={{
+              source: 'finance-page',
+              activeTab,
+              searchQuery,
+            }}
+            className="inline-flex items-center gap-2 rounded-xl border border-teal-100 bg-white px-3 py-2 text-[10px] font-black uppercase tracking-wide text-[#134e4a] shadow-sm transition hover:bg-teal-50"
+          >
+            Ask AI
+          </AiAskButton>
+        }
       />
 
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-4">
@@ -1936,20 +1865,20 @@ const Account = () => {
             </p>
           </button>
 
-          <button
-            type="button"
-            onClick={() => handleAccountTabChange('payables')}
-            className="w-full text-left z-card-muted hover:border-teal-100 transition-all cursor-pointer p-5"
+          <Link
+            to="/procurement"
+            state={{ focusTab: 'payables' }}
+            className="block w-full text-left z-card-muted hover:border-teal-100 transition-all cursor-pointer p-5"
           >
             <h3 className="z-section-title flex items-center gap-2">
               <Truck size={14} />
-              Accounts payable
+              Payments
             </h3>
-            <p className="text-xl font-black text-amber-800">{formatNgn(payablesOutstandingNgn)}</p>
-            <p className="text-[10px] font-bold text-gray-400 mt-2 uppercase tracking-wide">
-              Supplier invoices · Payables tab
+            <p className="text-[10px] text-gray-600 mt-2 leading-relaxed">
+              Record supplier payments against purchase orders on Procurement →{' '}
+              <span className="font-bold text-[#134e4a]">Payments</span>.
             </p>
-          </button>
+          </Link>
 
           {activeTab === 'disbursements' ? (
             <div className="rounded-zarewa border border-teal-100/80 bg-gradient-to-br from-teal-50/50 to-white p-4 shadow-sm space-y-3">
@@ -1965,7 +1894,7 @@ const Account = () => {
                   type="button"
                   onClick={() => {
                     setRequestForm({
-                      lines: [createExpenseRequestLineItem()],
+                      ...initialExpenseRequestFormState(),
                       requestDate: todayIso,
                       requestReference: '',
                       expenseCategory: '',
@@ -2087,20 +2016,38 @@ const Account = () => {
                         const bank =
                           r.bankReceivedAmountNgn != null ? Number(r.bankReceivedAmountNgn) : null;
                         const cleared = Boolean(r.financeDeliveryClearedAtISO);
+                        const paySplits = receiptLedgerReceiptTreasurySplits(r, liveTreasuryMovements);
                         return (
                           <li
                             key={r.id}
                             className="rounded-lg border border-slate-200/60 bg-white/70 py-2 px-3 flex flex-wrap items-center justify-between gap-2"
                           >
-                            <div className="min-w-0">
+                            <div className="min-w-0 flex-1">
                               <p className="text-[11px] font-bold text-[#134e4a] font-mono">{r.id}</p>
                               <p className="text-[9px] text-slate-500 truncate">
                                 {r.customer || '—'} · {r.quotationRef || '—'} · {r.dateISO || r.date || '—'}
                               </p>
+                              {paySplits.length > 0 ? (
+                                <ul className="mt-1.5 space-y-0.5 border-t border-dashed border-slate-200/80 pt-1.5">
+                                  {paySplits.map((s) => (
+                                    <li
+                                      key={s.movementId}
+                                      className="flex justify-between gap-2 text-[9px] text-slate-700"
+                                    >
+                                      <span className="min-w-0 truncate font-medium" title={s.accountLabel}>
+                                        {s.accountLabel}
+                                      </span>
+                                      <span className="shrink-0 font-bold tabular-nums text-[#134e4a]">
+                                        {formatNgn(s.amountNgn)}
+                                      </span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : null}
                             </div>
                             <div className="flex flex-wrap items-center gap-2 shrink-0">
                               <span className="text-[10px] font-bold text-slate-600 tabular-nums">
-                                Paid {formatNgn(cash)}
+                                Total {formatNgn(cash)}
                                 {Math.round(allocated) !== Math.round(cash) ? (
                                   <span className="text-slate-500 font-semibold">
                                     {' '}
@@ -2200,7 +2147,10 @@ const Account = () => {
                 </div>
 
                 {refundsAwaitingPay.length > 0 ? (
-                  <div className="rounded-2xl border border-rose-200/90 bg-rose-50/50 p-5 space-y-3">
+                  <div
+                    className="rounded-2xl border border-rose-200/90 bg-rose-50/50 p-5 space-y-3"
+                    data-testid="finance-refunds-awaiting-payout"
+                  >
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <p className="text-xs font-black text-rose-900 uppercase tracking-widest flex items-center gap-2">
                         <RotateCcw size={16} strokeWidth={2} />
@@ -2226,6 +2176,7 @@ const Account = () => {
                         return (
                           <li
                             key={r.refundID}
+                            data-testid={`finance-refund-awaiting-row-${r.refundID}`}
                             className="rounded-lg border border-rose-200/50 bg-white/40 backdrop-blur-md py-1.5 px-2.5 shadow-sm"
                           >
                             <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
@@ -2297,109 +2248,6 @@ const Account = () => {
               </div>
             )}
 
-            {activeTab === 'payables' && (
-              <div className="space-y-4 animate-in fade-in duration-300">
-                <p className="text-xs text-gray-500 max-w-2xl">
-                  Supplier invoices linked to purchase orders. Partial payments reduce outstanding AP and
-                  debit the selected bank or cash account.
-                </p>
-                {filteredPayables.length === 0 ? (
-                  <div className="z-empty-state py-12">
-                    <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">
-                      No payables match your search
-                    </p>
-                  </div>
-                ) : (
-                  <ul className="space-y-1.5">
-                    {filteredPayables.map((p) => {
-                      const paid = Number(p.paidNgn) || 0;
-                      const outstanding = Math.max(0, p.amountNgn - paid);
-                      const due =
-                        p.dueDateISO &&
-                        String(p.dueDateISO).trim() &&
-                        p.dueDateISO < todayIso;
-                      const open = paid < p.amountNgn;
-                      const meta2 = [
-                        `PO ${p.poRef}`,
-                        p.invoiceRef ? `Inv ${p.invoiceRef}` : null,
-                        p.dueDateISO ? `Due ${p.dueDateISO}` : null,
-                        p.branchId ? branchNameById[p.branchId] || p.branchId : null,
-                        due && open ? 'Past due' : null,
-                      ]
-                        .filter(Boolean)
-                        .join(' · ');
-                      return (
-                        <li
-                          key={p.apID}
-                          className="rounded-lg border border-slate-200/60 bg-white/40 backdrop-blur-md py-1.5 px-2.5 shadow-sm hover:bg-white/70 transition-colors"
-                        >
-                          <div className="flex flex-wrap items-start justify-between gap-2 min-w-0">
-                            <div className="min-w-0 leading-tight flex-1">
-                              <p className="text-[11px] font-bold text-[#134e4a] truncate uppercase">
-                                {p.apID}
-                                <span className="font-medium text-slate-600 normal-case"> · {p.supplierName}</span>
-                              </p>
-                              <p
-                                className="text-[8px] text-slate-500 mt-0.5 leading-snug line-clamp-2"
-                                title={meta2}
-                              >
-                                {meta2}
-                              </p>
-                              {open ? (
-                                <p className="text-[9px] text-slate-600 mt-1 tabular-nums">
-                                  Invoice {formatNgn(p.amountNgn)} · Paid {formatNgn(paid)} ·{' '}
-                                  <span className="font-bold text-amber-900">Due {formatNgn(outstanding)}</span>
-                                </p>
-                              ) : (
-                                <p className="text-[9px] text-emerald-800 mt-1 tabular-nums font-semibold">
-                                  Settled · {formatNgn(p.amountNgn)} paid in full
-                                </p>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-2 shrink-0">
-                              <span className="text-[11px] font-black text-[#134e4a] tabular-nums text-right">
-                                {open ? (
-                                  <>
-                                    <span className="block text-[8px] font-semibold text-slate-500 uppercase tracking-wide">
-                                      Outstanding
-                                    </span>
-                                    {formatNgn(outstanding)}
-                                  </>
-                                ) : (
-                                  formatNgn(p.amountNgn)
-                                )}
-                              </span>
-                              {open ? (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setSelectedAp(p);
-                                    setApPayForm({
-                                      amountNgn: String(p.amountNgn - p.paidNgn),
-                                      paymentMethod: 'Bank Transfer',
-                                      debitAccountId: String(bankAccounts[0]?.id ?? ''),
-                                    });
-                                    setShowApPaymentModal(true);
-                                  }}
-                                  className="text-[8px] font-semibold uppercase tracking-wide text-sky-800 bg-sky-100 hover:bg-sky-200 px-2 py-1 rounded-md"
-                                >
-                                  Pay
-                                </button>
-                              ) : (
-                                <span className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-emerald-200 bg-emerald-50 text-emerald-800">
-                                  Paid
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-              </div>
-            )}
-
             {activeTab === 'movements' && (
               <div className="space-y-6 animate-in fade-in duration-300">
                 <p className="text-xs text-gray-500 max-w-2xl">
@@ -2445,7 +2293,7 @@ const Account = () => {
                         <p className="text-[10px] font-bold uppercase tracking-wide text-gray-500">
                           Propose loan (pending MD)
                         </p>
-                        <div className="grid gap-2 sm:grid-cols-2">
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                           <label className="text-[10px] font-bold text-gray-400 uppercase block">
                             Lender branch
                             <select
@@ -2483,7 +2331,7 @@ const Account = () => {
                             </select>
                           </label>
                         </div>
-                        <div className="grid gap-2 sm:grid-cols-2">
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                           <label className="text-[10px] font-bold text-gray-400 uppercase block">
                             From treasury account
                             <select
@@ -2521,7 +2369,7 @@ const Account = () => {
                             </select>
                           </label>
                         </div>
-                        <div className="grid gap-2 sm:grid-cols-2">
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                           <label className="text-[10px] font-bold text-gray-400 uppercase block">
                             Principal (₦)
                             <input
@@ -2659,7 +2507,7 @@ const Account = () => {
                             </div>
                             {loan.status === 'active' && canRepayInterBranch ? (
                               <form
-                                className="grid gap-2 sm:grid-cols-2 border-t border-gray-100 pt-2 mt-2"
+                                className="grid grid-cols-1 gap-2 border-t border-gray-100 pt-2 mt-2 sm:grid-cols-2"
                                 onSubmit={submitInterBranchRepay}
                               >
                                 <input type="hidden" name="loanId" value={loan.loanId} readOnly />
@@ -2848,6 +2696,7 @@ const Account = () => {
                 {filteredPayRequests.map((req) => {
                   const paidAmountNgn = Number(req.paidAmountNgn) || 0;
                   const outstandingNgn = Math.max(0, (Number(req.amountRequestedNgn) || 0) - paidAmountNgn);
+                  const auditTrail = buildPaymentRequestAuditTrail(req);
                   const payoutState =
                     req.approvalStatus !== 'Approved'
                       ? 'Awaiting approval'
@@ -2926,6 +2775,20 @@ const Account = () => {
                           >
                             {meta2}
                           </p>
+                          {auditTrail.length > 0 ? (
+                            <div className="mt-1.5 flex flex-wrap gap-1.5">
+                              {auditTrail.map((t) => (
+                                <span
+                                  key={`${req.requestID}-${t.key}`}
+                                  className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[8px] font-semibold uppercase tracking-wide text-slate-600"
+                                  title={`${t.label}: ${t.who || '—'} ${t.at ? `· ${t.at}` : ''}`}
+                                >
+                                  {t.label}
+                                  {t.who ? ` · ${t.who}` : ''}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
                           <div className="text-right leading-tight">
@@ -2955,14 +2818,20 @@ const Account = () => {
                         <div className="flex flex-wrap gap-1.5 pt-1.5 mt-1 border-t border-dashed border-slate-200">
                           <button
                             type="button"
-                            onClick={() => reviewPaymentRequest(req.requestID, 'Approved')}
+                            onClick={() => {
+                              const note = window.prompt('Approval note (optional)', 'Approved for treasury action.');
+                              reviewPaymentRequest(req.requestID, 'Approved', note ?? '');
+                            }}
                             className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100"
                           >
                             Approve
                           </button>
                           <button
                             type="button"
-                            onClick={() => reviewPaymentRequest(req.requestID, 'Rejected')}
+                            onClick={() => {
+                              const note = window.prompt('Reason for rejection (required)');
+                              reviewPaymentRequest(req.requestID, 'Rejected', note ?? '');
+                            }}
                             className="text-[8px] font-semibold uppercase tracking-wide px-2 py-1 rounded-md border border-rose-200 bg-rose-50 text-rose-900 hover:bg-rose-100"
                           >
                             Reject
@@ -3108,11 +2977,14 @@ const Account = () => {
                             </span>
                             <button
                               type="button"
-                              onClick={() =>
-                                showToast('Attach supporting document workflow is not yet connected.', { variant: 'info' })
-                              }
+                              onClick={() => {
+                                handleAccountTabChange('receipts');
+                                showToast('Open Receipts & recon to review and attach supporting evidence.', {
+                                  variant: 'info',
+                                });
+                              }}
                               className="p-1.5 bg-white text-slate-400 hover:text-[#134e4a] rounded-md border border-slate-200 transition-all"
-                              title="Edit"
+                              title="Review evidence"
                             >
                               <Edit3 size={14} />
                             </button>
@@ -3306,99 +3178,6 @@ const Account = () => {
               </ul>
             </div>
           )}
-        </div>
-      </ModalFrame>
-
-      <ModalFrame
-        isOpen={showApPaymentModal}
-        onClose={() => {
-          setShowApPaymentModal(false);
-          setSelectedAp(null);
-        }}
-      >
-        <div className="z-modal-panel max-w-md p-8 overflow-y-auto">
-          <div className="flex justify-between items-center mb-6">
-            <h3 className="text-xl font-bold text-[#134e4a]">Supplier payment</h3>
-            <button
-              type="button"
-              onClick={() => {
-                setShowApPaymentModal(false);
-                setSelectedAp(null);
-              }}
-              className="p-2 text-gray-400 hover:text-red-500 rounded-xl"
-            >
-              <X size={22} />
-            </button>
-          </div>
-          {selectedAp ? (
-            <form className="space-y-4" onSubmit={saveApPayment}>
-              <div className="bg-gray-50 rounded-2xl p-4 border border-gray-100 text-sm">
-                <p className="font-bold text-[#134e4a]">{selectedAp.supplierName}</p>
-                <p className="text-[10px] text-gray-500 mt-1">
-                  {selectedAp.invoiceRef} · PO {selectedAp.poRef}
-                </p>
-                <p className="text-xs mt-2">
-                  Outstanding:{' '}
-                  <span className="font-black">
-                    {formatNgn(selectedAp.amountNgn - selectedAp.paidNgn)}
-                  </span>
-                </p>
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                  Amount to pay (₦)
-                </label>
-                <input
-                  required
-                  type="number"
-                  min="1"
-                  value={apPayForm.amountNgn}
-                  onChange={(e) =>
-                    setApPayForm((f) => ({ ...f, amountNgn: e.target.value }))
-                  }
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                  Payment method
-                </label>
-                <select
-                  value={apPayForm.paymentMethod}
-                  onChange={(e) =>
-                    setApPayForm((f) => ({ ...f, paymentMethod: e.target.value }))
-                  }
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                >
-                  <option value="Bank Transfer">Bank Transfer</option>
-                  <option value="Cash">Cash</option>
-                  <option value="POS">POS</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                  Pay from account
-                </label>
-                <select
-                  required
-                  value={apPayForm.debitAccountId}
-                  onChange={(e) =>
-                    setApPayForm((f) => ({ ...f, debitAccountId: e.target.value }))
-                  }
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                >
-                  {bankAccounts.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.name} ({formatNgn(a.balance)})
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <button type="submit" className="z-btn-primary w-full justify-center py-3">
-                Record payment
-              </button>
-            </form>
-          ) : null}
         </div>
       </ModalFrame>
 
@@ -3737,7 +3516,7 @@ const Account = () => {
                   />
                 </div>
               ) : null}
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
                   <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
                     Type
@@ -3994,7 +3773,7 @@ const Account = () => {
                   <option value="Logistics & haulage">Logistics & haulage</option>
                 </select>
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
                   <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
                     Amount (₦)
@@ -4119,239 +3898,15 @@ const Account = () => {
               <X size={22} />
             </button>
           </div>
-          <form className="space-y-4" onSubmit={savePayRequest}>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                  Request date
-                </label>
-                <input
-                  type="date"
-                  required
-                  value={requestForm.requestDate}
-                  onChange={(e) => setRequestForm((f) => ({ ...f, requestDate: e.target.value }))}
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                  Reference
-                </label>
-                <input
-                  value={requestForm.requestReference}
-                  onChange={(e) => setRequestForm((f) => ({ ...f, requestReference: e.target.value }))}
-                  placeholder="Invoice / PO / internal ref"
-                  className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-                />
-              </div>
-            </div>
-            <div>
-              <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                Description
-              </label>
-              <textarea
-                rows={4}
-                value={requestForm.description}
-                onChange={(e) => setRequestForm((f) => ({ ...f, description: e.target.value }))}
-                placeholder="Purpose, vendor, cost centre, or other context for approvers."
-                className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-medium outline-none resize-y min-h-[96px]"
-              />
-            </div>
-            <div>
-              <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                Expense category
-              </label>
-              <select
-                required
-                value={requestForm.expenseCategory}
-                onChange={(e) => setRequestForm((f) => ({ ...f, expenseCategory: e.target.value }))}
-                className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 px-4 text-sm font-bold outline-none"
-              >
-                <option value="" disabled>
-                  Select category…
-                </option>
-                {EXPENSE_CATEGORY_OPTIONS.map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-              <p className="text-[10px] text-gray-400 mt-1 ml-1">
-                Standard chart — same list as posted expenses for consistent month-end reporting.
-              </p>
-            </div>
-            <div>
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <label className="text-[10px] font-bold text-gray-400 uppercase ml-1">
-                  Line items
-                </label>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setRequestForm((f) => ({ ...f, lines: [...f.lines, createExpenseRequestLineItem()] }))
-                  }
-                  className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-[#134e4a] inline-flex items-center gap-1"
-                >
-                  <Plus size={12} /> Add item
-                </button>
-              </div>
-              <div className="rounded-xl border border-slate-200/80 overflow-hidden">
-                <div className="hidden sm:grid grid-cols-[1fr_72px_100px_96px_40px] gap-2 px-3 py-2 bg-slate-50 text-[9px] font-black uppercase tracking-wide text-slate-500">
-                  <span>Item</span>
-                  <span className="text-center">Unit</span>
-                  <span className="text-right">Unit price</span>
-                  <span className="text-right">Total</span>
-                  <span />
-                </div>
-                <ul className="divide-y divide-slate-100">
-                  {requestForm.lines.map((row) => (
-                    <li
-                      key={row.id}
-                      className="p-3 sm:grid sm:grid-cols-[1fr_72px_100px_96px_40px] sm:items-center sm:gap-2 space-y-2 sm:space-y-0 bg-white/60"
-                    >
-                      <input
-                        value={row.item}
-                        onChange={(e) =>
-                          setRequestForm((f) => ({
-                            ...f,
-                            lines: f.lines.map((x) =>
-                              x.id === row.id ? { ...x, item: e.target.value } : x
-                            ),
-                          }))
-                        }
-                        placeholder="Description of item or service"
-                        className="w-full bg-white border border-slate-200 rounded-lg py-2 px-2 text-[11px] font-semibold outline-none"
-                      />
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.001"
-                        value={row.unit}
-                        onChange={(e) =>
-                          setRequestForm((f) => ({
-                            ...f,
-                            lines: f.lines.map((x) =>
-                              x.id === row.id ? { ...x, unit: e.target.value } : x
-                            ),
-                          }))
-                        }
-                        placeholder="Qty"
-                        className="w-full bg-white border border-slate-200 rounded-lg py-2 px-2 text-[11px] font-bold outline-none text-center"
-                      />
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        value={row.unitPriceNgn}
-                        onChange={(e) =>
-                          setRequestForm((f) => ({
-                            ...f,
-                            lines: f.lines.map((x) =>
-                              x.id === row.id ? { ...x, unitPriceNgn: e.target.value } : x
-                            ),
-                          }))
-                        }
-                        placeholder="₦"
-                        className="w-full bg-white border border-slate-200 rounded-lg py-2 px-2 text-[11px] font-bold outline-none text-right tabular-nums"
-                      />
-                      <p className="text-[11px] font-black text-[#134e4a] tabular-nums text-right py-2 sm:py-0">
-                        {formatNgn(expenseRequestLineTotal(row))}
-                      </p>
-                      <div className="flex justify-end">
-                        <button
-                          type="button"
-                          disabled={requestForm.lines.length <= 1}
-                          onClick={() =>
-                            setRequestForm((f) => ({
-                              ...f,
-                              lines: f.lines.length <= 1 ? f.lines : f.lines.filter((x) => x.id !== row.id),
-                            }))
-                          }
-                          className="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 disabled:opacity-35"
-                          title="Remove line (keep at least one)"
-                        >
-                          <X size={14} />
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-              <p className="text-[10px] text-slate-500 mt-2">
-                Total requested:{' '}
-                <span className="font-black text-[#134e4a] tabular-nums">
-                  {formatNgn(
-                    requestForm.lines.reduce((s, row) => s + expenseRequestLineTotal(row), 0)
-                  )}
-                </span>
-              </p>
-            </div>
-            <div>
-              <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
-                <span className="inline-flex items-center gap-1">
-                  <Paperclip size={12} className="opacity-60" />
-                  Attachment (invoice / receipt)
-                </span>
-              </label>
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  ref={payRequestFileRef}
-                  type="file"
-                  accept="image/*,application/pdf"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (!f) return;
-                    if (f.size > 2.5 * 1024 * 1024) {
-                      showToast('File too large (max 2.5 MB).', { variant: 'error' });
-                      e.target.value = '';
-                      return;
-                    }
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                      const res = String(reader.result || '');
-                      const m = res.match(/^data:([^;]+);base64,(.+)$/);
-                      if (!m) {
-                        showToast('Could not read file.', { variant: 'error' });
-                        return;
-                      }
-                      setRequestForm((prev) => ({
-                        ...prev,
-                        attachment: { name: f.name, mime: m[1], dataBase64: m[2] },
-                      }));
-                    };
-                    reader.readAsDataURL(f);
-                  }}
-                  className="block w-full text-[11px] text-slate-600 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-[10px] file:font-bold file:bg-teal-50 file:text-[#134e4a]"
-                />
-                {requestForm.attachment ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setRequestForm((f) => ({ ...f, attachment: null }));
-                      if (payRequestFileRef.current) payRequestFileRef.current.value = '';
-                    }}
-                    className="text-[10px] font-bold uppercase text-rose-700 bg-rose-50 px-3 py-2 rounded-lg"
-                  >
-                    Remove file
-                  </button>
-                ) : null}
-              </div>
-              {requestForm.attachment ? (
-                <p className="text-[10px] text-slate-500 mt-1 truncate" title={requestForm.attachment.name}>
-                  Selected: {requestForm.attachment.name}
-                </p>
-              ) : (
-                <p className="text-[10px] text-gray-400 mt-1">PDF or image. Optional but recommended.</p>
-              )}
-            </div>
-            <p className="text-[10px] text-gray-400">
-              Extra rows can be left blank — only completed lines are sent. Request ID is assigned on save. Use Print on
-              the list row for a filing copy.
-            </p>
-            <button type="submit" className="z-btn-primary w-full justify-center py-3">
-              Submit for approval
-            </button>
-          </form>
+          <ExpenseRequestFormFields
+            form={requestForm}
+            setForm={setRequestForm}
+            onSubmit={savePayRequest}
+            fileInputRef={payRequestFileRef}
+            showToast={showToast}
+            formatNgn={formatNgn}
+            hintBeforeSubmit="Extra rows can be left blank — only completed lines are sent. Request ID is assigned on save. Use Print on the list row for a filing copy."
+          />
         </div>
       </ModalFrame>
 
@@ -4380,24 +3935,63 @@ const Account = () => {
           {receiptFinanceRow ? (
             <form className="space-y-4" onSubmit={saveReceiptFinance}>
               <p className="text-[10px] text-slate-600 font-mono break-all">{receiptFinanceRow.id}</p>
-              <p className="text-xs text-slate-700">
-                Customer paid:{' '}
-                <span className="font-bold tabular-nums">
-                  {formatNgn(
-                    receiptFinanceRow.cashReceivedNgn != null
-                      ? Number(receiptFinanceRow.cashReceivedNgn) || 0
-                      : Number(receiptFinanceRow.amountNgn) || 0
-                  )}
-                </span>
-                {receiptFinanceRow.cashReceivedNgn != null &&
-                Math.round(Number(receiptFinanceRow.cashReceivedNgn) || 0) !==
-                  Math.round(Number(receiptFinanceRow.amountNgn) || 0) ? (
-                  <span className="text-slate-600 font-normal">
-                    {' '}
-                    (allocated to quote {formatNgn(Number(receiptFinanceRow.amountNgn) || 0)})
-                  </span>
-                ) : null}
-              </p>
+              {(() => {
+                const settleSplits = receiptLedgerReceiptTreasurySplits(
+                  receiptFinanceRow,
+                  liveTreasuryMovements
+                );
+                const cashTotal =
+                  receiptFinanceRow.cashReceivedNgn != null
+                    ? Number(receiptFinanceRow.cashReceivedNgn) || 0
+                    : Number(receiptFinanceRow.amountNgn) || 0;
+                return settleSplits.length > 0 ? (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50/90 px-3 py-2.5 space-y-1.5">
+                    <p className="text-[9px] font-bold uppercase tracking-wide text-slate-500">
+                      Payment breakdown (treasury)
+                    </p>
+                    <ul className="space-y-1">
+                      {settleSplits.map((s) => (
+                        <li
+                          key={s.movementId}
+                          className="flex justify-between gap-2 text-[11px] text-slate-800"
+                        >
+                          <span className="min-w-0 truncate font-medium" title={s.accountLabel}>
+                            {s.accountLabel}
+                          </span>
+                          <span className="shrink-0 font-bold tabular-nums text-[#134e4a]">
+                            {formatNgn(s.amountNgn)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="text-[10px] text-slate-600 pt-1 border-t border-slate-200/80">
+                      Total received{' '}
+                      <span className="font-bold tabular-nums text-slate-900">{formatNgn(cashTotal)}</span>
+                      {receiptFinanceRow.cashReceivedNgn != null &&
+                      Math.round(Number(receiptFinanceRow.cashReceivedNgn) || 0) !==
+                        Math.round(Number(receiptFinanceRow.amountNgn) || 0) ? (
+                        <span className="text-slate-500 font-normal">
+                          {' '}
+                          · Quote allocation {formatNgn(Number(receiptFinanceRow.amountNgn) || 0)}
+                        </span>
+                      ) : null}
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-700">
+                    Customer paid:{' '}
+                    <span className="font-bold tabular-nums">{formatNgn(cashTotal)}</span>
+                    {receiptFinanceRow.cashReceivedNgn != null &&
+                    Math.round(Number(receiptFinanceRow.cashReceivedNgn) || 0) !==
+                      Math.round(Number(receiptFinanceRow.amountNgn) || 0) ? (
+                      <span className="text-slate-600 font-normal">
+                        {' '}
+                        (allocated to quote {formatNgn(Number(receiptFinanceRow.amountNgn) || 0)})
+                      </span>
+                    ) : null}
+                  </p>
+                );
+              })()}
               <div>
                 <label className="text-[10px] font-bold text-gray-400 uppercase ml-1 block mb-1">
                   Amount received in bank (₦)

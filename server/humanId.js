@@ -28,6 +28,16 @@ const SAFE_TABLES = new Set([
   'approval_actions',
   'inter_branch_loans',
   'inter_branch_loan_repayments',
+  'work_items',
+  'work_item_decisions',
+  'material_requests',
+  'in_transit_loads',
+  'machines',
+  'maintenance_plans',
+  'maintenance_work_orders',
+  'maintenance_events',
+  'hr_performance_reviews',
+  'coil_control_events',
 ]);
 
 function assertSafeTable(table) {
@@ -194,6 +204,10 @@ export function nextCuttingListHumanId(db, branchId) {
   return allocateHumanId(db, 'CL', branchId, { table: 'cutting_lists', idColumn: 'id' });
 }
 
+export function nextCoilControlEventHumanId(db, branchId) {
+  return allocateHumanId(db, 'CCR', branchId, { table: 'coil_control_events', idColumn: 'id' });
+}
+
 export function nextQuotationHumanId(db, branchId) {
   return allocateHumanId(db, 'QT', branchId, { table: 'quotations', idColumn: 'id' });
 }
@@ -258,6 +272,47 @@ export function nextApprovalActionHumanId(db) {
     idColumn: 'id',
     width: 6,
   });
+}
+
+export function nextWorkItemHumanId(db, branchId) {
+  return allocateHumanId(db, 'WI', branchId, { table: 'work_items', idColumn: 'id' });
+}
+
+export function nextWorkItemDecisionHumanId(db) {
+  return allocateHumanId(db, 'WID', null, {
+    global: true,
+    table: 'work_item_decisions',
+    idColumn: 'id',
+    width: 5,
+  });
+}
+
+export function nextMaterialRequestHumanId(db, branchId) {
+  return allocateHumanId(db, 'MR', branchId, { table: 'material_requests', idColumn: 'id' });
+}
+
+export function nextInTransitLoadHumanId(db, branchId) {
+  return allocateHumanId(db, 'MT', branchId, { table: 'in_transit_loads', idColumn: 'id' });
+}
+
+export function nextMachineHumanId(db, branchId) {
+  return allocateHumanId(db, 'MAC', branchId, { table: 'machines', idColumn: 'id' });
+}
+
+export function nextMaintenancePlanHumanId(db, branchId) {
+  return allocateHumanId(db, 'MPL', branchId, { table: 'maintenance_plans', idColumn: 'id' });
+}
+
+export function nextMaintenanceWorkOrderHumanId(db, branchId) {
+  return allocateHumanId(db, 'MWO', branchId, { table: 'maintenance_work_orders', idColumn: 'id' });
+}
+
+export function nextMaintenanceEventHumanId(db, branchId) {
+  return allocateHumanId(db, 'MEV', branchId, { table: 'maintenance_events', idColumn: 'id' });
+}
+
+export function nextHrPerformanceReviewHumanId(db, branchId) {
+  return allocateHumanId(db, 'PRV', branchId, { table: 'hr_performance_reviews', idColumn: 'id' });
 }
 
 export function nextGlJournalHumanId(db, branchId) {

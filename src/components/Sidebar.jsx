@@ -13,13 +13,10 @@ import {
   Settings,
   ChevronLeft,
   ChevronRight,
-  Users,
   ShieldCheck,
-  Scale,
   ClipboardCheck,
 } from 'lucide-react';
 import { useWorkspace } from '../context/WorkspaceContext';
-import { canAccessAccountingHq } from '../lib/accountingAccess';
 import { ZAREWA_LOGO_SRC } from '../Data/companyQuotation';
 
 function pathMatches(locationPath, basePath) {
@@ -31,10 +28,6 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
   const location = useLocation();
   const ws = useWorkspace();
   const p = location.pathname;
-  const perms = ws?.session?.permissions ?? [];
-  const user = ws?.session?.user;
-  const showAccounting = canAccessAccountingHq(perms, user);
-
   const closeIfMobile = () => {
     onCloseMobile?.();
   };
@@ -49,7 +42,7 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
     }`;
 
   const fullMenuItems = [
-    { icon: <Home size={18} />, label: 'Dashboard', path: '/' },
+    { icon: <Home size={18} />, label: 'Workspace', path: '/' },
     {
       icon: <ShoppingCart size={18} />,
       label: 'Sales',
@@ -78,13 +71,6 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
       visible: ws?.canAccessModule?.('finance') ?? true,
     },
     {
-      icon: <Scale size={18} />,
-      label: 'Accounting',
-      path: '/accounting',
-      active: pathMatches(p, '/accounting'),
-      visible: showAccounting,
-    },
-    {
       icon: <BarChart3 size={18} />,
       label: 'Reports',
       path: '/reports',
@@ -94,16 +80,9 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
       icon: <ClipboardCheck size={18} />,
       label: 'Edit approvals',
       path: '/edit-approvals',
-      // Edit approvals is embedded on the dashboard (not a standalone page).
+      // Edit approvals is embedded on the workspace home (not a standalone page).
       visible: false,
       badgeCount: ws?.editApprovalsPendingCount ?? 0,
-    },
-    {
-      icon: <Users size={18} />,
-      label: 'HR',
-      path: '/hr',
-      active: pathMatches(p, '/hr') || pathMatches(p, '/hr-next'),
-      visible: ws?.canAccessModule?.('hr') ?? true,
     },
     {
       icon: <ShieldCheck size={18} />,
@@ -197,7 +176,11 @@ const Sidebar = ({ mobileOpen = false, onCloseMobile, collapsed = false, onToggl
               whileTap={{ scale: 0.97 }}
             >
               <Link
-                to={item.path}
+                to={
+                  item.path === '/operations'
+                    ? { pathname: '/operations', state: { focusOpsTab: 'production' } }
+                    : item.path
+                }
                 onClick={closeIfMobile}
                 className={linkClass(active)}
                 title={collapsed ? item.label : undefined}

@@ -12,7 +12,9 @@ import { APP_DATA_TABLE_PAGE_SIZE } from '../../lib/appDataTable';
 
 export function AppTableWrap({ children, className = '' }) {
   return (
-    <div className={`overflow-x-auto rounded-2xl border border-slate-200/90 bg-white shadow-sm ${className}`}>
+    <div
+      className={`z-scroll-x overflow-x-auto rounded-2xl border border-slate-200/90 bg-white shadow-sm ${className}`}
+    >
       {children}
     </div>
   );

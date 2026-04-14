@@ -7,6 +7,7 @@ import {
   listProducts,
   listPurchaseOrders,
   listCoilLots,
+  listCoilControlEvents,
   listStockMovements,
   getWipByProduct,
   listDeliveries,
@@ -33,12 +34,16 @@ import {
   listApprovalActions,
   listAuditLog,
   computeProductionMetricsRollup,
+  computeOperationsInventoryAttention,
+  emptyOperationsInventoryAttention,
 } from './readModel.js';
 import { listMasterData } from './masterData.js';
+import { listInTransitLoads } from './inTransitOps.js';
 import { runQuotationLifecycleMaintenance } from './quotationLifecycleOps.js';
 import { listProductionConversionChecks, listProductionJobCoils } from './productionTraceability.js';
-import { listBranches } from './branches.js';
+import { DEFAULT_BRANCH_ID, listBranches } from './branches.js';
 import { SUGGESTED_ROLE_BY_DEPARTMENT, WORKSPACE_DEPARTMENT_IDS } from './departmentRoleTemplates.js';
+import { userHasPermission } from './auth.js';
 import {
   canListTreasuryAccounts,
   canReadCoilAndMovements,
@@ -56,6 +61,17 @@ import {
   canReadYardRegister,
   EMPTY_MASTER_DATA,
 } from './workspaceAccess.js';
+import {
+  ensureWorkItemsForVisibleOfficeThreads,
+  listHrPerformanceReviews,
+  listMachines,
+  listMaintenancePlans,
+  listMaintenanceWorkOrders,
+  listMaterialRequests,
+  syncDerivedWorkItems,
+  listUnifiedWorkItems,
+} from './workItems.js';
+import { getOrgGovernanceLimits } from './orgPolicy.js';
 
 /**
  * Full workspace snapshot for SPA bootstrap (single round-trip), filtered by the signed-in user.
@@ -72,6 +88,10 @@ export function buildBootstrap(db, opts = {}) {
   const branchScope = opts.branchScope ?? 'ALL';
   const user = opts.user ?? opts.session?.user ?? null;
   const session = opts.session ?? { authenticated: false, user: null, permissions: [] };
+  const workScope = {
+    viewAll: branchScope === 'ALL',
+    branchId: branchScope === 'ALL' ? DEFAULT_BRANCH_ID : String(branchScope || DEFAULT_BRANCH_ID).trim() || DEFAULT_BRANCH_ID,
+  };
 
   const salesOk = canReadSalesDomain(user);
   const procOk = canReadProcurementDomain(user);
@@ -112,10 +132,21 @@ export function buildBootstrap(db, opts = {}) {
 
   if (salesOk) {
     try {
-      runQuotationLifecycleMaintenance(db, branchScope);
+      // Vitest and other in-memory API tests use fixed historical quote dates; real "today" would
+      // auto-expire them on every bootstrap and break PATCH/payment flows. Opt in with
+      // ZAREWA_TEST_QUOTE_LIFECYCLE=1 when a test needs expiry-on-bootstrap (rare).
+      if (process.env.NODE_ENV !== 'test' || process.env.ZAREWA_TEST_QUOTE_LIFECYCLE === '1') {
+        runQuotationLifecycleMaintenance(db, branchScope);
+      }
     } catch (e) {
       console.error('[zarewa] quotation lifecycle maintenance failed', e);
     }
+  }
+  if (user && userHasPermission(user, 'office.use')) {
+    ensureWorkItemsForVisibleOfficeThreads(db, workScope, user);
+  }
+  if (user) {
+    syncDerivedWorkItems(db, workScope, user);
   }
 
   return {
@@ -133,6 +164,7 @@ export function buildBootstrap(db, opts = {}) {
     products: productsOk ? listProducts(db, branchScope) : [],
     purchaseOrders: procOk ? listPurchaseOrders(db, branchScope) : [],
     coilLots: coilMovOk ? listCoilLots(db, branchScope) : [],
+    coilControlEvents: coilMovOk ? listCoilControlEvents(db, branchScope) : [],
     movements: coilMovOk ? listStockMovements(db, branchScope) : [],
     wipByProduct: opsOk ? getWipByProduct(db, branchScope) : {},
     deliveries: opsOk ? listDeliveries(db, branchScope) : [],
@@ -154,6 +186,9 @@ export function buildBootstrap(db, opts = {}) {
     productionJobCoils: prodRollupOk ? listProductionJobCoils(db, branchScope, { limit: MAX_PROD_ROWS }) : [],
     productionConversionChecks: prodRollupOk ? listProductionConversionChecks(db, branchScope, { limit: MAX_PROD_ROWS }) : [],
     productionCompletionAdjustments: prodRollupOk ? listProductionCompletionAdjustments(db, branchScope) : [],
+    operationsInventoryAttention: productionOk
+      ? computeOperationsInventoryAttention(db, branchScope)
+      : emptyOperationsInventoryAttention(),
     refunds: refundsOk ? listRefunds(db, branchScope) : [],
     masterData: masterOk ? listMasterData(db) : EMPTY_MASTER_DATA,
     treasuryAccounts: treasuryOk ? listTreasuryAccounts(db) : [],
@@ -176,6 +211,14 @@ export function buildBootstrap(db, opts = {}) {
         ? getJsonBlob(db, `user_dashboard_prefs:${session.user.id}`) ?? {}
         : {},
     orgManagerTargets,
+    orgGovernanceLimits: user ? getOrgGovernanceLimits(db) : null,
+    unifiedWorkItems: user ? listUnifiedWorkItems(db, workScope, user, { limit: 200 }) : [],
+    materialRequests: user ? listMaterialRequests(db, workScope) : [],
+    inTransitLoads: user ? listInTransitLoads(db, branchScope) : [],
+    machines: user ? listMachines(db, workScope) : [],
+    maintenancePlans: user ? listMaintenancePlans(db, workScope) : [],
+    maintenanceWorkOrders: user ? listMaintenanceWorkOrders(db, workScope) : [],
+    hrPerformanceReviews: user ? listHrPerformanceReviews(db, workScope) : [],
     workspaceDepartmentIds: [...WORKSPACE_DEPARTMENT_IDS],
     suggestedRoleByDepartment: { ...SUGGESTED_ROLE_BY_DEPARTMENT },
   };
@@ -277,10 +320,18 @@ export function buildDashboardBootstrap(db, opts = {}) {
     treasuryMovements: take(full.treasuryMovements, limit),
     movements: take(full.movements, limit),
     coilLots: take(full.coilLots, limit),
+    coilControlEvents: take(full.coilControlEvents ?? [], limit),
     productionJobs: take(full.productionJobs, limit),
     productionJobCoils: take(full.productionJobCoils, limit),
     productionConversionChecks: take(full.productionConversionChecks, limit),
     productionCompletionAdjustments: take(full.productionCompletionAdjustments, limit),
+    unifiedWorkItems: take(full.unifiedWorkItems, Math.min(limit, 180)),
+    materialRequests: take(full.materialRequests, Math.min(limit, 120)),
+    inTransitLoads: take(full.inTransitLoads, Math.min(limit, 120)),
+    machines: take(full.machines, Math.min(limit, 120)),
+    maintenancePlans: take(full.maintenancePlans, Math.min(limit, 120)),
+    maintenanceWorkOrders: take(full.maintenanceWorkOrders, Math.min(limit, 120)),
+    hrPerformanceReviews: take(full.hrPerformanceReviews, Math.min(limit, 120)),
     // Ledger entries can be extremely large; dashboard doesn't need the full list.
     ledgerEntries: take(full.ledgerEntries, Math.min(limit, 300)),
   };

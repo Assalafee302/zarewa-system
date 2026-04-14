@@ -4,8 +4,6 @@ import {
   Routes,
   Route,
   useNavigate,
-  Link,
-  useParams,
   Navigate,
 } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
@@ -13,42 +11,24 @@ import Dashboard from './pages/Dashboard';
 import Sales from './pages/Sales';
 import Procurement from './pages/Procurement';
 import SupplierProfile from './pages/SupplierProfile';
+import TransportAgentProfile from './pages/TransportAgentProfile';
 import CoilProfile from './pages/CoilProfile';
 import Operations from './pages/Operations';
 import Account from './pages/Account';
 import Customers from './pages/Customers';
 import CustomerDashboard from './pages/CustomerDashboard';
-import Deliveries from './pages/Deliveries';
 import Reports from './pages/Reports';
+import OfficeDesk from './pages/OfficeDesk';
 import Settings from './pages/Settings';
+import EditApprovalsPage from './pages/EditApprovalsPage';
 import NotFound from './pages/NotFound';
-import HrLayout from './pages/hr/HrLayout';
-import HrMyProfile from './pages/hr/HrMyProfile';
-import HrStaffList from './pages/hr/HrStaffList';
-import StaffProfile from './pages/hr/StaffProfile';
-import HrSalaryWelfare from './pages/hr/HrSalaryWelfare';
-import HrPayroll from './pages/hr/HrPayroll';
-import HrTime from './pages/hr/HrTime';
-import HrTalent from './pages/hr/HrTalent';
-import HrHome from './pages/hr/HrHome';
-import HrCompliance from './pages/hr/HrCompliance';
-import HrNextDirectory from './pages/hr/HrNextDirectory';
-import HrNextUatChecklist from './pages/hr/HrNextUatChecklist';
 import LoginScreen from './components/auth/LoginScreen';
 import ModuleRouteGuard from './components/ModuleRouteGuard';
 import ManagerDashboard from './pages/ManagerDashboard';
 import ExecDashboard from './pages/ExecDashboard';
 import PriceListAdmin from './pages/PriceListAdmin';
-import AccountingRouteGuard from './components/AccountingRouteGuard';
-import AccountingLayout from './pages/accounting/AccountingLayout';
-import AccountingOverview from './pages/accounting/AccountingOverview';
-import AccountingAssets from './pages/accounting/AccountingAssets';
-import AccountingCosting from './pages/accounting/AccountingCosting';
-import AccountingLedger from './pages/accounting/AccountingLedger';
-import AccountingStatements from './pages/accounting/AccountingStatements';
-import AccountingControls from './pages/accounting/AccountingControls';
 import DocumentTitleSync from './components/DocumentTitleSync';
-import { Search, Bell, Command, Menu } from 'lucide-react';
+import { Search, Bell, Command, Menu, ChevronDown, User, Settings as SettingsIcon, Lock, LogOut } from 'lucide-react';
 import { CustomersProvider } from './context/CustomersContext';
 import { InventoryProvider } from './context/InventoryContext';
 import { ToastProvider } from './context/ToastContext';
@@ -57,142 +37,13 @@ import { useInventory } from './context/InventoryContext';
 import { useWorkspace } from './context/WorkspaceContext';
 import { ZAREWA_LOGO_SRC } from './Data/companyQuotation';
 import { BranchWorkspaceBar } from './components/layout/BranchWorkspaceBar';
-import { ModalFrame } from './components/layout';
 import { apiFetch } from './lib/apiBase';
 import { AiAssistantDock } from './components/AiAssistantDock';
+import { AiAskButton } from './components/AiAskButton';
 import { buildWorkspaceNotifications } from './lib/workspaceNotifications';
+import { AiAssistantProvider, useAiAssistant } from './context/AiAssistantContext';
+import { notificationPrompt } from './lib/aiAssistUi';
 import { searchWorkspaceSnapshot } from './lib/workspaceSearchLocal';
-
-function HrStaffProfileRoute() {
-  const { userId } = useParams();
-  return <StaffProfile key={userId} />;
-}
-function HrEntryIndexRoute() {
-  return <Navigate to="/hr/home" replace />;
-}
-function AccountingIndexRoute() {
-  return <Navigate to="/accounting/overview" replace />;
-}
-
-function PolicyAckGate() {
-  const ws = useWorkspace();
-  const user = ws?.session?.user;
-  const [open, setOpen] = useState(false);
-  const [required, setRequired] = useState([]);
-  const [missing, setMissing] = useState([]);
-  const [busy, setBusy] = useState(false);
-  const [signatureName, setSignatureName] = useState(user?.displayName || '');
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    setSignatureName(user?.displayName || '');
-  }, [user?.displayName]);
-
-  const reload = useCallback(async () => {
-    if (!user) return;
-    const { ok, data } = await apiFetch('/api/hr/policy-requirements');
-    if (!ok || !data?.ok) return;
-    const reqs = Array.isArray(data.required) ? data.required : [];
-    const miss = Array.isArray(data.missing) ? data.missing : [];
-    setRequired(reqs);
-    setMissing(miss);
-    setOpen(miss.length > 0);
-  }, [user]);
-
-  useEffect(() => {
-    void reload();
-  }, [reload, ws?.refreshEpoch]);
-
-  const acceptAll = useCallback(async () => {
-    if (!user) return;
-    const name = String(signatureName || '').trim();
-    if (!name) {
-      setError('Enter your name to sign.');
-      return;
-    }
-    setBusy(true);
-    setError('');
-    try {
-      for (const p of missing) {
-        const { ok, data } = await apiFetch('/api/hr/policy-acknowledgements', {
-          method: 'POST',
-          body: JSON.stringify({
-            policyKey: p.key,
-            policyVersion: p.version,
-            signatureName: name,
-            context: { channel: 'policy-gate' },
-          }),
-        });
-        if (!ok || !data?.ok) {
-          throw new Error(data?.error || `Could not record acceptance for ${p.key}.`);
-        }
-      }
-      await reload();
-      setOpen(false);
-    } catch (e) {
-      setError(String(e?.message || e));
-    } finally {
-      setBusy(false);
-    }
-  }, [missing, reload, signatureName, user]);
-
-  if (!user || !open) return null;
-
-  const byKey = new Map(required.map((p) => [p.key, p]));
-  return (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 p-4 backdrop-blur-[2px]">
-      <div className="z-modal-panel w-full max-w-lg max-h-none shrink-0 overflow-visible flex-none p-6 sm:p-7">
-        <h2 className="text-base font-black text-slate-900">Policy acknowledgement required</h2>
-        <p className="mt-1 text-xs text-slate-600">
-          Before you can edit HR records, upload attendance, or run payroll, you must accept the required policies.
-        </p>
-        <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
-          <p className="text-[10px] font-bold uppercase text-slate-500">Pending</p>
-          <ul className="mt-2 space-y-1 text-sm">
-            {missing.map((m) => (
-              <li key={`${m.key}:${m.version}`} className="flex items-center justify-between gap-3">
-                <span className="font-semibold text-slate-800">{byKey.get(m.key)?.label || m.key}</span>
-                <span className="text-xs text-slate-500">{m.version}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-        <div className="mt-4">
-          <label className="block text-[11px] font-bold text-slate-600">Name (signature)</label>
-          <input
-            value={signatureName}
-            onChange={(e) => setSignatureName(e.target.value)}
-            className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"
-            placeholder="Your name"
-          />
-        </div>
-        {error ? (
-          <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-900">
-            {error}
-          </div>
-        ) : null}
-        <div className="mt-4 flex items-center justify-end gap-2">
-          <button
-            type="button"
-            onClick={() => void reload()}
-            disabled={busy}
-            className="rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black uppercase text-slate-700"
-          >
-            Refresh
-          </button>
-          <button
-            type="button"
-            onClick={() => void acceptAll()}
-            disabled={busy}
-            className="rounded-xl bg-[#134e4a] px-3 py-2 text-[11px] font-black uppercase text-white"
-          >
-            {busy ? 'Saving...' : 'Accept & continue'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function HomeRoute() {
   const ws = useWorkspace();
@@ -210,10 +61,29 @@ function AppShell() {
   const navigate = useNavigate();
   const { products } = useInventory();
   const ws = useWorkspace();
+  const ai = useAiAssistant();
   const lowStockCount = useMemo(
     () => products.filter((p) => p.stockLevel < p.lowStockThreshold).length,
     [products]
   );
+  const [officeSummary, setOfficeSummary] = useState(null);
+  useEffect(() => {
+    if (!ws?.canAccessModule?.('office')) {
+      setOfficeSummary(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const { ok, data } = await apiFetch('/api/office/summary');
+      if (cancelled) return;
+      if (ok && data?.ok) setOfficeSummary(data);
+      else setOfficeSummary(null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [ws]);
+
   const notificationItems = useMemo(
     () =>
       buildWorkspaceNotifications({
@@ -221,8 +91,9 @@ function AppShell() {
         hasPermission: (p) => ws?.hasPermission?.(p),
         canAccessModule: (m) => ws?.canAccessModule?.(m),
         lowStockSkuCount: lowStockCount,
+        officeSummary,
       }),
-    [ws, lowStockCount]
+    [ws, lowStockCount, officeSummary]
   );
   const urgentNotifCount = useMemo(
     () => notificationItems.filter((n) => n.severity === 'warning').length,
@@ -237,7 +108,7 @@ function AppShell() {
   const searchDebounceRef = useRef(null);
   const [notifOpen, setNotifOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [profileOpen, setProfileOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
       return window.localStorage.getItem('zarewa.sidebarCollapsed') === '1';
@@ -287,6 +158,25 @@ function AppShell() {
       document.removeEventListener('click', onDocClick);
     };
   }, [notifOpen]);
+
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const onDocClick = () => setUserMenuOpen(false);
+    const t = window.setTimeout(() => document.addEventListener('click', onDocClick), 0);
+    return () => {
+      window.clearTimeout(t);
+      document.removeEventListener('click', onDocClick);
+    };
+  }, [userMenuOpen]);
+
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const onKey = (e) => {
+      if (e.key === 'Escape') setUserMenuOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [userMenuOpen]);
 
   useEffect(() => {
     const q = headerSearch.trim();
@@ -351,9 +241,26 @@ function AppShell() {
     setSearchHits([]);
   };
 
+  const askAiAboutSearch = useCallback(() => {
+    const q = headerSearch.trim();
+    ai?.openAssistant?.({
+      mode: 'search',
+      prompt: q
+        ? `Summarize the most relevant workspace results for "${q}" and tell me where I should go next.`
+        : 'What needs my attention today across the workspace, and where should I start?',
+      pageContext: {
+        source: q ? 'header-search' : 'app-shell',
+        searchQuery: q,
+        resultCount: searchHits.length,
+      },
+      autoSend: true,
+    });
+    setHeaderSearch('');
+    setSearchHits([]);
+  }, [ai, headerSearch, searchHits.length]);
+
   return (
-    <div className="flex min-h-screen w-full z-app-bg font-sans selection:bg-teal-100 selection:text-[#134e4a]">
-      <PolicyAckGate />
+    <div className="flex min-h-screen min-h-dvh min-w-0 w-full max-w-full z-app-bg font-sans selection:bg-teal-100 selection:text-[#134e4a]">
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[1200] focus:rounded-xl focus:bg-[#134e4a] focus:text-white focus:px-4 focus:py-3 focus:text-sm focus:font-bold focus:shadow-xl"
@@ -399,20 +306,21 @@ function AppShell() {
           <Menu size={22} strokeWidth={2} />
         </button>
 
-        <div className="sticky top-0 z-30 -mx-4 sm:-mx-6 lg:mx-0 mb-6 sm:mb-8 py-3 pl-2 pr-2 max-sm:pl-14 sm:relative sm:px-0 sm:py-0">
-          <div className="z-toolbar-shell flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-4 max-sm:pt-2">
+        <div className="sticky top-0 z-30 -mx-4 min-w-0 max-sm:overflow-x-clip sm:-mx-6 lg:mx-0 mb-4 max-sm:mb-3 sm:mb-8 py-2 pl-2 pr-2 max-sm:pl-14 sm:relative sm:px-0 sm:py-0">
+          <div className="flex min-w-0 flex-col gap-2 px-2 py-2 max-sm:border-0 max-sm:bg-transparent max-sm:shadow-none sm:z-toolbar-shell sm:gap-3 sm:px-4 sm:py-3 sm:flex-row sm:items-center sm:justify-between max-sm:pt-1">
             {ws?.session?.user?.roleKey === 'ceo' ? (
-              <p className="flex-1 min-w-0 text-[12px] text-gray-500 sm:max-w-[520px]">
+              <p className="flex-1 min-w-0 text-[12px] text-gray-500 sm:max-w-[520px] max-sm:order-2">
                 Global search is hidden for the executive read-only role.
               </p>
             ) : (
               <>
+                <div className="flex min-w-0 flex-1 flex-row items-stretch gap-2 max-sm:order-2 sm:max-w-[520px] sm:items-center sm:gap-3">
                 <form
-                  className="relative group flex-1 min-w-0 sm:max-w-[520px] pl-0 sm:pl-0 max-sm:order-2"
+                  className="relative group min-w-0 flex-1 sm:max-w-none"
                   onSubmit={runGlobalSearch}
                 >
                   <Search
-                    className="absolute left-4 sm:left-5 top-1/2 -translate-y-1/2 text-gray-300 group-focus-within:text-[#134e4a] transition-colors pointer-events-none z-[1]"
+                    className="absolute left-3.5 sm:left-5 top-1/2 -translate-y-1/2 text-gray-300 group-focus-within:text-[#134e4a] transition-colors pointer-events-none z-[1]"
                     size={16}
                   />
                   <input
@@ -426,7 +334,7 @@ function AppShell() {
                     aria-autocomplete="list"
                     aria-expanded={headerSearch.trim().length >= 2}
                     enterKeyHint="search"
-                    className="z-toolbar-shell w-full min-h-12 py-3 pl-11 pr-4 sm:pl-12 sm:pr-14 text-base sm:text-[13px] font-medium outline-none transition focus:border-teal-300/50 focus:ring-4 focus:ring-teal-500/10"
+                    className="w-full min-h-10 rounded-xl border border-slate-200/90 bg-white py-2.5 pl-10 pr-3 text-[15px] font-medium shadow-sm outline-none transition focus:border-teal-300/60 focus:ring-2 focus:ring-teal-500/15 sm:z-toolbar-shell sm:min-h-12 sm:py-3 sm:pl-12 sm:pr-14 sm:text-[13px] sm:focus:ring-4"
                   />
                   <div className="pointer-events-none absolute right-3 top-1/2 hidden -translate-y-1/2 items-center gap-1 rounded-lg border border-gray-100 bg-gray-50/90 px-2 py-1 sm:flex">
                     <Command size={10} className="text-gray-400" />
@@ -485,6 +393,26 @@ function AppShell() {
                   ) : null}
                 </form>
 
+                {ai?.available && ai.canUseMode('search') ? (
+                  <button
+                    type="button"
+                    onClick={askAiAboutSearch}
+                    aria-label="Ask AI about workspace search"
+                    className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-teal-100/90 bg-white text-[#134e4a] shadow-sm transition hover:border-teal-200 hover:bg-teal-50/50 active:scale-[0.98] sm:h-12 sm:w-auto sm:gap-2 sm:rounded-2xl sm:px-3 sm:self-center"
+                    title={
+                      headerSearch.trim()
+                        ? 'Ask AI to explain this workspace query'
+                        : 'Ask AI to summarize what matters in the workspace'
+                    }
+                  >
+                    <Command size={14} className="text-teal-600" aria-hidden />
+                    <span className="hidden text-[10px] font-black uppercase tracking-wider sm:inline">
+                      Ask AI
+                    </span>
+                  </button>
+                ) : null}
+                </div>
+
                 <p className="hidden text-[11px] text-gray-400 sm:block sm:max-w-[220px] sm:text-right lg:max-w-none">
                   <span className="font-semibold text-gray-500">Tip:</span> results respect your role; pick a row or press
                   Enter for the first match.
@@ -492,36 +420,53 @@ function AppShell() {
               </>
             )}
 
-            <div className="flex w-full flex-wrap items-center justify-between gap-2 sm:w-auto sm:justify-end sm:gap-4 lg:gap-5 max-sm:order-1">
-              <BranchWorkspaceBar />
-              <div className="relative flex shrink-0 items-center gap-2">
-                <button
+            <div className="flex w-full min-w-0 max-w-full flex-row flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap sm:justify-end sm:gap-4 lg:gap-5 max-sm:order-1">
+              <div className="min-w-0 flex-1 sm:flex-initial sm:w-auto">
+                <BranchWorkspaceBar />
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5 sm:gap-4">
+                <div className="relative flex shrink-0 items-center gap-2">
+                  <button
                   type="button"
                   aria-expanded={notifOpen}
                   aria-haspopup="true"
                   onClick={(e) => {
                     e.stopPropagation();
+                    setUserMenuOpen(false);
                     setNotifOpen((o) => !o);
                   }}
-                  className="relative flex h-12 w-12 items-center justify-center rounded-2xl border border-gray-100/90 bg-white/95 shadow-sm transition hover:border-teal-100 hover:shadow-md active:scale-[0.98]"
+                  className="relative flex h-10 w-10 items-center justify-center rounded-xl border border-gray-200/80 bg-white/95 shadow-sm transition hover:border-teal-100 hover:shadow-md active:scale-[0.98] sm:h-12 sm:w-12 sm:rounded-2xl sm:border-gray-100/90"
                   title="Notifications"
                 >
-                  <Bell size={20} className="text-gray-400" />
-                  {notificationItems.length > 0 ? (
-                    <span className="absolute -right-0.5 -top-0.5 flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-white bg-red-500 px-1 text-[9px] font-black text-white">
-                      {urgentNotifCount || notificationItems.length}
-                    </span>
-                  ) : null}
-                </button>
-                {notifOpen ? (
-                  <div
-                    className="fixed inset-x-3 top-[max(4.5rem,calc(env(safe-area-inset-top)+3.5rem))] z-[70] mt-0 max-h-[min(70dvh,28rem)] overflow-y-auto overscroll-contain rounded-2xl border border-gray-100 bg-white p-4 text-left shadow-xl shadow-slate-900/10 sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-80 sm:max-h-[min(70vh,420px)]"
-                    role="menu"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <p className="mb-3 text-[10px] font-black uppercase tracking-widest text-gray-400">
-                      For your role
-                    </p>
+                    <Bell size={20} className="text-gray-400" />
+                    {notificationItems.length > 0 ? (
+                      <span className="absolute -right-0.5 -top-0.5 flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-white bg-red-500 px-1 text-[9px] font-black text-white">
+                        {urgentNotifCount || notificationItems.length}
+                      </span>
+                    ) : null}
+                  </button>
+                  {notifOpen ? (
+                    <div
+                      className="fixed inset-x-3 top-[max(4.5rem,calc(env(safe-area-inset-top)+3.5rem))] z-[70] mt-0 max-h-[min(70dvh,28rem)] overflow-y-auto overscroll-contain rounded-2xl border border-gray-100 bg-white p-4 text-left shadow-xl shadow-slate-900/10 sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-80 sm:max-h-[min(70vh,420px)]"
+                      role="menu"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="mb-3 flex items-center justify-between gap-2">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">For your role</p>
+                      <AiAskButton
+                        mode="search"
+                        prompt="Summarize the alerts I can see, explain why they matter, and tell me what to do first."
+                        pageContext={{
+                          source: 'notifications',
+                          notificationCount: notificationItems.length,
+                          urgentCount: urgentNotifCount,
+                        }}
+                        className="inline-flex items-center gap-1 rounded-lg border border-teal-100 bg-teal-50 px-2 py-1 text-[9px] font-black uppercase tracking-wide text-[#134e4a]"
+                        onAfterOpen={() => setNotifOpen(false)}
+                      >
+                        Ask AI
+                      </AiAskButton>
+                    </div>
                     {notificationItems.length === 0 ? (
                       <p className="text-xs text-gray-600 rounded-lg bg-gray-50 px-3 py-2">
                         No alerts right now — stock, approvals, and handoffs you are allowed to see will appear here.
@@ -530,21 +475,40 @@ function AppShell() {
                       <ul className="space-y-2 text-xs text-gray-700">
                         {notificationItems.map((n) => (
                           <li key={n.id}>
-                            <button
-                              type="button"
-                              className={`w-full rounded-lg px-3 py-3 text-left transition hover:brightness-[0.98] sm:py-2 ${
+                            <div
+                              className={`rounded-lg border px-3 py-3 transition sm:py-2 ${
                                 n.severity === 'warning'
-                                  ? 'bg-amber-50 border border-amber-100'
-                                  : 'bg-slate-50 border border-slate-100'
+                                  ? 'bg-amber-50 border-amber-100'
+                                  : 'bg-slate-50 border-slate-100'
                               }`}
-                              onClick={() => {
-                                navigate(n.path, { state: n.state || {} });
-                                setNotifOpen(false);
-                              }}
                             >
-                              <span className="font-bold text-[#134e4a] block">{n.title}</span>
-                              <span className="text-[11px] text-gray-600 mt-0.5 block leading-snug">{n.detail}</span>
-                            </button>
+                              <button
+                                type="button"
+                                className="w-full text-left"
+                                onClick={() => {
+                                  navigate(n.path, { state: n.state || {} });
+                                  setNotifOpen(false);
+                                }}
+                              >
+                                <span className="font-bold text-[#134e4a] block">{n.title}</span>
+                                <span className="text-[11px] text-gray-600 mt-0.5 block leading-snug">{n.detail}</span>
+                              </button>
+                              {ai?.available && ai.canUseMode('search') ? (
+                                <AiAskButton
+                                  mode="search"
+                                  prompt={notificationPrompt(n)}
+                                  pageContext={{
+                                    source: 'notification-item',
+                                    notificationId: n.id,
+                                    targetPath: n.path,
+                                  }}
+                                  className="mt-2 inline-flex items-center gap-1 rounded-lg border border-white/80 bg-white/70 px-2 py-1 text-[9px] font-black uppercase tracking-wide text-[#134e4a]"
+                                  onAfterOpen={() => setNotifOpen(false)}
+                                >
+                                  Ask AI
+                                </AiAskButton>
+                              ) : null}
+                            </div>
                           </li>
                         ))}
                       </ul>
@@ -558,134 +522,124 @@ function AppShell() {
                     </button>
                   </div>
                 ) : null}
-              </div>
+                </div>
 
-              <div
-                className="flex min-w-0 flex-1 items-center gap-3 rounded-zarewa border border-gray-100/90 bg-white/95 py-1.5 pl-1.5 pr-3 text-left shadow-sm transition hover:border-teal-200 hover:shadow-md sm:flex-initial sm:pr-4"
-                role="group"
-                aria-label={`Signed in as ${userName}`}
-              >
-                <button
-                  type="button"
-                  onClick={() => navigate('/settings')}
-                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#134e4a] text-xs font-black text-[#2dd4bf] shadow-inner transition hover:brightness-110 active:scale-[0.98] sm:h-9 sm:w-9 sm:text-[11px]"
-                  title={`${userName} · ${userRole} — Open settings`}
-                  aria-label="Open settings"
-                >
-                  {userInitials}
-                </button>
-                <div className="min-w-0 flex-1 sm:flex-initial">
-                  {ws?.canAccessModule?.('hr') ? (
-                    <>
-                      <Link
-                        to="/hr/staff/me"
-                        className="block min-w-0 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[#134e4a]/40 focus-visible:ring-offset-1"
-                        title="Open your HR staff profile"
-                        aria-label={`${userName} — Open your profile`}
-                      >
-                        <p className="truncate text-[10px] font-black uppercase leading-none tracking-tighter text-[#134e4a] hover:underline underline-offset-2">
-                          {userName}
-                        </p>
-                      </Link>
-                      <p className="mt-0.5 text-[9px] font-bold uppercase leading-none tracking-widest text-gray-400">
-                        {userRole}
-                      </p>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => setProfileOpen(true)}
-                      className="w-full min-w-0 text-left"
-                      title={`${userName} · ${userRole} — Open profile`}
-                      aria-label={`Signed in as ${userName}. Open profile.`}
-                    >
+                <div className="relative flex shrink-0">
+                  <button
+                    type="button"
+                    aria-expanded={userMenuOpen}
+                    aria-haspopup="menu"
+                    aria-label={`Signed in as ${userName}. Open account menu.`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setNotifOpen(false);
+                      setUserMenuOpen((o) => !o);
+                    }}
+                    className="flex min-w-0 max-w-full items-center gap-2 rounded-zarewa border border-gray-100/90 bg-white/95 py-1.5 pl-1.5 pr-2 text-left shadow-sm transition hover:border-teal-200 hover:shadow-md max-sm:flex-none max-sm:border-0 max-sm:bg-transparent max-sm:p-0 max-sm:shadow-none sm:flex-initial sm:gap-3 sm:pr-3"
+                  >
+                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#134e4a] text-[11px] font-black text-[#2dd4bf] shadow-inner sm:h-9 sm:w-9">
+                      {userInitials}
+                    </span>
+                    <div className="hidden min-w-0 sm:block sm:flex-initial sm:max-w-[11rem]">
                       <p className="truncate text-[10px] font-black uppercase leading-none tracking-tighter text-[#134e4a]">
                         {userName}
                       </p>
-                      <p className="mt-0.5 text-[9px] font-bold uppercase leading-none tracking-widest text-gray-400">
+                      <p className="mt-0.5 truncate text-[9px] font-bold uppercase leading-none tracking-widest text-gray-400">
                         {userRole}
                       </p>
-                    </button>
-                  )}
+                    </div>
+                    <ChevronDown
+                      size={16}
+                      aria-hidden
+                      className={`hidden shrink-0 text-gray-400 transition sm:block ${userMenuOpen ? 'rotate-180' : ''}`}
+                    />
+                  </button>
+                  {userMenuOpen ? (
+                    <div
+                      className="fixed inset-x-3 top-[max(4.5rem,calc(env(safe-area-inset-top)+3.5rem))] z-[70] mt-0 overflow-hidden rounded-2xl border border-gray-100 bg-white text-left shadow-xl shadow-slate-900/10 sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-[min(20rem,calc(100vw-2rem))]"
+                      role="menu"
+                      aria-label="Account menu"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="border-b border-gray-100 bg-slate-50/80 px-4 py-3">
+                        <p className="truncate text-sm font-black text-[#134e4a]">{userName}</p>
+                        <p className="mt-0.5 truncate text-[11px] font-semibold text-slate-600">{userRole}</p>
+                        {signedInUser?.username ? (
+                          <p className="mt-1.5 truncate font-mono text-[11px] text-slate-500">
+                            @{signedInUser.username}
+                          </p>
+                        ) : null}
+                        {signedInUser?.email ? (
+                          <p className="mt-1 truncate text-[11px] text-slate-500">{signedInUser.email}</p>
+                        ) : null}
+                      </div>
+                      <div className="py-1">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[13px] font-semibold text-slate-800 transition hover:bg-teal-50/80"
+                          onClick={() => {
+                            setUserMenuOpen(false);
+                            navigate('/settings/profile');
+                          }}
+                        >
+                          <User size={16} className="shrink-0 text-gray-400" aria-hidden />
+                          Profile & preferences
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[13px] font-semibold text-slate-800 transition hover:bg-teal-50/80"
+                          onClick={() => {
+                            setUserMenuOpen(false);
+                            navigate('/settings');
+                          }}
+                        >
+                          <SettingsIcon size={16} className="shrink-0 text-gray-400" aria-hidden />
+                          All settings
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[13px] font-semibold text-slate-800 transition hover:bg-teal-50/80"
+                          onClick={() => {
+                            setUserMenuOpen(false);
+                            navigate('/settings/security');
+                          }}
+                        >
+                          <Lock size={16} className="shrink-0 text-gray-400" aria-hidden />
+                          Password & security
+                        </button>
+                      </div>
+                      <div className="border-t border-gray-100 py-1">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[13px] font-semibold text-red-700 transition hover:bg-red-50/80"
+                          onClick={async () => {
+                            setUserMenuOpen(false);
+                            if (!window.confirm('Sign out of this workspace?')) return;
+                            try {
+                              await ws?.logout?.();
+                              window.location.href = '/';
+                            } catch {
+                              window.location.href = '/';
+                            }
+                          }}
+                        >
+                          <LogOut size={16} className="shrink-0" aria-hidden />
+                          Sign out
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </div>
           </div>
         </div>
 
-        <ModalFrame
-          isOpen={profileOpen}
-          onClose={() => setProfileOpen(false)}
-          title="My profile"
-          description="Your app login profile details"
-        >
-          <div className="z-modal-panel w-full max-w-lg max-h-none shrink-0 overflow-visible flex-none p-6 sm:p-7">
-            <div className="flex items-start justify-between gap-4">
-              <div className="min-w-0">
-                <h2 className="text-base font-black text-slate-900">My profile</h2>
-                <p className="mt-1 text-xs text-slate-600">App login details (not HR employment records).</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setProfileOpen(false)}
-                className="z-btn-secondary !px-3 !py-2 !text-[11px]"
-              >
-                Close
-              </button>
-            </div>
-
-            <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
-              <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Name</p>
-              <p className="mt-1 text-sm font-black text-[#134e4a] break-words">
-                {ws?.session?.user?.displayName || '—'}
-              </p>
-
-              <p className="mt-3 text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Username</p>
-              <p className="mt-1 text-[12px] font-mono font-semibold text-slate-800 break-all">
-                {ws?.session?.user?.username || '—'}
-              </p>
-
-              <p className="mt-3 text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Role</p>
-              <p className="mt-1 text-[12px] font-semibold text-slate-800">
-                {ws?.session?.user?.roleLabel || ws?.session?.user?.roleKey || '—'}
-              </p>
-
-              {ws?.session?.user?.email ? (
-                <>
-                  <p className="mt-3 text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Email</p>
-                  <p className="mt-1 text-[12px] font-semibold text-slate-800 break-all">
-                    {ws.session.user.email}
-                  </p>
-                </>
-              ) : null}
-            </div>
-
-            <div className="mt-4 flex flex-wrap gap-2 justify-end">
-              <button
-                type="button"
-                className="z-btn-secondary !text-[11px]"
-                onClick={() => {
-                  setProfileOpen(false);
-                  navigate('/settings');
-                }}
-              >
-                Open settings
-              </button>
-              <button
-                type="button"
-                className="z-btn-primary !text-[11px]"
-                onClick={() => {
-                  setProfileOpen(false);
-                  navigate('/settings/security');
-                }}
-              >
-                Security
-              </button>
-            </div>
-          </div>
-        </ModalFrame>
-
-        <main id="main-content" className="outline-none" tabIndex={-1}>
+        <main id="main-content" className="min-w-0 max-w-full outline-none" tabIndex={-1}>
           <Routes>
             <Route path="/" element={<HomeRoute />} />
             <Route path="/exec" element={<ExecDashboard />} />
@@ -731,6 +685,14 @@ function AppShell() {
               }
             />
             <Route
+              path="/procurement/transport-agents/:agentId"
+              element={
+                <ModuleRouteGuard moduleKey="procurement">
+                  <TransportAgentProfile />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
               path="/operations"
               element={
                 <ModuleRouteGuard moduleKey="operations">
@@ -746,14 +708,7 @@ function AppShell() {
                 </ModuleRouteGuard>
               }
             />
-            <Route
-              path="/deliveries"
-              element={
-                <ModuleRouteGuard moduleKey="operations">
-                  <Deliveries />
-                </ModuleRouteGuard>
-              }
-            />
+            <Route path="/deliveries" element={<Navigate to="/operations" replace />} />
             <Route
               path="/accounts"
               element={
@@ -770,24 +725,7 @@ function AppShell() {
                 </ModuleRouteGuard>
               }
             />
-            <Route
-              path="/accounting"
-              element={
-                <ModuleRouteGuard moduleKey="finance">
-                  <AccountingRouteGuard>
-                    <AccountingLayout />
-                  </AccountingRouteGuard>
-                </ModuleRouteGuard>
-              }
-            >
-              <Route index element={<AccountingIndexRoute />} />
-              <Route path="overview" element={<AccountingOverview />} />
-              <Route path="assets" element={<AccountingAssets />} />
-              <Route path="costing" element={<AccountingCosting />} />
-              <Route path="ledger" element={<AccountingLedger />} />
-              <Route path="statements" element={<AccountingStatements />} />
-              <Route path="controls" element={<AccountingControls />} />
-            </Route>
+            <Route path="/accounting/*" element={<Navigate to="/accounts" replace />} />
             <Route
               path="/reports"
               element={
@@ -797,10 +735,18 @@ function AppShell() {
               }
             />
             <Route
+              path="/office"
+              element={
+                <ModuleRouteGuard moduleKey="office">
+                  <OfficeDesk />
+                </ModuleRouteGuard>
+              }
+            />
+            <Route
               path="/edit-approvals"
               element={
                 <ModuleRouteGuard moduleKey="edit_approvals">
-                  <Navigate to="/" replace />
+                  <EditApprovalsPage />
                 </ModuleRouteGuard>
               }
             />
@@ -820,29 +766,8 @@ function AppShell() {
                 </ModuleRouteGuard>
               }
             />
-            <Route
-              path="/hr"
-              element={
-                <ModuleRouteGuard moduleKey="hr">
-                  <HrLayout />
-                </ModuleRouteGuard>
-              }
-            >
-              <Route index element={<HrEntryIndexRoute />} />
-              <Route path="home" element={<HrHome />} />
-              <Route path="my-profile" element={<HrMyProfile />} />
-              <Route path="salary-welfare" element={<HrSalaryWelfare />} />
-              <Route path="staff" element={<HrStaffList />} />
-              <Route path="staff/directory-quality" element={<HrNextDirectory />} />
-              <Route path="staff/:userId" element={<HrStaffProfileRoute />} />
-              <Route path="payroll" element={<HrPayroll />} />
-              <Route path="time" element={<HrTime />} />
-              <Route path="talent" element={<HrTalent />} />
-              <Route path="compliance" element={<HrCompliance />} />
-              <Route path="uat-checklist" element={<HrNextUatChecklist />} />
-            </Route>
-            <Route path="/hr-next/uat" element={<Navigate to="/hr/uat-checklist" replace />} />
-            <Route path="/hr-next" element={<Navigate to="/hr/staff/directory-quality" replace />} />
+            <Route path="/hr/*" element={<Navigate to="/" replace />} />
+            <Route path="/hr-next/*" element={<Navigate to="/" replace />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </main>
@@ -899,8 +824,10 @@ function App() {
     <Router>
       <WorkspaceProvider>
         <ToastProvider>
-          <DocumentTitleSync />
-          <AuthGate />
+          <AiAssistantProvider>
+            <DocumentTitleSync />
+            <AuthGate />
+          </AiAssistantProvider>
         </ToastProvider>
       </WorkspaceProvider>
     </Router>

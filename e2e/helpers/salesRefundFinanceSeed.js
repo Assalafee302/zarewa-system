@@ -1,5 +1,46 @@
 import { expect } from '@playwright/test';
-import { csrfHeader } from './auth.js';
+import { csrfHeader, signInViaApi, signOutViaApi } from './auth.js';
+
+/**
+ * After pay-in, registers a planned job and cancels it so POST /api/refunds eligibility is satisfied.
+ */
+async function closeProductionForRefundEligibility(page, adminHeaders, { quotationId, customerID }) {
+  const clRes = await page.request.post('/api/cutting-lists', {
+    headers: adminHeaders,
+    data: {
+      quotationRef: quotationId,
+      customerID,
+      productID: 'FG-101',
+      productName: 'Longspan thin',
+      dateISO: new Date().toISOString().slice(0, 10),
+      machineName: 'E2E',
+      operatorName: 'E2E',
+      lines: [{ sheets: 1, lengthM: 5 }],
+    },
+  });
+  expect(clRes.status(), await clRes.text()).toBe(201);
+  const clBody = await clRes.json();
+  const jobRes = await page.request.post('/api/production-jobs', {
+    headers: adminHeaders,
+    data: {
+      cuttingListId: clBody.id,
+      productID: 'FG-101',
+      productName: 'Longspan thin',
+      plannedMeters: 10,
+      plannedSheets: 1,
+    },
+  });
+  expect(jobRes.status(), await jobRes.text()).toBe(201);
+  const jobBody = await jobRes.json();
+  const cancelRes = await page.request.post(
+    `/api/production-jobs/${encodeURIComponent(jobBody.jobID)}/cancel`,
+    {
+      headers: adminHeaders,
+      data: { reason: 'E2E seed — cancel for refund eligibility' },
+    }
+  );
+  expect(cancelRes.status(), await cancelRes.text()).toBe(200);
+}
 
 /**
  * Creates a paid quotation and a pending refund via API (as the logged-in user).
@@ -10,6 +51,10 @@ export async function seedPaidQuotationAndPendingRefund(page) {
   const headers = await csrfHeader(page);
   const customerName = `E2E RF ${Date.now()}`;
   const phone = `080${String(Date.now()).slice(-8)}`;
+
+  const bootRes = await page.request.get('/api/bootstrap');
+  expect(bootRes.status()).toBe(200);
+  const treasuryAccountId = (await bootRes.json()).treasuryAccounts[0].id;
 
   const custRes = await page.request.post('/api/customers', {
     headers,
@@ -46,13 +91,23 @@ export async function seedPaidQuotationAndPendingRefund(page) {
       amountNgn: 5000,
       paymentMethod: 'Cash',
       dateISO: new Date().toISOString().slice(0, 10),
+      treasuryAccountId,
+      paymentLines: [{ treasuryAccountId, amountNgn: 5000, reference: 'E2E-SRF-SEED' }],
     },
   });
   expect(rcRes.status(), await rcRes.text()).toBe(201);
 
+  await signOutViaApi(page);
+  await signInViaApi(page, 'admin', 'Admin@123');
+  const adminHeaders = await csrfHeader(page);
+  await closeProductionForRefundEligibility(page, adminHeaders, { quotationId, customerID });
+  await signOutViaApi(page);
+  await signInViaApi(page, 'sales.staff', 'Sales@123');
+  const salesHeaders = await csrfHeader(page);
+
   const refundAmount = 500;
   const rfRes = await page.request.post('/api/refunds', {
-    headers,
+    headers: salesHeaders,
     data: {
       customerID,
       customerName,
