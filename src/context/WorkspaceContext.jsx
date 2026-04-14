@@ -92,14 +92,31 @@ export function WorkspaceProvider({ children }) {
     try {
       const mode = String(opts?.mode ?? '').trim();
       const qs = mode ? `?mode=${encodeURIComponent(mode)}` : '';
-      const { ok, status: httpStatus, data } = await apiFetch(`/api/bootstrap${qs}`);
-      if (httpStatus === 401 || data?.code === 'AUTH_REQUIRED') {
-        clearBootstrapCache();
-        setStatus('auth_required');
-        setSnapshot(null);
-        setLastError(null);
-        replaceLedgerEntries([]);
-        return null;
+      const path = `/api/bootstrap${qs}`;
+      const maxWaitMs = 120_000;
+      const pollMs = 800;
+      const deadline = Date.now() + maxWaitMs;
+      let ok;
+      let httpStatus;
+      let data;
+      while (Date.now() < deadline) {
+        ({ ok, status: httpStatus, data } = await apiFetch(path));
+        if (httpStatus === 401 || data?.code === 'AUTH_REQUIRED') {
+          clearBootstrapCache();
+          setStatus('auth_required');
+          setSnapshot(null);
+          setLastError(null);
+          replaceLedgerEntries([]);
+          return null;
+        }
+        if (httpStatus === 503 && data?.code === 'STARTING') {
+          await new Promise((r) => setTimeout(r, pollMs));
+          continue;
+        }
+        break;
+      }
+      if (httpStatus === 503 && data?.code === 'STARTING') {
+        throw new Error(data?.error || 'Server is still starting (timed out waiting for bootstrap).');
       }
       if (!ok || !data?.ok) throw new Error(data?.error || 'Bootstrap failed');
       return applySnapshot(data, 'ok');

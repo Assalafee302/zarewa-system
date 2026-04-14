@@ -7,8 +7,9 @@ import { attachAuthContext } from './auth.js';
 
 /**
  * @param {import('better-sqlite3').Database} db
+ * @param {{ beforeRegisterHttpApi?: (app: import('express').Express) => void }} [opts]
  */
-export function createApp(db) {
+export function createApp(db, opts = {}) {
   const app = express();
   app.use(express.json({ limit: '2mb' }));
 
@@ -42,6 +43,9 @@ export function createApp(db) {
     })
   );
   app.use(attachAuthContext(db));
+  if (typeof opts.beforeRegisterHttpApi === 'function') {
+    opts.beforeRegisterHttpApi(app);
+  }
 
   registerHttpApi(app, db);
 
