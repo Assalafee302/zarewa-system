@@ -1058,14 +1058,28 @@ function findUserByIdentifier(db, identifier) {
 export async function requestPasswordReset(db, identifier) {
   const id = String(identifier || '').trim();
   const lower = id.toLowerCase();
-  const userRes = await pgQuery(
-    db,
-    `SELECT * FROM app_users
-     WHERE status = 'active'
-       AND (lower(username) = $1 OR (email IS NOT NULL AND trim(email) != '' AND lower(email) = $2))
-     LIMIT 1`,
-    [lower, lower]
-  );
+  let userRes;
+  try {
+    userRes = await pgQuery(
+      db,
+      `SELECT * FROM app_users
+       WHERE status = 'active'
+         AND (lower(username) = $1 OR (email IS NOT NULL AND trim(email) != '' AND lower(email) = $2))
+       LIMIT 1`,
+      [lower, lower]
+    );
+  } catch (e) {
+    // Older DBs may not have `email` yet.
+    if (String(e?.code || '') !== '42703') throw e;
+    userRes = await pgQuery(
+      db,
+      `SELECT * FROM app_users
+       WHERE status = 'active'
+         AND lower(username) = $1
+       LIMIT 1`,
+      [lower]
+    );
+  }
   const row = userRes?.rows?.[0] || null;
   const createdAtISO = nowIso();
   const expiresAtISO = addMinutesToIso(createdAtISO, RESET_TOKEN_TTL_MINUTES);
@@ -1105,15 +1119,30 @@ function addMinutesToIso(iso, minutes) {
 export async function completePasswordReset(db, identifier, token, newPassword) {
   const idTrim = String(identifier || '').trim();
   const tokenHash = hashResetToken(String(token || '').trim());
-  const matchRes = await pgQuery(
-    db,
-    `SELECT t.id AS prt_id, u.id AS user_id, u.username, u.email, u.status
-     FROM password_reset_tokens t
-     JOIN app_users u ON u.id = t.user_id
-     WHERE t.token_hash = $1 AND t.used_at_iso IS NULL AND t.expires_at_iso > $2
-     LIMIT 1`,
-    [tokenHash, nowIso()]
-  );
+  let matchRes;
+  try {
+    matchRes = await pgQuery(
+      db,
+      `SELECT t.id AS prt_id, u.id AS user_id, u.username, u.email, u.status
+       FROM password_reset_tokens t
+       JOIN app_users u ON u.id = t.user_id
+       WHERE t.token_hash = $1 AND t.used_at_iso IS NULL AND t.expires_at_iso > $2
+       LIMIT 1`,
+      [tokenHash, nowIso()]
+    );
+  } catch (e) {
+    // Older DBs may not have `email` yet.
+    if (String(e?.code || '') !== '42703') throw e;
+    matchRes = await pgQuery(
+      db,
+      `SELECT t.id AS prt_id, u.id AS user_id, u.username, NULL AS email, u.status
+       FROM password_reset_tokens t
+       JOIN app_users u ON u.id = t.user_id
+       WHERE t.token_hash = $1 AND t.used_at_iso IS NULL AND t.expires_at_iso > $2
+       LIMIT 1`,
+      [tokenHash, nowIso()]
+    );
+  }
   const matchRow = matchRes?.rows?.[0] || null;
   if (!matchRow || matchRow.status !== 'active') {
     return { ok: false, error: 'Invalid or expired reset link. Request a new reset.' };
