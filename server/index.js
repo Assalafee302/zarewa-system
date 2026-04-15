@@ -31,9 +31,16 @@ try {
   dbConfigError = e;
   db = null;
 }
-const bootState = { apiReady: false };
+const bootState = {
+  apiReady: false,
+  bootstrapFailed: false,
+  bootstrapExitCode: /** @type {number | null} */ (null),
+  bootstrapSignal: /** @type {string | null} */ (null),
+  bootstrapSpawnError: /** @type {string | null} */ (null),
+};
 const app = db
   ? createApp(db, {
+      bootState,
       beforeRegisterHttpApi(app) {
         attachReadinessGate(app, bootState);
       },
@@ -117,23 +124,26 @@ function onListen(server) {
     });
     child.on('error', (err) => {
       console.error('[zarewa] Failed to spawn bootstrap subprocess:', err);
-      // Keep HTTP up for platform healthchecks and debugging.
+      bootState.bootstrapFailed = true;
+      bootState.bootstrapSpawnError = String(err?.message || err);
     });
     child.on('exit', (code, signal) => {
-      if (code !== 0) {
-        console.error('[zarewa] Bootstrap subprocess failed', { code, signal });
-        // Keep HTTP up so healthchecks and logs work while you fix DATABASE_URL / migrations.
+      if (code === 0) {
+        bootState.apiReady = true;
+        const ai = readAiAssistConfig();
+        if (!ai.enabled) {
+          console.log(
+            '[zarewa] AI assistant off — set ZAREWA_AI_API_KEY (or OPENAI_API_KEY). Local Ollama: ZAREWA_AI_BASE_URL=http://127.0.0.1:11434/v1 ZAREWA_AI_API_KEY=ollama ZAREWA_AI_MODEL=llama3.2'
+          );
+        } else {
+          console.log(`[zarewa] AI assistant on (model: ${ai.model}).`);
+        }
         return;
       }
-      bootState.apiReady = true;
-      const ai = readAiAssistConfig();
-      if (!ai.enabled) {
-        console.log(
-          '[zarewa] AI assistant off — set ZAREWA_AI_API_KEY (or OPENAI_API_KEY). Local Ollama: ZAREWA_AI_BASE_URL=http://127.0.0.1:11434/v1 ZAREWA_AI_API_KEY=ollama ZAREWA_AI_MODEL=llama3.2'
-        );
-      } else {
-        console.log(`[zarewa] AI assistant on (model: ${ai.model}).`);
-      }
+      console.error('[zarewa] Bootstrap subprocess failed', { code, signal });
+      bootState.bootstrapFailed = true;
+      bootState.bootstrapExitCode = code == null ? null : code;
+      bootState.bootstrapSignal = signal || null;
     });
   });
 }

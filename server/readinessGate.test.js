@@ -37,4 +37,25 @@ describe('attachReadinessGate', () => {
     expect(bootRes.status).toBe(200);
     expect(bootRes.body.ok).toBe(true);
   });
+
+  it('returns 503 BOOTSTRAP_FAILED when bootstrap subprocess failed', async () => {
+    const app = express();
+    app.use(express.json());
+    const bootState = {
+      apiReady: false,
+      bootstrapFailed: true,
+      bootstrapExitCode: 1,
+      bootstrapSignal: null,
+      bootstrapSpawnError: null,
+    };
+    attachReadinessGate(app, bootState);
+    app.post('/api/session/login', (_req, res) => {
+      res.status(200).json({ ok: true, reachedHandler: true });
+    });
+
+    const loginRes = await request(app).post('/api/session/login').send({ username: 'x', password: 'y' });
+    expect(loginRes.status).toBe(503);
+    expect(loginRes.body.code).toBe('BOOTSTRAP_FAILED');
+    expect(String(loginRes.body.error || '')).toContain('Database setup failed');
+  });
 });

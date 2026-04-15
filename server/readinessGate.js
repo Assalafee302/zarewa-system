@@ -15,7 +15,13 @@ export function readinessExemptApiPath(originalUrl) {
 
 /**
  * @param {import('express').Express} app
- * @param {{ apiReady: boolean }} state
+ * @param {{
+ *   apiReady: boolean;
+ *   bootstrapFailed?: boolean;
+ *   bootstrapExitCode?: number | null;
+ *   bootstrapSignal?: string | null;
+ *   bootstrapSpawnError?: string | null;
+ * }} state
  */
 export function attachReadinessGate(app, state) {
   app.use((req, res, next) => {
@@ -25,6 +31,21 @@ export function attachReadinessGate(app, state) {
     if (readinessExemptApiPath(url)) return next();
     if (url.startsWith('/api/')) {
       res.setHeader('Retry-After', '2');
+      if (state.bootstrapFailed) {
+        return res.status(503).json({
+          ok: false,
+          code: 'BOOTSTRAP_FAILED',
+          error:
+            'Database setup failed on this server. Check API logs, DATABASE_URL, and run npm run db:migrate against this database.',
+          detail: state.bootstrapSpawnError
+            ? `spawn: ${state.bootstrapSpawnError}`
+            : state.bootstrapExitCode != null
+              ? `bootstrap exited with code ${state.bootstrapExitCode}`
+              : state.bootstrapSignal
+                ? `bootstrap killed by signal ${state.bootstrapSignal}`
+                : undefined,
+        });
+      }
       return res.status(503).json({ ok: false, code: 'STARTING', error: 'Server is starting' });
     }
     return next();

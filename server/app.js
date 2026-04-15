@@ -18,7 +18,10 @@ function isPublicStaticAssetPath(pathOnly) {
 
 /**
  * @param {import('better-sqlite3').Database} db
- * @param {{ beforeRegisterHttpApi?: (app: import('express').Express) => void }} [opts]
+ * @param {{
+ *   beforeRegisterHttpApi?: (app: import('express').Express) => void;
+ *   bootState?: { apiReady: boolean; bootstrapFailed?: boolean };
+ * }} [opts]
  */
 export function createApp(db, opts = {}) {
   const app = express();
@@ -84,7 +87,7 @@ export function createApp(db, opts = {}) {
     opts.beforeRegisterHttpApi(app);
   }
 
-  registerHttpApi(app, db);
+  registerHttpApi(app, db, { bootState: opts.bootState });
 
   const staticRoot = path.resolve(
     process.env.ZAREWA_STATIC_DIR || path.join(process.cwd(), 'dist')

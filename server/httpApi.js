@@ -348,13 +348,26 @@ function totalTreasuryLines(lines) {
 /**
  * @param {import('express').Express} app
  * @param {import('better-sqlite3').Database} db
+ * @param {{ bootState?: { apiReady: boolean; bootstrapFailed?: boolean; bootstrapExitCode?: number | null; bootstrapSignal?: string | null; bootstrapSpawnError?: string | null } }} [runtime]
  */
-export function registerHttpApi(app, db) {
+export function registerHttpApi(app, db, runtime = {}) {
   app.get('/api/health', (_req, res) => {
+    const bs = runtime.bootState;
     res.json({
       ok: true,
       service: 'zarewa-api',
       time: new Date().toISOString(),
+      ...(bs
+        ? {
+            bootstrap: {
+              ready: bs.apiReady,
+              failed: Boolean(bs.bootstrapFailed),
+              exitCode: bs.bootstrapExitCode ?? null,
+              signal: bs.bootstrapSignal ?? null,
+              spawnError: bs.bootstrapSpawnError ?? null,
+            },
+          }
+        : {}),
       /** Lets you confirm the running Node process loaded this build (e.g. after deploy / restart). */
       capabilities: {
         cuttingListRegisterProduction: true,

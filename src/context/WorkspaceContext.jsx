@@ -138,22 +138,45 @@ export function WorkspaceProvider({ children }) {
   const login = useCallback(
     async (username, password) => {
       try {
-        const { ok, data } = await apiFetch('/api/session/login', {
-          method: 'POST',
-          body: JSON.stringify({ username, password }),
-        });
-        if (!ok || !data?.ok) {
+        const maxWaitMs = 120_000;
+        const pollMs = 400;
+        const deadline = Date.now() + maxWaitMs;
+        let lastData = null;
+        while (Date.now() < deadline) {
+          const { ok, data } = await apiFetch('/api/session/login', {
+            method: 'POST',
+            body: JSON.stringify({ username, password }),
+          });
+          lastData = data;
+          if (ok && data?.ok) {
+            // Fast initial render: dashboard summary + dashboard bootstrap first, then full snapshot.
+            await refreshDashboardSummary();
+            await refresh({ mode: 'dashboard' });
+            setTimeout(() => {
+              refreshDashboardSummary();
+              refresh();
+            }, 0);
+            return { ok: true, data };
+          }
+          if (data?.code === 'STARTING') {
+            await new Promise((r) => setTimeout(r, pollMs));
+            continue;
+          }
+          if (data?.code === 'BOOTSTRAP_FAILED') {
+            const parts = [data?.error, data?.detail].filter(Boolean);
+            return { ok: false, error: parts.join(' — ') || 'Database setup failed.' };
+          }
           const parts = [data?.error, data?.detail].filter(Boolean);
           return { ok: false, error: parts.join(' — ') || 'Sign-in failed.' };
         }
-        // Fast initial render: dashboard summary + dashboard bootstrap first, then full snapshot.
-        await refreshDashboardSummary();
-        await refresh({ mode: 'dashboard' });
-        setTimeout(() => {
-          refreshDashboardSummary();
-          refresh();
-        }, 0);
-        return { ok: true, data };
+        if (lastData?.code === 'STARTING') {
+          return {
+            ok: false,
+            error:
+              'Server is still starting (timed out waiting for database setup). Check API logs and DATABASE_URL.',
+          };
+        }
+        return { ok: false, error: 'Sign-in failed.' };
       } catch (e) {
         setStatus('offline');
         setSnapshot(null);
