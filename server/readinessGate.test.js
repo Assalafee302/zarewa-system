@@ -6,6 +6,7 @@ import { attachReadinessGate, readinessExemptApiPath } from './readinessGate.js'
 describe('readinessExemptApiPath', () => {
   it('matches health and public session routes', () => {
     expect(readinessExemptApiPath('/api/health')).toBe(true);
+    expect(readinessExemptApiPath('/api/health/')).toBe(true);
     expect(readinessExemptApiPath('/api/health?x=1')).toBe(true);
     expect(readinessExemptApiPath('/api/session/login')).toBe(true);
     expect(readinessExemptApiPath('/api/session/forgot-password')).toBe(true);

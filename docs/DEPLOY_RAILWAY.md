@@ -29,7 +29,7 @@ The repo ships a root **`Dockerfile`** (and **`railway.toml` uses `builder = DOC
    DATABASE_URL="..." npm run db:migrate
    ```
 
-6. **Health check:** Configured as `GET /api/health` in `railway.toml`.
+6. **Health check:** Configured as `GET /health` in `railway.toml` (plain `ok` text, registered before CORS/auth/STARTING gate). `GET /api/health` remains for JSON diagnostics.
 
 ## If you still use Vercel for the frontend
 

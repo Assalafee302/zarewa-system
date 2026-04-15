@@ -33,6 +33,9 @@ const app = db
   : (() => {
       const app = express();
       app.disable('x-powered-by');
+      app.get('/health', (_req, res) => {
+        res.status(200).type('text/plain').send('ok');
+      });
       app.get('/api/health', (_req, res) => {
         res.status(200).json({
           ok: false,
@@ -57,7 +60,7 @@ const port = Number(process.env.PORT || 8787);
 // Default `app.listen(port)` can listen on IPv6 `::` only, which some probes do not hit.
 const listenHost =
   String(process.env.ZAREWA_LISTEN_HOST || '').trim() ||
-  (process.env.RAILWAY_ENVIRONMENT ? '0.0.0.0' : undefined);
+  (process.env.NODE_ENV === 'production' ? '0.0.0.0' : undefined);
 
 function onListen() {
   console.log(`Zarewa listening on http://127.0.0.1:${port} (PostgreSQL)`);
@@ -84,7 +87,7 @@ function onListen() {
     });
     child.on('error', (err) => {
       console.error('[zarewa] Failed to spawn bootstrap subprocess:', err);
-      process.exit(1);
+      // Keep HTTP up for platform healthchecks and debugging.
     });
     child.on('exit', (code, signal) => {
       if (code !== 0) {

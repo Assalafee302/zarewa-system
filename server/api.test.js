@@ -51,6 +51,12 @@ describe.sequential('Zarewa API', () => {
     expect(res.body.capabilities?.officeDesk).toBe(true);
   });
 
+  it('GET /health', async () => {
+    const res = await request(app).get('/health');
+    expect(res.status).toBe(200);
+    expect(res.text).toBe('ok');
+  });
+
   it('GET /api/ai/status reports disabled when no AI key is set', async () => {
     const res = await agent.get('/api/ai/status');
     expect(res.status).toBe(200);

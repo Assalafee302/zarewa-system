@@ -4,7 +4,7 @@
  * @param {string} originalUrl
  */
 export function readinessExemptApiPath(originalUrl) {
-  const pathOnly = String(originalUrl || '').split('?')[0];
+  const pathOnly = String(originalUrl || '').split('?')[0].replace(/\/+$/, '') || '/';
   return (
     pathOnly === '/api/health' ||
     pathOnly === '/api/session/login' ||

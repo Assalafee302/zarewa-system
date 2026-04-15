@@ -11,6 +11,11 @@ import { attachAuthContext } from './auth.js';
  */
 export function createApp(db, opts = {}) {
   const app = express();
+  // Platform probes (Railway, Render, etc.): must bypass CORS, auth, and the STARTING gate.
+  // Use plain text so no middleware chain is required.
+  app.get('/health', (_req, res) => {
+    res.status(200).type('text/plain').send('ok');
+  });
   app.use(express.json({ limit: '2mb' }));
 
   // Dev default: allow common Vite ports (5173/5174) on localhost + 127.0.0.1.
