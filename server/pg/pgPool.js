@@ -3,6 +3,24 @@ import pg from 'pg';
 
 const { Pool } = pg;
 
+/**
+ * `pg-connection-string` warns when the URL contains `sslmode=require` (etc.) because
+ * future libpq semantics will differ. We apply TLS via explicit `poolConfig.ssl` below,
+ * so strip ssl-related query params before parse to avoid noisy logs on Railway/Supabase.
+ * @param {string} url
+ */
+function databaseUrlForPgParse(url) {
+  try {
+    const u = new URL(url);
+    for (const k of [...u.searchParams.keys()]) {
+      if (k.toLowerCase() === 'sslmode') u.searchParams.delete(k);
+    }
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 function shouldUseSsl() {
   const v = String(process.env.PGSSLMODE || '').trim().toLowerCase();
   if (v === 'disable') return false;
@@ -52,10 +70,11 @@ export function hasPostgresEnv() {
 export function createPoolFromEnv() {
   const url = process.env.DATABASE_URL?.trim();
   if (url) {
+    const urlForParse = databaseUrlForPgParse(url);
     // `pg` does `Object.assign({}, config, parse(connectionString))`, so query
     // `sslmode=require` becomes `ssl: {}` and overwrites any caller `ssl`, which
     // re-enables certificate verification and breaks some pooler / proxy chains.
-    const parsed = parse(url);
+    const parsed = parse(urlForParse);
     const poolConfig = {
       ...parsed,
       max: Number(process.env.PGPOOL_MAX || 10),
