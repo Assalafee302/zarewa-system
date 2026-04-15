@@ -143,7 +143,8 @@ export function WorkspaceProvider({ children }) {
           body: JSON.stringify({ username, password }),
         });
         if (!ok || !data?.ok) {
-          return { ok: false, error: data?.error || 'Sign-in failed.' };
+          const parts = [data?.error, data?.detail].filter(Boolean);
+          return { ok: false, error: parts.join(' — ') || 'Sign-in failed.' };
         }
         // Fast initial render: dashboard summary + dashboard bootstrap first, then full snapshot.
         await refreshDashboardSummary();

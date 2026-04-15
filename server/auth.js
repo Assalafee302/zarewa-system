@@ -335,13 +335,18 @@ function createPasswordHash(password) {
 }
 
 function verifyPassword(password, storedHash) {
-  const [salt, expected] = String(storedHash || '').split(':');
-  if (!salt || !expected) return false;
-  const digest = crypto.scryptSync(String(password), salt, 64).toString('hex');
-  const a = Buffer.from(expected, 'hex');
-  const b = Buffer.from(digest, 'hex');
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
+  try {
+    const raw = storedHash == null ? '' : String(storedHash);
+    const [salt, expected] = raw.split(':');
+    if (!salt || !expected) return false;
+    const digest = crypto.scryptSync(String(password), salt, 64).toString('hex');
+    const a = Buffer.from(expected, 'hex');
+    const b = Buffer.from(digest, 'hex');
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
 }
 
 function createSessionToken() {
@@ -884,10 +889,14 @@ export async function loginWithPassword(db, username, password) {
   const key = String(username || '').trim().toLowerCase();
   const userRes = await pgQuery(db, `SELECT * FROM app_users WHERE lower(trim(username)) = $1`, [key]);
   const row = userRes?.rows?.[0] || null;
-  if (!row || row.status !== 'active') {
+  const statusNorm = String(row?.status ?? '')
+    .trim()
+    .toLowerCase();
+  if (!row || statusNorm !== 'active') {
     return { ok: false, error: 'Invalid username or password.' };
   }
-  if (!verifyPassword(password, row.password_hash)) {
+  const storedHash = row.password_hash ?? row.passwordHash;
+  if (!verifyPassword(password, storedHash)) {
     return { ok: false, error: 'Invalid username or password.' };
   }
 
@@ -909,7 +918,10 @@ export async function loginWithPassword(db, username, password) {
       await tryNewer();
     } catch (e) {
       const msg = String(e?.message || '');
-      const missingCols = /current_branch_id|view_all_branches|column/i.test(msg);
+      const pgCode = String(e?.code || '');
+      // 42703 = undefined_column — older user_sessions shape without workspace columns.
+      const missingCols =
+        pgCode === '42703' || /current_branch_id|view_all_branches|column/i.test(msg);
       if (!missingCols) throw e;
       // The failed statement aborts the transaction; recover by rolling back and re-running with older schema.
       await client.query('ROLLBACK');

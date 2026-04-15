@@ -1097,8 +1097,15 @@ export function registerHttpApi(app, db) {
       });
       return res.json({ ok: true, ...result.session });
     } catch (e) {
-      console.error(e);
-      return res.status(500).json({ ok: false, error: 'Login failed' });
+      const code = e && typeof e.code === 'string' ? e.code : '';
+      const msg = String(e?.message || e || '');
+      console.error('[zarewa] POST /api/session/login exception', code || '(no code)', msg);
+      const suffix = code ? ` (${code})` : '';
+      const detail =
+        process.env.ZAREWA_DIAGNOSTIC_LOGIN === '1' || process.env.ZAREWA_DIAGNOSTIC_LOGIN === 'true'
+          ? { detail: msg.slice(0, 500) }
+          : {};
+      return res.status(500).json({ ok: false, error: `Login failed${suffix}`, ...detail });
     }
   });
 

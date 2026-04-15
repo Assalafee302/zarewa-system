@@ -26,6 +26,7 @@ The application is **PostgreSQL-only**: **`DATABASE_URL` is required** for `npm 
 | `ZAREWA_LEDGER_POST_MAX` | Optional. Max authenticated **ledger money POSTs** (receipt, advance, apply-advance, refund-advance) per user per rolling window. Default `45`; clamped 1–50000. |
 | `ZAREWA_LEDGER_POST_WINDOW_MS` | Optional. Rolling window for the ledger POST limiter in milliseconds. Default `60000` (one minute); clamped 5000–3600000. |
 | `ZAREWA_TEST_SKIP_RATE_LIMIT` | When `1`, authenticated rate limiters (including ledger POSTs) are disabled — **tests and scripted stress only**, never in production. |
+| `ZAREWA_DIAGNOSTIC_LOGIN` | When `1` or `true`, `POST /api/session/login` **500** responses include a short `detail` field (truncated server message) for debugging. Remove after fixing the issue. |
 
 **Reset E2E Postgres data only:** `npm run wipe:e2e-db` truncates application tables in the database pointed to by **`DATABASE_URL`** and re-seeds (intended for a **dedicated E2E database**, not production).
 
