@@ -514,18 +514,21 @@ const DEFAULT_ADMIN_ROW = DEFAULT_USERS.find((u) => u.username === 'admin');
 
 /**
  * Insert or update the built-in admin user so username `admin` can sign in with the default dev password.
- * For local/staging recovery; same production guard as {@link seedAuthUsers}.
+ *
+ * Production rules:
+ * - If `app_users` is **empty**, always create `admin` / `Admin@123` so a fresh deploy can sign in (change password after).
+ * - If users already exist, do **nothing** unless `ZAREWA_ALLOW_SEEDED_USERS=1` (then dev-style insert/update applies).
  * @param {import('better-sqlite3').Database} db
  */
 export function ensureDefaultAdminUser(db) {
-  if (
-    process.env.NODE_ENV === 'production' &&
-    process.env.ZAREWA_ALLOW_SEEDED_USERS !== 'true' &&
-    process.env.ZAREWA_ALLOW_SEEDED_USERS !== '1'
-  ) {
+  if (!DEFAULT_ADMIN_ROW) return;
+  const isProd = process.env.NODE_ENV === 'production';
+  const allowSeeded =
+    process.env.ZAREWA_ALLOW_SEEDED_USERS === 'true' || process.env.ZAREWA_ALLOW_SEEDED_USERS === '1';
+  const userCount = Number(db.prepare(`SELECT COUNT(*) AS c FROM app_users`).get().c || 0);
+  if (isProd && !allowSeeded && userCount > 0) {
     return;
   }
-  if (!DEFAULT_ADMIN_ROW) return;
   const admin = DEFAULT_ADMIN_ROW;
   const hash = createPasswordHash(admin.password);
   const createdAtISO = nowIso();
@@ -536,6 +539,9 @@ export function ensureDefaultAdminUser(db) {
     .prepare(`SELECT id FROM app_users WHERE lower(trim(username)) = ?`)
     .get(admin.username.toLowerCase());
   if (existing?.id) {
+    if (isProd && !allowSeeded) {
+      return;
+    }
     if (hasDept) {
       db.prepare(
         `UPDATE app_users SET display_name = ?, password_hash = ?, role_key = ?, department = ?, status = 'active' WHERE id = ?`

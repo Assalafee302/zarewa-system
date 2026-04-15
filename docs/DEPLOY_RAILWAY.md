@@ -20,16 +20,19 @@ The repo ships a root **`Dockerfile`** (and **`railway.toml` uses `builder = DOC
 | `ZAREWA_LISTEN_HOST` | `0.0.0.0` (also set in the Dockerfile; required so probes are not IPv6-only.) |
 | `COOKIE_SECURE` | `1` when users only use HTTPS |
 | `PORT` | **Railway sets this automatically** — do not hardcode in Railway. |
+| `ZAREWA_ALLOW_SEEDED_USERS` | Set to `1` **only** if you need to re-apply dev passwords from `server/auth.js` when `app_users` is **not** empty (then remove after changing passwords). |
 
-4. **Optional:** `CORS_ORIGIN` — only needed if the browser calls a **different** API origin. For a **single Railway URL** (SPA + API same host), you usually omit it or set to your Railway public URL.
+4. **First sign-in:** If `app_users` is **empty**, startup creates **`admin`** with password **`Admin@123`**. If login still fails, the DB already had users with different credentials — use **`ZAREWA_ALLOW_SEEDED_USERS=1`** once (redeploy), sign in, change passwords, then **unset** it.
 
-5. **Schema:** After first deploy, run migrations from your machine (or use Railway **Pre-deploy** / one-off command):
+5. **Optional:** `CORS_ORIGIN` — only needed if the browser calls a **different** API origin. For a **single Railway URL** (SPA + API same host), you usually omit it or set to your Railway public URL.
+
+6. **Schema:** After first deploy, run migrations from your machine (or use Railway **Pre-deploy** / one-off command):
 
    ```bash
    DATABASE_URL="..." npm run db:migrate
    ```
 
-6. **Health check:** Configured as `GET /health` in `railway.toml` (plain `ok` text, registered before CORS/auth/STARTING gate). `GET /api/health` remains for JSON diagnostics.
+7. **Health check:** Configured as `GET /health` in `railway.toml` (plain `ok` text, registered before CORS/auth/STARTING gate). `GET /api/health` remains for JSON diagnostics.
 
 ## If you still use Vercel for the frontend
 
