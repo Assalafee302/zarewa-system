@@ -64,15 +64,22 @@ const app = db
     })();
 
 const port = Number(process.env.PORT || 8787);
-// Containers (Railway, Docker, etc.): bind all IPv4 interfaces so platform health probes reach the app.
-// Default `app.listen(port)` can listen on IPv6 `::` only, which some probes do not hit.
+// PaaS/container networking: if PORT is provided, bind externally so platform probes can reach the app.
+// Do NOT rely on Node defaults (can end up on 127.0.0.1 / :: only depending on environment).
 const listenHost =
   String(process.env.ZAREWA_LISTEN_HOST || '').trim() ||
-  (process.env.NODE_ENV === 'production' ? '0.0.0.0' : undefined);
+  (process.env.PORT ? '0.0.0.0' : process.env.NODE_ENV === 'production' ? '0.0.0.0' : undefined);
 
-function onListen() {
+function onListen(server) {
   try {
-    console.log(`Zarewa listening on http://127.0.0.1:${port} (PostgreSQL)`);
+    const addr = server?.address?.();
+    const host =
+      typeof addr === 'object' && addr && addr.address
+        ? addr.address === '::'
+          ? '[::]'
+          : addr.address
+        : listenHost || '127.0.0.1';
+    console.log(`Zarewa listening on http://${host}:${port} (PostgreSQL)`);
     // Avoid noisy network interface logs on PaaS unless explicitly requested.
     if ((listenHost === '0.0.0.0' || listenHost === '::') && process.env.ZAREWA_LOG_NETWORKS) {
       for (const nets of Object.values(os.networkInterfaces())) {
@@ -122,7 +129,7 @@ function onListen() {
 }
 
 if (listenHost) {
-  app.listen(port, listenHost, onListen);
+  const server = app.listen(port, listenHost, () => onListen(server));
 } else {
-  app.listen(port, onListen);
+  const server = app.listen(port, () => onListen(server));
 }
