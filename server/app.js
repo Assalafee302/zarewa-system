@@ -6,6 +6,17 @@ import { registerHttpApi } from './httpApi.js';
 import { attachAuthContext } from './auth.js';
 
 /**
+ * @param {string} pathOnly Express `req.path` (pathname only).
+ * @returns {boolean}
+ */
+function isPublicStaticAssetPath(pathOnly) {
+  if (pathOnly.startsWith('/assets/')) return true;
+  return /\.(js|mjs|cjs|css|map|png|jpe?g|gif|webp|svg|ico|woff2?|ttf|eot|json|webmanifest)$/i.test(
+    pathOnly
+  );
+}
+
+/**
  * @param {import('better-sqlite3').Database} db
  * @param {{ beforeRegisterHttpApi?: (app: import('express').Express) => void }} [opts]
  */
@@ -33,7 +44,7 @@ export function createApp(db, opts = {}) {
   app.disable('x-powered-by');
   const contentSecurityPolicy =
     process.env.ZAREWA_CSP ||
-    "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'";
+    "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self';";
   app.use((req, res, next) => {
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -41,20 +52,33 @@ export function createApp(db, opts = {}) {
     res.setHeader('Content-Security-Policy', contentSecurityPolicy);
     next();
   });
-  app.use(
-    cors({
-      origin: allowAllOrigins
-        ? true
-        : (origin, callback) => {
-            // Allow requests with no Origin (curl, healthchecks, server-to-server).
-            if (!origin) return callback(null, true);
-            if (allowedOrigins.includes(origin)) return callback(null, true);
-            // Same-origin requests will not send CORS preflight; this only blocks cross-origin browser calls.
-            return callback(new Error('CORS not allowed'));
-          },
-      credentials: true,
-    })
-  );
+  if (allowAllOrigins) {
+    app.use(cors({ origin: true, credentials: true }));
+  } else {
+    // Per-request host so SPA+API on the same Railway hostname passes CORS when the browser sends Origin.
+    app.use((req, res, next) => {
+      const forwardedHost = String(req.get('x-forwarded-host') || req.get('host') || '')
+        .split(',')[0]
+        .trim();
+      cors({
+        origin(origin, callback) {
+          if (!origin) return callback(null, true);
+          if (allowedOrigins.includes(origin)) return callback(null, true);
+          if (forwardedHost) {
+            try {
+              const u = new URL(origin);
+              const reqHost = forwardedHost.split(':')[0];
+              if (u.hostname === reqHost) return callback(null, true);
+            } catch {
+              /* ignore */
+            }
+          }
+          return callback(new Error('CORS not allowed'));
+        },
+        credentials: true,
+      })(req, res, next);
+    });
+  }
   app.use(attachAuthContext(db));
   if (typeof opts.beforeRegisterHttpApi === 'function') {
     opts.beforeRegisterHttpApi(app);
@@ -81,6 +105,8 @@ export function createApp(db, opts = {}) {
     app.use((req, res, next) => {
       if (req.method !== 'GET' && req.method !== 'HEAD') return next();
       if (req.path.startsWith('/api')) return next();
+      // If a hashed asset is missing, do not send index.html (browser would execute HTML as JS → blank page).
+      if (isPublicStaticAssetPath(req.path)) return next();
       res.sendFile(spaIndex, (err) => (err ? next(err) : undefined));
     });
   }
