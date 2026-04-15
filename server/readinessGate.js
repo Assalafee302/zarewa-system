@@ -9,7 +9,9 @@ export function readinessExemptApiPath(originalUrl) {
     pathOnly === '/api/health' ||
     pathOnly === '/api/session/login' ||
     pathOnly === '/api/session/forgot-password' ||
-    pathOnly === '/api/session/reset-password'
+    pathOnly === '/api/session/reset-password' ||
+    // Lets the SPA resolve auth (401) immediately while schema/seed runs; requireAuth runs before bootstrap body.
+    pathOnly === '/api/bootstrap'
   );
 }
 

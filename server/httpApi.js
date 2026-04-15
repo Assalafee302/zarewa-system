@@ -1066,7 +1066,7 @@ export function registerHttpApi(app, db) {
       const ip = clientIp(req);
       const userKey = `${ip}:${String(req.body?.username || '').trim().toLowerCase()}`;
       const { username, password } = req.body || {};
-      const result = loginWithPassword(db, username, password);
+      const result = await loginWithPassword(db, username, password);
       if (!result.ok) {
         if (!allowRateLimit(loginAttemptBuckets, userKey, 12, 30 * 60 * 1000)) {
           await loginDelayMs();
@@ -1081,12 +1081,19 @@ export function registerHttpApi(app, db) {
       setSessionCookie(res, result.sessionToken);
       // CSRF cookie used by the SPA to protect cookie-authenticated write requests.
       setCsrfCookie(res);
-      appendAuditLog(db, {
-        actor: result.session.user,
-        action: 'session.login',
-        entityKind: 'user',
-        entityId: result.session.user?.id ?? '',
-        note: 'User signed in',
+      // Avoid delaying login response on slow DB links.
+      setImmediate(() => {
+        try {
+          appendAuditLog(db, {
+            actor: result.session.user,
+            action: 'session.login',
+            entityKind: 'user',
+            entityId: result.session.user?.id ?? '',
+            note: 'User signed in',
+          });
+        } catch {
+          /* ignore audit failures */
+        }
       });
       return res.json({ ok: true, ...result.session });
     } catch (e) {
@@ -1104,7 +1111,7 @@ export function registerHttpApi(app, db) {
       }
       await loginDelayMs();
       const identifier = req.body?.username ?? req.body?.email ?? req.body?.identifier;
-      const result = requestPasswordReset(db, identifier);
+      const result = await requestPasswordReset(db, identifier);
       return res.json({
         ok: true,
         message:
@@ -1130,7 +1137,7 @@ export function registerHttpApi(app, db) {
       }
       await loginDelayMs();
       const { identifier, token, newPassword } = req.body || {};
-      const result = completePasswordReset(db, identifier, token, newPassword);
+      const result = await completePasswordReset(db, identifier, token, newPassword);
       if (!result.ok) {
         return res.status(400).json(result);
       }
@@ -1157,7 +1164,7 @@ export function registerHttpApi(app, db) {
         entityId: req.user?.id ?? '',
         note: 'User signed out',
       });
-      logoutSession(db, req.sessionToken);
+      void logoutSession(db, req.sessionToken);
       clearSessionCookie(res);
       clearCsrfCookie(res);
       res.json({ ok: true });

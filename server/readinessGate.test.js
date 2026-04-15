@@ -10,7 +10,7 @@ describe('readinessExemptApiPath', () => {
     expect(readinessExemptApiPath('/api/session/login')).toBe(true);
     expect(readinessExemptApiPath('/api/session/forgot-password')).toBe(true);
     expect(readinessExemptApiPath('/api/session/reset-password')).toBe(true);
-    expect(readinessExemptApiPath('/api/bootstrap')).toBe(false);
+    expect(readinessExemptApiPath('/api/bootstrap')).toBe(true);
     expect(readinessExemptApiPath('/api/session')).toBe(false);
   });
 });
@@ -33,7 +33,7 @@ describe('attachReadinessGate', () => {
     expect(loginRes.body.reachedHandler).toBe(true);
 
     const bootRes = await request(app).get('/api/bootstrap');
-    expect(bootRes.status).toBe(503);
-    expect(bootRes.body.code).toBe('STARTING');
+    expect(bootRes.status).toBe(200);
+    expect(bootRes.body.ok).toBe(true);
   });
 });

@@ -35,6 +35,11 @@ export function discretePostgresPoolConfig() {
     password,
     database,
     max: Number(process.env.PGPOOL_MAX || 10),
+    // Helps reduce "random hangs" on flaky networks by failing fast.
+    connectionTimeoutMillis: Number(process.env.PGCONNECT_TIMEOUT_MS || 10_000),
+    query_timeout: Number(process.env.PGQUERY_TIMEOUT_MS || 30_000),
+    statement_timeout: Number(process.env.PGSTATEMENT_TIMEOUT_MS || 30_000),
+    keepAlive: true,
     ssl: shouldUseSsl() ? { rejectUnauthorized: false } : false,
   };
 }
@@ -54,6 +59,10 @@ export function createPoolFromEnv() {
     const poolConfig = {
       ...parsed,
       max: Number(process.env.PGPOOL_MAX || 10),
+      connectionTimeoutMillis: Number(process.env.PGCONNECT_TIMEOUT_MS || 10_000),
+      query_timeout: Number(process.env.PGQUERY_TIMEOUT_MS || 30_000),
+      statement_timeout: Number(process.env.PGSTATEMENT_TIMEOUT_MS || 30_000),
+      keepAlive: true,
     };
     delete poolConfig.ssl;
     delete poolConfig.sslmode;

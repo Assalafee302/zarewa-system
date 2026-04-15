@@ -823,11 +823,61 @@ export function clearCsrfCookie(res) {
   pushSetCookie(res, `${CSRF_COOKIE}=; SameSite=Strict; Path=/; Max-Age=0${extra}`);
 }
 
-export function loginWithPassword(db, username, password) {
+async function pgQuery(db, text, params = []) {
+  if (!db?.pool || typeof db.pool.query !== 'function') {
+    throw new Error('Postgres pool not available on db. Expected db.pool.query.');
+  }
+  const maxAttempts = Number(process.env.PGQUERY_RETRY_ATTEMPTS || 3);
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await db.pool.query(text, params);
+    } catch (e) {
+      const code = String(e?.code || '');
+      const retryable = code === 'EAI_AGAIN' || code === 'ENOTFOUND' || code === 'ETIMEDOUT';
+      if (!retryable || attempt === maxAttempts) throw e;
+      const sleepMs = 250 * attempt;
+      await new Promise((r) => setTimeout(r, sleepMs));
+    }
+  }
+  // Unreachable, but keeps flow analysis happy.
+  return await db.pool.query(text, params);
+}
+
+async function withPgTransaction(db, fn) {
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (e) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      /* ignore rollback failures */
+    }
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+async function defaultBranchIdForPool(db) {
+  try {
+    const r = await pgQuery(
+      db,
+      `SELECT id FROM branches WHERE active = 1 ORDER BY sort_order ASC, id ASC LIMIT 1`
+    );
+    return r?.rows?.[0]?.id || DEFAULT_BRANCH_ID;
+  } catch {
+    return DEFAULT_BRANCH_ID;
+  }
+}
+
+export async function loginWithPassword(db, username, password) {
   const key = String(username || '').trim().toLowerCase();
-  const row = db
-    .prepare(`SELECT * FROM app_users WHERE lower(trim(username)) = ?`)
-    .get(key);
+  const userRes = await pgQuery(db, `SELECT * FROM app_users WHERE lower(trim(username)) = $1`, [key]);
+  const row = userRes?.rows?.[0] || null;
   if (!row || row.status !== 'active') {
     return { ok: false, error: 'Invalid username or password.' };
   }
@@ -838,23 +888,35 @@ export function loginWithPassword(db, username, password) {
   const sessionToken = createSessionToken();
   const createdAtISO = nowIso();
   const expiresAtISO = addHoursToIso(createdAtISO, SESSION_TTL_HOURS);
-  const branchId = defaultBranchIdForDb(db);
-  db.transaction(() => {
-    db.prepare(`DELETE FROM user_sessions WHERE user_id = ?`).run(row.id);
-    const hasBranch = pgColumnExists(db, 'user_sessions', 'current_branch_id');
-    if (hasBranch) {
-      db.prepare(
+  const branchId = await defaultBranchIdForPool(db);
+
+  await withPgTransaction(db, async (client) => {
+    await client.query(`DELETE FROM user_sessions WHERE user_id = $1`, [row.id]);
+    // Prefer the newer schema (workspace branch selection). Fall back for older DBs.
+    const tryNewer = async () =>
+      await client.query(
         `INSERT INTO user_sessions (session_token, user_id, created_at_iso, last_seen_at_iso, expires_at_iso, current_branch_id, view_all_branches)
-         VALUES (?,?,?,?,?,?,?)`
-      ).run(sessionToken, row.id, createdAtISO, createdAtISO, expiresAtISO, branchId, 0);
-    } else {
-      db.prepare(
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [sessionToken, row.id, createdAtISO, createdAtISO, expiresAtISO, branchId, 0]
+      );
+    try {
+      await tryNewer();
+    } catch (e) {
+      const msg = String(e?.message || '');
+      const missingCols = /current_branch_id|view_all_branches|column/i.test(msg);
+      if (!missingCols) throw e;
+      // The failed statement aborts the transaction; recover by rolling back and re-running with older schema.
+      await client.query('ROLLBACK');
+      await client.query('BEGIN');
+      await client.query(`DELETE FROM user_sessions WHERE user_id = $1`, [row.id]);
+      await client.query(
         `INSERT INTO user_sessions (session_token, user_id, created_at_iso, last_seen_at_iso, expires_at_iso)
-         VALUES (?,?,?,?,?)`
-      ).run(sessionToken, row.id, createdAtISO, createdAtISO, expiresAtISO);
+         VALUES ($1,$2,$3,$4,$5)`,
+        [sessionToken, row.id, createdAtISO, createdAtISO, expiresAtISO]
+      );
     }
-    db.prepare(`UPDATE app_users SET last_login_at_iso = ? WHERE id = ?`).run(createdAtISO, row.id);
-  })();
+    await client.query(`UPDATE app_users SET last_login_at_iso = $1 WHERE id = $2`, [createdAtISO, row.id]);
+  });
 
   return {
     ok: true,
@@ -863,14 +925,15 @@ export function loginWithPassword(db, username, password) {
       ...buildSessionPayload({ ...row, last_login_at_iso: createdAtISO }),
       currentBranchId: branchId,
       viewAllBranches: false,
-      branches: listBranches(db),
+      // Keep login fast: branches are loaded on /api/bootstrap anyway.
+      branches: [],
     },
   };
 }
 
-export function logoutSession(db, token) {
+export async function logoutSession(db, token) {
   if (!token) return;
-  db.prepare(`DELETE FROM user_sessions WHERE session_token = ?`).run(token);
+  await pgQuery(db, `DELETE FROM user_sessions WHERE session_token = $1`, [token]);
 }
 
 export function changePassword(db, userId, currentPassword, newPassword) {
@@ -992,20 +1055,32 @@ function findUserByIdentifier(db, identifier) {
  * Creates a reset token. Always returns the same public shape (no user enumeration).
  * @returns {{ ok: true, devResetToken?: string }}
  */
-export function requestPasswordReset(db, identifier) {
-  const row = findUserByIdentifier(db, identifier);
+export async function requestPasswordReset(db, identifier) {
+  const id = String(identifier || '').trim();
+  const lower = id.toLowerCase();
+  const userRes = await pgQuery(
+    db,
+    `SELECT * FROM app_users
+     WHERE status = 'active'
+       AND (lower(username) = $1 OR (email IS NOT NULL AND trim(email) != '' AND lower(email) = $2))
+     LIMIT 1`,
+    [lower, lower]
+  );
+  const row = userRes?.rows?.[0] || null;
   const createdAtISO = nowIso();
   const expiresAtISO = addMinutesToIso(createdAtISO, RESET_TOKEN_TTL_MINUTES);
 
   if (row) {
-    db.prepare(`DELETE FROM password_reset_tokens WHERE user_id = ? AND used_at_iso IS NULL`).run(row.id);
+    await pgQuery(db, `DELETE FROM password_reset_tokens WHERE user_id = $1 AND used_at_iso IS NULL`, [row.id]);
     const plain = crypto.randomBytes(RESET_TOKEN_BYTES).toString('base64url');
     const tokenHash = hashResetToken(plain);
     const id = `PRT-${crypto.randomBytes(12).toString('hex')}`;
-    db.prepare(
+    await pgQuery(
+      db,
       `INSERT INTO password_reset_tokens (id, user_id, token_hash, created_at_iso, expires_at_iso, used_at_iso)
-       VALUES (?,?,?,?,?,NULL)`
-    ).run(id, row.id, tokenHash, createdAtISO, expiresAtISO);
+       VALUES ($1,$2,$3,$4,$5,NULL)`,
+      [id, row.id, tokenHash, createdAtISO, expiresAtISO]
+    );
 
     const expose =
       process.env.NODE_ENV !== 'production' &&
@@ -1027,17 +1102,19 @@ function addMinutesToIso(iso, minutes) {
 /**
  * @returns {{ ok: true } | { ok: false, error: string }}
  */
-export function completePasswordReset(db, identifier, token, newPassword) {
+export async function completePasswordReset(db, identifier, token, newPassword) {
   const idTrim = String(identifier || '').trim();
   const tokenHash = hashResetToken(String(token || '').trim());
-  const matchRow = db
-    .prepare(
-      `SELECT t.id AS prt_id, u.id AS user_id, u.username, u.email, u.status
-       FROM password_reset_tokens t
-       JOIN app_users u ON u.id = t.user_id
-       WHERE t.token_hash = ? AND t.used_at_iso IS NULL AND t.expires_at_iso > ?`
-    )
-    .get(tokenHash, nowIso());
+  const matchRes = await pgQuery(
+    db,
+    `SELECT t.id AS prt_id, u.id AS user_id, u.username, u.email, u.status
+     FROM password_reset_tokens t
+     JOIN app_users u ON u.id = t.user_id
+     WHERE t.token_hash = $1 AND t.used_at_iso IS NULL AND t.expires_at_iso > $2
+     LIMIT 1`,
+    [tokenHash, nowIso()]
+  );
+  const matchRow = matchRes?.rows?.[0] || null;
   if (!matchRow || matchRow.status !== 'active') {
     return { ok: false, error: 'Invalid or expired reset link. Request a new reset.' };
   }
@@ -1054,14 +1131,14 @@ export function completePasswordReset(db, identifier, token, newPassword) {
   const strength = validatePasswordStrength(newPassword);
   if (!strength.ok) return strength;
 
-  db.transaction(() => {
-    db.prepare(`UPDATE app_users SET password_hash = ? WHERE id = ?`).run(
+  await withPgTransaction(db, async (client) => {
+    await client.query(`UPDATE app_users SET password_hash = $1 WHERE id = $2`, [
       createPasswordHash(String(newPassword)),
-      matchRow.user_id
-    );
-    db.prepare(`UPDATE password_reset_tokens SET used_at_iso = ? WHERE id = ?`).run(nowIso(), matchRow.prt_id);
-    db.prepare(`DELETE FROM user_sessions WHERE user_id = ?`).run(matchRow.user_id);
-  })();
+      matchRow.user_id,
+    ]);
+    await client.query(`UPDATE password_reset_tokens SET used_at_iso = $1 WHERE id = $2`, [nowIso(), matchRow.prt_id]);
+    await client.query(`DELETE FROM user_sessions WHERE user_id = $1`, [matchRow.user_id]);
+  });
 
   return { ok: true };
 }

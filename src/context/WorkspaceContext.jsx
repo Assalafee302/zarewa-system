@@ -89,6 +89,7 @@ export function WorkspaceProvider({ children }) {
   }, [dashboardSummary, dashboardSummaryEtag]);
 
   const refresh = useCallback(async (opts = {}) => {
+    let startingIters = 0;
     try {
       const mode = String(opts?.mode ?? '').trim();
       const qs = mode ? `?mode=${encodeURIComponent(mode)}` : '';
@@ -110,6 +111,7 @@ export function WorkspaceProvider({ children }) {
           return null;
         }
         if (httpStatus === 503 && data?.code === 'STARTING') {
+          startingIters += 1;
           await new Promise((r) => setTimeout(r, pollMs));
           continue;
         }
