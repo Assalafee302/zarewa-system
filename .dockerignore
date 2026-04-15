@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.env
+.env.*
+*.log
+coverage
+playwright-report
+test-results
+playwright/.cache
+.agents
+skills-lock.json

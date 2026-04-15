@@ -2,8 +2,9 @@
 # Build produces `dist/` so the same Node process can serve the SPA + `/api/*`.
 
 [build]
-# Clean install avoids EBUSY on `rmdir node_modules/.vite` in Docker/Railpack; Vite cache outside node_modules.
-buildCommand = "rm -rf node_modules && npm ci && VITE_CACHE_DIR=/tmp/vite-cache npm run build"
+# Use root Dockerfile so the image never reuses a Railpack-mounted `node_modules` (fixes busy `.vite`).
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "npm run start"
