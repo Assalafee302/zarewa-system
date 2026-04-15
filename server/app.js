@@ -25,10 +25,10 @@ export function createApp(db, opts = {}) {
   // Disallow permissive CORS in production by default.
   const isProduction = process.env.NODE_ENV === 'production';
   const allowAllOrigins = corsOrigin === '*' && !isProduction;
-  const allowedOrigins =
-    corsOrigin === '*'
-      ? []
-      : corsOrigin.split(',').map((s) => s.trim()).filter(Boolean);
+  const allowedOrigins = (corsOrigin === '*'
+    ? []
+    : corsOrigin.split(',').map((s) => s.trim()).filter(Boolean)
+  ).filter(Boolean);
 
   app.disable('x-powered-by');
   const contentSecurityPolicy =
@@ -43,7 +43,15 @@ export function createApp(db, opts = {}) {
   });
   app.use(
     cors({
-      origin: allowAllOrigins ? true : allowedOrigins.length > 0 ? allowedOrigins : false,
+      origin: allowAllOrigins
+        ? true
+        : (origin, callback) => {
+            // Allow requests with no Origin (curl, healthchecks, server-to-server).
+            if (!origin) return callback(null, true);
+            if (allowedOrigins.includes(origin)) return callback(null, true);
+            // Same-origin requests will not send CORS preflight; this only blocks cross-origin browser calls.
+            return callback(new Error('CORS not allowed'));
+          },
       credentials: true,
     })
   );
