@@ -4,6 +4,20 @@ import pg from 'pg';
 const { Pool } = pg;
 
 /**
+ * Read `sslmode` from a Postgres URL before we strip it for `pg-connection-string` parse.
+ * @param {string} url
+ * @returns {string | null}
+ */
+function readSslModeFromDatabaseUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.searchParams.get('sslmode')?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * `pg-connection-string` warns when the URL contains `sslmode=require` (etc.) because
  * future libpq semantics will differ. We apply TLS via explicit `poolConfig.ssl` below,
  * so strip ssl-related query params before parse to avoid noisy logs on Railway/Supabase.
@@ -21,11 +35,58 @@ function databaseUrlForPgParse(url) {
   }
 }
 
-function shouldUseSsl() {
-  const v = String(process.env.PGSSLMODE || '').trim().toLowerCase();
-  if (v === 'disable') return false;
-  // Supabase requires SSL; most hosted Postgres URLs include sslmode=require.
-  return true;
+/**
+ * @param {string | null | undefined} host
+ * @returns {boolean}
+ */
+function isPrivateIpv4Host(host) {
+  const h = String(host || '').trim().toLowerCase();
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  const m = /^172\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(h);
+  if (m) {
+    const second = Number(m[1]);
+    if (second >= 16 && second <= 31) return true;
+  }
+  return false;
+}
+
+/**
+ * Docker Compose / local stacks often use a service hostname with no TLS on 5432.
+ * @param {string | null | undefined} host
+ */
+function isLikelyNonTlsPostgresHost(host) {
+  const h = String(host || '').trim().toLowerCase();
+  if (h === 'postgres') return true;
+  return isPrivateIpv4Host(h);
+}
+
+/**
+ * Explicit TLS for `node-pg`. Hosted providers (Supabase, Neon, RDS, …) need SSL;
+ * typical `postgres:5432` Docker links do not.
+ *
+ * @param {{ host?: string | null, sslmodeFromUrl?: string | null }} opts
+ * @returns {false | { rejectUnauthorized: false }}
+ */
+export function inferSslForPostgres(opts) {
+  const host = opts.host ?? '';
+  const urlSsl = String(opts.sslmodeFromUrl || '').trim().toLowerCase();
+
+  const pgssl = String(process.env.PGSSLMODE || '').trim().toLowerCase();
+  if (pgssl === 'disable') return false;
+  if (pgssl === 'require' || pgssl === 'verify-full' || pgssl === 'verify-ca') {
+    return { rejectUnauthorized: false };
+  }
+
+  if (urlSsl) {
+    if (urlSsl === 'disable') return false;
+    if (urlSsl === 'allow' || urlSsl === 'prefer') return false;
+    return { rejectUnauthorized: false };
+  }
+
+  if (isLocalHost(host) || isLikelyNonTlsPostgresHost(host)) return false;
+
+  return { rejectUnauthorized: false };
 }
 
 function isLocalHost(host) {
@@ -58,7 +119,7 @@ export function discretePostgresPoolConfig() {
     query_timeout: Number(process.env.PGQUERY_TIMEOUT_MS || 30_000),
     statement_timeout: Number(process.env.PGSTATEMENT_TIMEOUT_MS || 30_000),
     keepAlive: true,
-    ssl: shouldUseSsl() ? { rejectUnauthorized: false } : false,
+    ssl: inferSslForPostgres({ host, sslmodeFromUrl: null }),
   };
 }
 
@@ -70,6 +131,7 @@ export function hasPostgresEnv() {
 export function createPoolFromEnv() {
   const url = process.env.DATABASE_URL?.trim();
   if (url) {
+    const sslmodeFromUrl = readSslModeFromDatabaseUrl(url);
     const urlForParse = databaseUrlForPgParse(url);
     // `pg` does `Object.assign({}, config, parse(connectionString))`, so query
     // `sslmode=require` becomes `ssl: {}` and overwrites any caller `ssl`, which
@@ -85,7 +147,7 @@ export function createPoolFromEnv() {
     };
     delete poolConfig.ssl;
     delete poolConfig.sslmode;
-    poolConfig.ssl = shouldUseSsl() ? { rejectUnauthorized: false } : false;
+    poolConfig.ssl = inferSslForPostgres({ host: poolConfig.host, sslmodeFromUrl });
     return new Pool(poolConfig);
   }
   const discrete = discretePostgresPoolConfig();

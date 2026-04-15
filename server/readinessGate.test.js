@@ -4,20 +4,20 @@ import express from 'express';
 import { attachReadinessGate, readinessExemptApiPath } from './readinessGate.js';
 
 describe('readinessExemptApiPath', () => {
-  it('matches health and public session routes', () => {
+  it('matches health and bootstrap only (session routes wait for schema)', () => {
     expect(readinessExemptApiPath('/api/health')).toBe(true);
     expect(readinessExemptApiPath('/api/health/')).toBe(true);
     expect(readinessExemptApiPath('/api/health?x=1')).toBe(true);
-    expect(readinessExemptApiPath('/api/session/login')).toBe(true);
-    expect(readinessExemptApiPath('/api/session/forgot-password')).toBe(true);
-    expect(readinessExemptApiPath('/api/session/reset-password')).toBe(true);
+    expect(readinessExemptApiPath('/api/session/login')).toBe(false);
+    expect(readinessExemptApiPath('/api/session/forgot-password')).toBe(false);
+    expect(readinessExemptApiPath('/api/session/reset-password')).toBe(false);
     expect(readinessExemptApiPath('/api/bootstrap')).toBe(true);
     expect(readinessExemptApiPath('/api/session')).toBe(false);
   });
 });
 
 describe('attachReadinessGate', () => {
-  it('returns 503 STARTING for gated /api paths but not for public session routes', async () => {
+  it('returns 503 STARTING for session routes until apiReady; bootstrap stays exempt', async () => {
     const app = express();
     app.use(express.json());
     const bootState = { apiReady: false };
@@ -30,8 +30,8 @@ describe('attachReadinessGate', () => {
     });
 
     const loginRes = await request(app).post('/api/session/login').send({ username: 'x', password: 'y' });
-    expect(loginRes.status).toBe(200);
-    expect(loginRes.body.reachedHandler).toBe(true);
+    expect(loginRes.status).toBe(503);
+    expect(loginRes.body.code).toBe('STARTING');
 
     const bootRes = await request(app).get('/api/bootstrap');
     expect(bootRes.status).toBe(200);
