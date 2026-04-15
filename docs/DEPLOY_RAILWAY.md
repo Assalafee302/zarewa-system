@@ -5,7 +5,7 @@ Zarewa is a **Node** API (`server/index.js`) plus a **Vite** frontend. Railway c
 - Serves **`/api/*`** from Express
 - Serves the **built SPA** from `dist/` when `dist/index.html` exists (same origin — good for cookies and CSRF)
 
-The repo ships a root **`Dockerfile`** (and **`railway.toml` uses `builder = DOCKERFILE`**) so Railway does not use Railpack’s `node_modules` cache, which can leave **`node_modules/.vite` busy** (`EBUSY` / “device busy”) during `npm ci` or `rm`. The image runs **`npm ci --omit=dev`**, **`VITE_CACHE_DIR=/tmp/vite-cache`**, then **`npm run build`** so `dist/` exists before `npm run start`. **`.dockerignore`** keeps `node_modules` out of the build context.
+The repo ships a root **`Dockerfile`** (and **`railway.toml` uses `builder = DOCKERFILE`**) so Railway does not use Railpack’s `node_modules` cache, which can leave **`node_modules/.vite` busy** (`EBUSY` / “device busy”) during `npm ci` or `rm`. The image runs **`npm ci --omit=dev`**, **`VITE_CACHE_DIR=/tmp/vite-cache`**, then **`npm run build`**, and starts with **`node server/index.js`** with **`ZAREWA_LISTEN_HOST=0.0.0.0`** so platform health probes (IPv4) reach the process. **`.dockerignore`** keeps `node_modules` out of the build context.
 
 ## Checklist
 
@@ -17,7 +17,7 @@ The repo ships a root **`Dockerfile`** (and **`railway.toml` uses `builder = DOC
 |----------|--------|
 | `DATABASE_URL` | Postgres connection string (required). |
 | `NODE_ENV` | `production` |
-| `ZAREWA_LISTEN_HOST` | `0.0.0.0` |
+| `ZAREWA_LISTEN_HOST` | `0.0.0.0` (also set in the Dockerfile; required so probes are not IPv6-only.) |
 | `COOKIE_SECURE` | `1` when users only use HTTPS |
 | `PORT` | **Railway sets this automatically** — do not hardcode in Railway. |
 

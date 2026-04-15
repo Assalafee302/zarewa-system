@@ -11,9 +11,11 @@ RUN npm ci --omit=dev
 COPY . .
 
 ENV NODE_ENV=production \
-    VITE_CACHE_DIR=/tmp/vite-cache
+    VITE_CACHE_DIR=/tmp/vite-cache \
+    ZAREWA_LISTEN_HOST=0.0.0.0
 
 RUN npm run build
 
 EXPOSE 8787
-CMD ["npm", "run", "start"]
+# Run node directly (no npm wrapper); Railway sets PORT at runtime.
+CMD ["node", "server/index.js"]

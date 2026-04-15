@@ -7,7 +7,8 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "npm run start"
+# Match Dockerfile CMD; avoids npm as PID 1. Image ENV still sets ZAREWA_LISTEN_HOST for Railway probes.
+startCommand = "node server/index.js"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"

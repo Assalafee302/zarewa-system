@@ -53,7 +53,11 @@ const app = db
     })();
 
 const port = Number(process.env.PORT || 8787);
-const listenHost = String(process.env.ZAREWA_LISTEN_HOST || '').trim() || undefined;
+// Containers (Railway, Docker, etc.): bind all IPv4 interfaces so platform health probes reach the app.
+// Default `app.listen(port)` can listen on IPv6 `::` only, which some probes do not hit.
+const listenHost =
+  String(process.env.ZAREWA_LISTEN_HOST || '').trim() ||
+  (process.env.RAILWAY_ENVIRONMENT ? '0.0.0.0' : undefined);
 
 function onListen() {
   console.log(`Zarewa listening on http://127.0.0.1:${port} (PostgreSQL)`);
@@ -85,7 +89,8 @@ function onListen() {
     child.on('exit', (code, signal) => {
       if (code !== 0) {
         console.error('[zarewa] Bootstrap subprocess failed', { code, signal });
-        process.exit(code ?? 1);
+        // Keep HTTP up so healthchecks and logs work while you fix DATABASE_URL / migrations.
+        return;
       }
       bootState.apiReady = true;
       const ai = readAiAssistConfig();
