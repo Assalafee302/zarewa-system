@@ -64,11 +64,21 @@ const app = db
     })();
 
 const port = Number(process.env.PORT || 8787);
-// PaaS/container networking: if PORT is provided, bind externally so platform probes can reach the app.
-// Do NOT rely on Node defaults (can end up on 127.0.0.1 / :: only depending on environment).
-const listenHost =
-  String(process.env.ZAREWA_LISTEN_HOST || '').trim() ||
-  (process.env.PORT ? '0.0.0.0' : process.env.NODE_ENV === 'production' ? '0.0.0.0' : undefined);
+
+/**
+ * Node's default when host is omitted is often `::` (IPv6 all interfaces). Railway's health
+ * probes commonly use IPv4 to the container, which can fail against an IPv6-only listen.
+ * Always pass an explicit host on PaaS / production.
+ */
+function resolveListenHost() {
+  let h = String(process.env.ZAREWA_LISTEN_HOST || '').trim();
+  if (h === '::') h = '0.0.0.0';
+  if (h) return h;
+  if (process.env.PORT || process.env.NODE_ENV === 'production') return '0.0.0.0';
+  return undefined;
+}
+
+const listenHost = resolveListenHost();
 
 function onListen(server) {
   try {
@@ -128,8 +138,7 @@ function onListen(server) {
   });
 }
 
-if (listenHost) {
-  const server = app.listen(port, listenHost, () => onListen(server));
-} else {
-  const server = app.listen(port, () => onListen(server));
-}
+const server =
+  listenHost !== undefined
+    ? app.listen(port, listenHost, () => onListen(server))
+    : app.listen(port, () => onListen(server));
