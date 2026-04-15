@@ -12,6 +12,7 @@ describe('readinessExemptApiPath', () => {
     expect(readinessExemptApiPath('/api/session/forgot-password')).toBe(false);
     expect(readinessExemptApiPath('/api/session/reset-password')).toBe(false);
     expect(readinessExemptApiPath('/api/bootstrap')).toBe(true);
+    expect(readinessExemptApiPath('/api/bootstrap-status')).toBe(true);
     expect(readinessExemptApiPath('/api/session')).toBe(false);
   });
 });

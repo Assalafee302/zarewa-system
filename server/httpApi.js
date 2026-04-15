@@ -377,6 +377,39 @@ export function registerHttpApi(app, db, runtime = {}) {
     });
   });
 
+  /** Public: always JSON 200 so you can open it in a browser while the STARTING gate blocks login. */
+  app.get('/api/bootstrap-status', (_req, res) => {
+    const bs = runtime.bootState;
+    if (!bs) {
+      return res.json({ ok: true, phase: 'ready', note: 'No boot state attached (e.g. tests).' });
+    }
+    if (bs.bootstrapFailed) {
+      return res.json({
+        ok: false,
+        phase: 'failed',
+        bootstrap: {
+          exitCode: bs.bootstrapExitCode ?? null,
+          signal: bs.bootstrapSignal ?? null,
+          spawnError: bs.bootstrapSpawnError ?? null,
+        },
+        hint: 'Check deploy logs for [zarewa-bootstrap] FAILED. Verify DATABASE_URL; run npm run db:migrate with the same URI.',
+      });
+    }
+    if (bs.apiReady) {
+      return res.json({
+        ok: true,
+        phase: 'ready',
+        message: 'Database setup finished. Use admin / Admin@123 on an empty DB unless you changed users.',
+      });
+    }
+    return res.json({
+      ok: false,
+      phase: 'starting',
+      message:
+        'Schema + seed still running in a child process. Watch deploy logs for [zarewa-bootstrap] until "finished OK". First boot can take many minutes on Supabase unless you ran npm run db:migrate first.',
+    });
+  });
+
   app.get('/api/ai/status', requireAuth, (req, res) => {
     res.json(readAiStatusForRequest(req, readAiAssistConfig().enabled));
   });

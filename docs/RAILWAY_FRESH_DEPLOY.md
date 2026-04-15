@@ -68,9 +68,15 @@ Follow these steps **in order**. This path uses **Supabase** for Postgres and **
 ## Part F — Verify the live app
 
 18. In Railway, open the web service → **Settings → Networking** (or the generated **public URL**). Open `https://<your-domain>/health` — plain text **`ok`**.
-19. Open `https://<your-domain>/api/health` — JSON with `ok: true`. After bootstrap, `bootstrap.ready` should be `true` (on builds that include that field).
+19. Open `https://<your-domain>/api/bootstrap-status` — JSON with **`phase`**: `starting` → wait; **`ready`** → you can sign in; **`failed`** → read `hint` and deploy logs (`[zarewa-bootstrap]`). You can also use `GET /api/health` and inspect **`bootstrap.ready`** / **`bootstrap.failed`**.
 20. Open the **site root** `https://<your-domain>/` — the SPA should load (same container serves `dist/`).
-21. **Sign in:** default empty DB creates **`admin`** / **`Admin@123`** (change password after first login). The first boot can take **several minutes** (schema + seed over the network). The UI waits up to **10 minutes** for startup. While waiting, open **API deploy logs** and look for `[zarewa-bootstrap]` lines: you should see `schema OK` then `finished OK`. If you see `FAILED`, fix `DATABASE_URL` or run `npm run db:migrate` and redeploy. Also open `GET /api/health` and check `bootstrap.ready` / `bootstrap.failed`.
+21. **Sign in** only when **`/api/bootstrap-status`** shows **`phase":"ready"`** (or `bootstrap.ready` is true on `/api/health`). Use **`admin`** / **`Admin@123`** on an empty database (change the password after first login).
+
+    **If you stay stuck on “starting” or sign-in never succeeds:**
+
+    1. **Pre-migrate** (strongly recommended): from your PC, `npm run db:migrate` with the **same** `DATABASE_URL` as Railway, then redeploy. That skips most slow DDL on first container boot.
+    2. **Faster seed (optional):** on the web service add **`ZAREWA_EMPTY_SEED=1`** before the first successful boot if you want **no** demo customers/POs (UAT-style empty client). Remove later if you want full demo data.
+    3. **Logs:** in the **Zarewa** service deploy logs, confirm **`[zarewa-bootstrap] … finished OK`**. If you see **`Postgres is not configured`**, `DATABASE_URL` is missing on **that** service. If login returns **401** after `phase` is **ready**, try **`ZAREWA_ALLOW_SEEDED_USERS=1`** once (see [DEPLOY_RAILWAY.md](./DEPLOY_RAILWAY.md)), or set **`ZAREWA_DIAGNOSTIC_LOGIN=1`** briefly to get more detail on **500** errors.
 
 ---
 

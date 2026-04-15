@@ -7,6 +7,7 @@ export function readinessExemptApiPath(originalUrl) {
   const pathOnly = String(originalUrl || '').split('?')[0].replace(/\/+$/, '') || '/';
   return (
     pathOnly === '/api/health' ||
+    pathOnly === '/api/bootstrap-status' ||
     // Session routes must wait for bootstrap: they touch `app_users` and would 42P01 while migrations run.
     // Lets the SPA resolve auth (401) immediately while schema/seed runs; requireAuth runs before bootstrap body.
     pathOnly === '/api/bootstrap'
