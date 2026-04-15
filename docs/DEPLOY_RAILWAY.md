@@ -5,7 +5,7 @@ Zarewa is a **Node** API (`server/index.js`) plus a **Vite** frontend. Railway c
 - Serves **`/api/*`** from Express
 - Serves the **built SPA** from `dist/` when `dist/index.html` exists (same origin — good for cookies and CSRF)
 
-The build in `railway.toml` runs `npm ci && npm run build` so `dist/` is present before `npm run start`.
+The build in `railway.toml` runs a **clean** `npm ci` (removes `node_modules` first) and sets `VITE_CACHE_DIR=/tmp/vite-cache` so Docker/Railway does not hit **`EBUSY` removing `node_modules/.vite`**. Then `npm run build` produces `dist/` before `npm run start`.
 
 ## Checklist
 

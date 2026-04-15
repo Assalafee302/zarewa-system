@@ -4,6 +4,8 @@ import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // Avoid `node_modules/.vite` during CI/Railway: `npm ci` can hit EBUSY removing that dir when layers/cache overlap.
+  cacheDir: process.env.VITE_CACHE_DIR || 'node_modules/.vite',
   build: {
     // The main bundle is intentionally large right now; keep CI/Render logs clean.
     // Prefer real code-splitting later instead of raising this further.
