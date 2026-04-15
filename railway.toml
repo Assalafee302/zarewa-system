@@ -1,0 +1,11 @@
+# Railway config-as-code: https://docs.railway.com/reference/config-as-code
+# Build produces `dist/` so the same Node process can serve the SPA + `/api/*`.
+
+[build]
+buildCommand = "npm ci && npm run build"
+
+[deploy]
+startCommand = "npm run start"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"

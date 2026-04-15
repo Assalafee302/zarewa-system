@@ -23,6 +23,7 @@ npm run db:migrate
 ## Documentation
 
 - [Supabase + Render + Vercel](docs/DEPLOY_SUPABASE_VERCEL.md) — recommended hosted layout and checklist  
+- [Railway](docs/DEPLOY_RAILWAY.md) — single-service deploy (API + built SPA); `railway.toml` included  
 - [Access control & APIs](docs/ACCESS_CONTROL.md) — permissions, approvals, sensitive routes  
 - [Environment variables](docs/ENVIRONMENT.md) — `DATABASE_URL`, ports, cookies, Playwright  
 - [Staff approvals (who does what)](docs/STAFF_APPROVALS.md)  
