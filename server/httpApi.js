@@ -1371,6 +1371,7 @@ export function registerHttpApi(app, db) {
 
   app.get('/api/bootstrap', (req, res) => {
     try {
+      const t0 = Date.now();
       const includeControls =
         userHasPermission(req.user, 'audit.view') ||
         userHasPermission(req.user, 'period.manage') ||
@@ -1396,6 +1397,12 @@ export function registerHttpApi(app, db) {
               includeUsers,
               branchScope,
             });
+      const ms = Date.now() - t0;
+      if (process.env.ZAREWA_BOOTSTRAP_TIMING === '1') {
+        res.setHeader('X-Zarewa-Bootstrap-Ms', String(ms));
+        res.setHeader('Server-Timing', `bootstrap;dur=${ms}`);
+        console.warn('[zarewa] bootstrap timing', { ms, mode: mode || 'full' });
+      }
       res.json(payload);
     } catch (e) {
       console.error(e);

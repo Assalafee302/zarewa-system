@@ -85,6 +85,7 @@ import { isHrProductModuleEnabled } from './hrModuleEnabled.js';
  *   branchScope?: 'ALL' | string;
  *   deferredHeavyBootstrap?: boolean;
  *   ledgerEntryLimit?: number;
+ *   deferredListCap?: number;
  * }} [opts]
  */
 export function buildBootstrap(db, opts = {}) {
@@ -161,27 +162,33 @@ export function buildBootstrap(db, opts = {}) {
     syncDerivedWorkItems(db, workScope, user);
   }
 
+  const listCap = deferredHeavy && Number(opts.deferredListCap) > 0 ? Number(opts.deferredListCap) : 0;
+  const listLimOpt = listCap > 0 ? { limit: listCap } : {};
+
   return {
     ok: true,
     session,
     permissions: [...(session.permissions || [])],
     workspaceBranches: listBranches(db),
     branchScope,
-    customers: salesOk ? listCustomers(db, branchScope) : [],
-    quotations: salesOk ? listQuotations(db, branchScope) : [],
+    customers: salesOk ? listCustomers(db, branchScope, listLimOpt) : [],
+    quotations: salesOk ? listQuotations(db, branchScope, listLimOpt) : [],
     ledgerEntries: ledgerRows,
     advanceInEvents: ledgerOk ? listAdvanceInEvents(db) : [],
     suppliers: procOk ? listSuppliers(db, branchScope) : [],
     transportAgents: procOk ? listTransportAgents(db, branchScope) : [],
     products: productsOk ? listProducts(db, branchScope) : [],
-    purchaseOrders: procOk ? listPurchaseOrders(db, branchScope) : [],
+    purchaseOrders: procOk ? listPurchaseOrders(db, branchScope, listLimOpt) : [],
     coilLots: coilMovOk ? listCoilLots(db, branchScope) : [],
     coilControlEvents: coilMovOk ? listCoilControlEvents(db, branchScope) : [],
-    movements: coilMovOk ? listStockMovements(db, branchScope) : [],
+    movements: coilMovOk ? listStockMovements(db, listLimOpt) : [],
     wipByProduct: opsOk ? getWipByProduct(db, branchScope) : {},
     deliveries: opsOk ? listDeliveries(db, branchScope) : [],
     receipts: salesOk
-      ? enrichSalesReceiptRowsWithCashFromLedger(listSalesReceipts(db, branchScope), ledgerRows)
+      ? enrichSalesReceiptRowsWithCashFromLedger(
+          listSalesReceipts(db, branchScope, listLimOpt),
+          ledgerRows
+        )
       : [],
     cuttingLists: opsOk || salesOk ? listCuttingLists(db, branchScope) : [],
     productionJobs: prodRollupOk ? listProductionJobs(db, branchScope) : [],
@@ -320,10 +327,12 @@ export function buildDashboardBootstrap(db, opts = {}) {
   // Dashboard path: skip quotation scans + work-item upserts on every refresh, and cap ledger SQL
   // so we do not load the full table before trimming in memory (full bootstrap still runs later).
   const ledgerEntryLimit = Math.min(20_000, Math.max(2000, limit * 4));
+  const deferredListCap = Math.min(25_000, Math.max(5000, limit * 10));
   const full = buildBootstrap(db, {
     ...opts,
     deferredHeavyBootstrap: true,
     ledgerEntryLimit,
+    deferredListCap,
   });
   const partial = {
     ...full,

@@ -70,12 +70,14 @@ function mapCustomerRow(row) {
   };
 }
 
-export function listCustomers(db, branchScope = 'ALL') {
+/** @param {{ limit?: number }} [opts] Newest-first caps are used where ORDER BY is temporal; here ORDER BY name — cap still bounds work for dashboard bootstrap. */
+export function listCustomers(db, branchScope = 'ALL', opts = {}) {
   const b = branchWhere(db, 'customers', branchScope);
-  return db
-    .prepare(`SELECT * FROM customers WHERE 1=1${b.sql} ORDER BY LOWER(name)`)
-    .all(...b.args)
-    .map((row) => mapCustomerRow(row));
+  const lim = Number(opts.limit);
+  const useLimit = Number.isFinite(lim) && lim > 0;
+  const sql = `SELECT * FROM customers WHERE 1=1${b.sql} ORDER BY LOWER(name)${useLimit ? ' LIMIT ?' : ''}`;
+  const args = useLimit ? [...b.args, lim] : [...b.args];
+  return db.prepare(sql).all(...args).map((row) => mapCustomerRow(row));
 }
 
 export function getCustomer(db, customerId, branchScope = 'ALL') {
@@ -194,12 +196,16 @@ function enrichQuotationWithLineTable(db, mapped) {
   return mapped;
 }
 
-export function listQuotations(db, branchScope = 'ALL') {
+/** @param {{ limit?: number }} [opts] */
+export function listQuotations(db, branchScope = 'ALL', opts = {}) {
   const b = branchWhere(db, 'quotations', branchScope);
-  return db
-    .prepare(`SELECT * FROM quotations WHERE 1=1${b.sql} ORDER BY date_iso DESC, id DESC`)
-    .all(...b.args)
-    .map((row) => enrichQuotationWithLineTable(db, mapQuotationRow(row)));
+  const lim = Number(opts.limit);
+  const useLimit = Number.isFinite(lim) && lim > 0;
+  const sql = `SELECT * FROM quotations WHERE 1=1${b.sql} ORDER BY date_iso DESC, id DESC${
+    useLimit ? ' LIMIT ?' : ''
+  }`;
+  const args = useLimit ? [...b.args, lim] : [...b.args];
+  return db.prepare(sql).all(...args).map((row) => enrichQuotationWithLineTable(db, mapQuotationRow(row)));
 }
 
 export function getQuotation(db, id) {
@@ -641,11 +647,16 @@ export function listProducts(db, branchScope = 'ALL') {
     });
 }
 
-export function listPurchaseOrders(db, branchScope = 'ALL') {
+/** @param {{ limit?: number }} [opts] */
+export function listPurchaseOrders(db, branchScope = 'ALL', opts = {}) {
   const b = branchWhere(db, 'purchase_orders', branchScope);
-  const pos = db
-    .prepare(`SELECT * FROM purchase_orders WHERE 1=1${b.sql} ORDER BY order_date_iso DESC`)
-    .all(...b.args);
+  const lim = Number(opts.limit);
+  const useLimit = Number.isFinite(lim) && lim > 0;
+  const sql = `SELECT * FROM purchase_orders WHERE 1=1${b.sql} ORDER BY order_date_iso DESC${
+    useLimit ? ' LIMIT ?' : ''
+  }`;
+  const args = useLimit ? [...b.args, lim] : [...b.args];
+  const pos = db.prepare(sql).all(...args);
   const lineStmt = db.prepare(`SELECT * FROM purchase_order_lines WHERE po_id = ? ORDER BY line_key`);
   return pos.map((row) => {
     const rawLines = lineStmt.all(row.po_id);
@@ -762,10 +773,15 @@ export function listCoilLots(db, branchScope = 'ALL') {
     }));
 }
 
-export function listStockMovements(db) {
+/** @param {{ limit?: number }} [opts] */
+export function listStockMovements(db, opts = {}) {
+  const lim = Number(opts.limit);
+  const useLimit = Number.isFinite(lim) && lim > 0;
+  const sql = `SELECT * FROM stock_movements ORDER BY at_iso DESC, id DESC${useLimit ? ' LIMIT ?' : ''}`;
+  const args = useLimit ? [lim] : [];
   return db
-    .prepare(`SELECT * FROM stock_movements ORDER BY at_iso DESC, id DESC`)
-    .all()
+    .prepare(sql)
+    .all(...args)
     .map((row) => ({
       id: row.id,
       atISO: row.at_iso,
@@ -859,11 +875,18 @@ export function listDeliveries(db, branchScope = 'ALL') {
     });
 }
 
-export function listSalesReceipts(db, branchScope = 'ALL') {
+/** @param {{ limit?: number }} [opts] */
+export function listSalesReceipts(db, branchScope = 'ALL', opts = {}) {
   const b = branchWhere(db, 'sales_receipts', branchScope);
+  const lim = Number(opts.limit);
+  const useLimit = Number.isFinite(lim) && lim > 0;
+  const sql = `SELECT * FROM sales_receipts WHERE 1=1${b.sql} ORDER BY date_iso DESC, id DESC${
+    useLimit ? ' LIMIT ?' : ''
+  }`;
+  const args = useLimit ? [...b.args, lim] : [...b.args];
   return db
-    .prepare(`SELECT * FROM sales_receipts WHERE 1=1${b.sql} ORDER BY date_iso DESC, id DESC`)
-    .all(...b.args)
+    .prepare(sql)
+    .all(...args)
     .map((row) => ({
       id: row.id,
       customerID: row.customer_id,
