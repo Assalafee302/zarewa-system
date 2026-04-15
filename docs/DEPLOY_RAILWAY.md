@@ -1,5 +1,7 @@
 # Deploy on Railway (API + optional SPA in one service)
 
+**Starting from scratch?** Use the step-by-step guide: [RAILWAY_FRESH_DEPLOY.md](./RAILWAY_FRESH_DEPLOY.md).
+
 Zarewa is a **Node** API (`server/index.js`) plus a **Vite** frontend. Railway can run **one web service** that:
 
 - Serves **`/api/*`** from Express
