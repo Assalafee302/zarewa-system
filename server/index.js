@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { readAiAssistConfig } from './aiAssist.js';
 import { openDatabasePoolOnly } from './db.js';
 import { createApp } from './app.js';
+import { attachReadinessGate } from './readinessGate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, '..');
@@ -16,17 +17,7 @@ const db = openDatabasePoolOnly();
 const bootState = { apiReady: false };
 const app = createApp(db, {
   beforeRegisterHttpApi(app) {
-    app.use((req, res, next) => {
-      if (bootState.apiReady) return next();
-      if (req.method === 'OPTIONS') return next();
-      const url = req.originalUrl || '';
-      if (url === '/api/health' || url.startsWith('/api/health?')) return next();
-      if (url.startsWith('/api/')) {
-        res.setHeader('Retry-After', '2');
-        return res.status(503).json({ ok: false, code: 'STARTING', error: 'Server is starting' });
-      }
-      return next();
-    });
+    attachReadinessGate(app, bootState);
   },
 });
 
