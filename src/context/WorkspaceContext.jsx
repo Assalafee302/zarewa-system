@@ -94,7 +94,7 @@ export function WorkspaceProvider({ children }) {
       const qs = mode ? `?mode=${encodeURIComponent(mode)}` : '';
       const path = `/api/bootstrap${qs}`;
       const maxWaitMs = 120_000;
-      const pollMs = 800;
+      const pollMs = 400;
       const deadline = Date.now() + maxWaitMs;
       let ok;
       let httpStatus;

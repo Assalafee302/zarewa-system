@@ -83,6 +83,8 @@ import { isHrProductModuleEnabled } from './hrModuleEnabled.js';
  *   includeControls?: boolean;
  *   includeUsers?: boolean;
  *   branchScope?: 'ALL' | string;
+ *   deferredHeavyBootstrap?: boolean;
+ *   ledgerEntryLimit?: number;
  * }} [opts]
  */
 export function buildBootstrap(db, opts = {}) {
@@ -115,6 +117,8 @@ export function buildBootstrap(db, opts = {}) {
     Math.max(200, Number(process.env.ZAREWA_BOOTSTRAP_MAX_PRODUCTION_ROWS) || 2000)
   );
 
+  const deferredHeavy = Boolean(opts.deferredHeavyBootstrap);
+
   const customerDashboard = salesOk
     ? getJsonBlob(db, 'customer_dashboard') ?? { orders: [], interactions: [], salesTrendByCustomer: {} }
     : { orders: [], interactions: [], salesTrendByCustomer: {} };
@@ -129,9 +133,16 @@ export function buildBootstrap(db, opts = {}) {
     if (Number.isFinite(m) && m > 0) o.meterTargetPerMonth = m;
     return Object.keys(o).length ? o : null;
   })();
-  const ledgerRows = ledgerOk ? listLedgerEntries(db, branchScope) : [];
+  const ledgerLimit = opts.ledgerEntryLimit;
+  const ledgerRows = ledgerOk
+    ? listLedgerEntries(
+        db,
+        branchScope,
+        ledgerLimit != null && Number(ledgerLimit) > 0 ? { limit: Number(ledgerLimit) } : {}
+      )
+    : [];
 
-  if (salesOk) {
+  if (salesOk && !deferredHeavy) {
     try {
       // Vitest and other in-memory API tests use fixed historical quote dates; real "today" would
       // auto-expire them on every bootstrap and break PATCH/payment flows. Opt in with
@@ -143,10 +154,10 @@ export function buildBootstrap(db, opts = {}) {
       console.error('[zarewa] quotation lifecycle maintenance failed', e);
     }
   }
-  if (user && userHasPermission(user, 'office.use')) {
+  if (user && userHasPermission(user, 'office.use') && !deferredHeavy) {
     ensureWorkItemsForVisibleOfficeThreads(db, workScope, user);
   }
-  if (user) {
+  if (user && !deferredHeavy) {
     syncDerivedWorkItems(db, workScope, user);
   }
 
@@ -306,7 +317,14 @@ export function repairDashboardProductionJoins(full, partial) {
  */
 export function buildDashboardBootstrap(db, opts = {}) {
   const limit = Math.min(5000, Math.max(200, Number(opts.limit) || 600));
-  const full = buildBootstrap(db, opts);
+  // Dashboard path: skip quotation scans + work-item upserts on every refresh, and cap ledger SQL
+  // so we do not load the full table before trimming in memory (full bootstrap still runs later).
+  const ledgerEntryLimit = Math.min(20_000, Math.max(2000, limit * 4));
+  const full = buildBootstrap(db, {
+    ...opts,
+    deferredHeavyBootstrap: true,
+    ledgerEntryLimit,
+  });
   const partial = {
     ...full,
     // Heavy arrays trimmed for dashboard charts/KPIs

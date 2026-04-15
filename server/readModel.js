@@ -536,12 +536,18 @@ export function mapLedgerRow(row) {
   };
 }
 
-export function listLedgerEntries(db, branchScope = 'ALL') {
+/**
+ * @param {{ limit?: number }} [opts] When `limit` is a positive number, only the newest rows are returned (ORDER BY unchanged).
+ */
+export function listLedgerEntries(db, branchScope = 'ALL', opts = {}) {
   const b = branchWhere(db, 'ledger_entries', branchScope);
-  return db
-    .prepare(`SELECT * FROM ledger_entries WHERE 1=1${b.sql} ORDER BY at_iso DESC, id DESC`)
-    .all(...b.args)
-    .map(mapLedgerRow);
+  const lim = Number(opts.limit);
+  const useLimit = Number.isFinite(lim) && lim > 0;
+  const sql = `SELECT * FROM ledger_entries WHERE 1=1${b.sql} ORDER BY at_iso DESC, id DESC${
+    useLimit ? ' LIMIT ?' : ''
+  }`;
+  const args = useLimit ? [...b.args, lim] : [...b.args];
+  return db.prepare(sql).all(...args).map(mapLedgerRow);
 }
 
 export function listLedgerEntriesForCustomer(db, customerId, branchScope = 'ALL') {
