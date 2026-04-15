@@ -48,6 +48,8 @@ Replace `<URL_ENCODED_DB_PASSWORD>` with your Supabase **database** password (en
    DATABASE_URL="..." npm run db:migrate
    ```
 
+   Optional: keep [`supabase/migrations/`](../supabase/migrations) in sync with [`npm run db:export-supabase-baseline`](../package.json) and apply with **`supabase db push`** after `supabase link` — see [`supabase/README.md`](../supabase/README.md).
+
 7. **Health check:** Configured as `GET /health` in `railway.toml` (plain `ok` text, registered before CORS/auth/STARTING gate). `GET /api/health` remains for JSON diagnostics.
 
 ## If you still use Vercel for the frontend

@@ -1056,19 +1056,6 @@ export function patchAppUserWorkspaceDepartment(db, actorUser, targetUserId, raw
   return { ok: true, user: publicUserFromRow(next) };
 }
 
-function findUserByIdentifier(db, identifier) {
-  const id = String(identifier || '').trim();
-  if (!id) return null;
-  const lower = id.toLowerCase();
-  return db
-    .prepare(
-      `SELECT * FROM app_users
-       WHERE status = 'active'
-         AND (lower(username) = ? OR (email IS NOT NULL AND trim(email) != '' AND lower(email) = ?))`
-    )
-    .get(lower, lower);
-}
-
 /**
  * Creates a reset token. Always returns the same public shape (no user enumeration).
  * @returns {{ ok: true, devResetToken?: string }}

@@ -74,7 +74,7 @@ function extractAlterAddColumnStatementsFromSqliteMigrate() {
   return `\n\n-- Extra ADD COLUMN statements extracted from server/migrate.js\n${stmts.join('\n')}\n`;
 }
 
-function splitSqlStatements(sql) {
+export function splitSqlStatements(sql) {
   // Split on semicolons that are not inside single/double quotes.
   const out = [];
   let buf = '';
@@ -98,6 +98,18 @@ function splitSqlStatements(sql) {
 }
 
 /**
+ * Raw Postgres-oriented DDL string used by {@link ensurePostgresSchema} (before statement splitting).
+ * Exported for `scripts/export-supabase-baseline.mjs` so `supabase/migrations` can mirror the app baseline.
+ */
+export function buildPostgresBaselineSql() {
+  return toPostgresBaselineSql(
+    SCHEMA_SQL +
+      extractCreateTableBlocksFromSqliteMigrate() +
+      extractAlterAddColumnStatementsFromSqliteMigrate()
+  );
+}
+
+/**
  * Applies the baseline schema to Postgres once.
  * @param {{ query: (text: string, params?: any[]) => Promise<any> }} db
  */
@@ -109,11 +121,7 @@ export async function ensurePostgresSchema(db) {
     );
   `);
 
-  const baseline = toPostgresBaselineSql(
-    SCHEMA_SQL +
-      extractCreateTableBlocksFromSqliteMigrate() +
-      extractAlterAddColumnStatementsFromSqliteMigrate()
-  );
+  const baseline = buildPostgresBaselineSql();
   const id = `baseline_${fingerprint(baseline)}`;
   const already = await db.query(`SELECT 1 FROM zarewa_migrations WHERE id = $1`, [id]);
   if (already.rowCount > 0) return;

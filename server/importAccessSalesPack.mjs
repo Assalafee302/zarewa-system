@@ -5,10 +5,10 @@
  * Legacy IDs are prefixed so they do not collide with app-generated IDs:
  *   QT-LEGACY-{n}, CUS-LEGACY-*, CL-LEGACY-{n}, LE-LEGACY-R{n}, PRO-LEGACY-{n}, COIL-LEGACY-*
  *
- * Usage (stop the API if you see SQLITE_BUSY):
+ * Usage (PostgreSQL only — set DATABASE_URL; stop the API if the DB is busy):
  *   node server/importAccessSalesPack.mjs
  *   node server/importAccessSalesPack.mjs --dry-run
- *   set ZAREWA_DB=C:\path\to\zarewa.sqlite && node server/importAccessSalesPack.mjs --dir docs/import
+ *   PowerShell: $env:DATABASE_URL='postgresql://...'; node server/importAccessSalesPack.mjs --dir docs/import
  *
  * Customer merge review (no DB):
  *   node server/importAccessSalesPack.mjs --customer-merge-report

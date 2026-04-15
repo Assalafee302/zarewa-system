@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Legacy: one-shot Ubuntu + SQLite-era paths. Prefer Railway + Supabase + Dockerfile/RAILWAY_FRESH_DEPLOY.md
+# for new deployments. This script remains for existing bare-metal installs only.
+#
 # One-shot Ubuntu setup: Node 20, zarewa user, SQLite dir, npm build, systemd, nginx.
 # Run ON the EC2/Lightsail instance after cloning this repo (must use sudo).
 #

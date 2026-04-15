@@ -65,6 +65,20 @@ Follow these steps **in order**. This path uses **Supabase** for Postgres and **
 
 ---
 
+## Part E.2 — Supabase CLI (optional, recommended for schema in git)
+
+The repo includes [`supabase/`](../supabase/) (migrations + `config.toml`). This mirrors the same baseline DDL as `npm run db:migrate` and is the path toward **`supabase db push`** in CI.
+
+1. Install the [Supabase CLI](https://supabase.com/docs/guides/cli/getting-started).
+2. From the repo root: `supabase login`, then `supabase link --project-ref <your-project-ref>`.
+3. If the CLI warns about Postgres version, set **`[db].major_version`** in `supabase/config.toml` to match **Supabase → Project Settings → Database** (then link again if needed).
+4. Apply hosted schema: **`supabase db push`** (or paste the migration file in the SQL Editor once).
+5. When you change Zarewa tables, regenerate the baseline file: **`npm run db:export-supabase-baseline`**, commit the new `supabase/migrations/*_zarewa_baseline.sql`, then `db push` again.
+
+Until CI uses only Supabase migrations, keep running **`npm run db:migrate`** with the same `DATABASE_URL` before deploy so Railway’s first boot stays fast. Details: [`supabase/README.md`](../supabase/README.md).
+
+---
+
 ## Part F — Verify the live app
 
 18. In Railway, open the web service → **Settings → Networking** (or the generated **public URL**). Open `https://<your-domain>/health` — plain text **`ok`**.
@@ -83,8 +97,9 @@ Follow these steps **in order**. This path uses **Supabase** for Postgres and **
 ## Part G — After it works
 
 22. **Rotate** any passwords that were ever pasted into tickets or chat.
-23. Optional: attach a **custom domain** in Railway **Networking**.
-24. Read [DEPLOY_RAILWAY.md](./DEPLOY_RAILWAY.md) for `CORS_ORIGIN`, `ZAREWA_ALLOW_SEEDED_USERS`, and troubleshooting.
+23. Optional regression pass: [SMOKE_CHECKLIST.md](./SMOKE_CHECKLIST.md).
+24. Optional: attach a **custom domain** in Railway **Networking**.
+25. Read [DEPLOY_RAILWAY.md](./DEPLOY_RAILWAY.md) for `CORS_ORIGIN`, `ZAREWA_ALLOW_SEEDED_USERS`, and troubleshooting.
 
 ---
 
