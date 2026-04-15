@@ -9,6 +9,14 @@ import { openDatabasePoolOnly } from './db.js';
 import { createApp } from './app.js';
 import { attachReadinessGate } from './readinessGate.js';
 
+// Never crash-loop without logs on PaaS. Keep the process alive so /health can report status.
+process.on('unhandledRejection', (reason) => {
+  console.error('[zarewa] Unhandled promise rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[zarewa] Uncaught exception:', err);
+});
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, '..');
 const bootstrapScript = path.join(projectRoot, 'scripts', 'bootstrap-bg.mjs');
@@ -63,15 +71,20 @@ const listenHost =
   (process.env.NODE_ENV === 'production' ? '0.0.0.0' : undefined);
 
 function onListen() {
-  console.log(`Zarewa listening on http://127.0.0.1:${port} (PostgreSQL)`);
-  if (listenHost === '0.0.0.0' || listenHost === '::') {
-    for (const nets of Object.values(os.networkInterfaces())) {
-      for (const net of nets || []) {
-        if (net && net.family === 'IPv4' && !net.internal) {
-          console.log(`  Same network: http://${net.address}:${port}`);
+  try {
+    console.log(`Zarewa listening on http://127.0.0.1:${port} (PostgreSQL)`);
+    // Avoid noisy network interface logs on PaaS unless explicitly requested.
+    if ((listenHost === '0.0.0.0' || listenHost === '::') && process.env.ZAREWA_LOG_NETWORKS) {
+      for (const nets of Object.values(os.networkInterfaces())) {
+        for (const net of nets || []) {
+          if (net && net.family === 'IPv4' && !net.internal) {
+            console.log(`  Same network: http://${net.address}:${port}`);
+          }
         }
       }
     }
+  } catch (e) {
+    console.error('[zarewa] onListen logging failed:', e);
   }
   // Schema + seed can take minutes of synchronous CPU/DB work; run in a child process
   // so this process's event loop stays free (health checks, /api/health, 503 gate).
