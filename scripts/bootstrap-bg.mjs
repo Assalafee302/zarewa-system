@@ -5,10 +5,26 @@
 import 'dotenv/config';
 import { openDatabasePoolOnly, blockUntilSchema, bootstrapDataLayer } from '../server/db.js';
 
-const db = openDatabasePoolOnly();
+const t0 = Date.now();
+function log(msg) {
+  console.log(`[zarewa-bootstrap] +${Date.now() - t0}ms ${msg}`);
+}
+
+log('starting (schema + seed in child process)');
 try {
-  blockUntilSchema(db);
-  bootstrapDataLayer(db);
-} finally {
-  db.close();
+  log('opening pool');
+  const db = openDatabasePoolOnly();
+  try {
+    log('blockUntilSchema (migrations / baseline DDL)…');
+    blockUntilSchema(db);
+    log('schema OK; bootstrapDataLayer (seeds)…');
+    bootstrapDataLayer(db);
+    log(`finished OK (+${Date.now() - t0}ms total)`);
+  } finally {
+    db.close();
+  }
+} catch (e) {
+  console.error('[zarewa-bootstrap] FAILED:', e);
+  process.exitCode = 1;
+  throw e;
 }

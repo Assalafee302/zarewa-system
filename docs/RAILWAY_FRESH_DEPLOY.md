@@ -70,7 +70,7 @@ Follow these steps **in order**. This path uses **Supabase** for Postgres and **
 18. In Railway, open the web service → **Settings → Networking** (or the generated **public URL**). Open `https://<your-domain>/health` — plain text **`ok`**.
 19. Open `https://<your-domain>/api/health` — JSON with `ok: true`. After bootstrap, `bootstrap.ready` should be `true` (on builds that include that field).
 20. Open the **site root** `https://<your-domain>/` — the SPA should load (same container serves `dist/`).
-21. **Sign in:** default empty DB creates **`admin`** / **`Admin@123`** (change password after first login). If you see “Server is starting” briefly, wait and retry; if it never clears, read **API** service logs (not Postgres) for bootstrap errors.
+21. **Sign in:** default empty DB creates **`admin`** / **`Admin@123`** (change password after first login). The first boot can take **several minutes** (schema + seed over the network). The UI waits up to **10 minutes** for startup. While waiting, open **API deploy logs** and look for `[zarewa-bootstrap]` lines: you should see `schema OK` then `finished OK`. If you see `FAILED`, fix `DATABASE_URL` or run `npm run db:migrate` and redeploy. Also open `GET /api/health` and check `bootstrap.ready` / `bootstrap.failed`.
 
 ---
 

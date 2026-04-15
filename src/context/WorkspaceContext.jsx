@@ -9,6 +9,9 @@ const WorkspaceContext = createContext(null);
 
 const BOOTSTRAP_CACHE_KEY = 'zarewa.bootstrap.cache.v2';
 
+/** First deploy: remote schema + seed often exceeds 2 minutes (was timing out login / bootstrap poll). */
+const API_STARTUP_WAIT_MS = 600_000;
+
 function readBootstrapCache() {
   try {
     const raw = sessionStorage.getItem(BOOTSTRAP_CACHE_KEY);
@@ -94,7 +97,7 @@ export function WorkspaceProvider({ children }) {
       const mode = String(opts?.mode ?? '').trim();
       const qs = mode ? `?mode=${encodeURIComponent(mode)}` : '';
       const path = `/api/bootstrap${qs}`;
-      const maxWaitMs = 120_000;
+      const maxWaitMs = API_STARTUP_WAIT_MS;
       const pollMs = 400;
       const deadline = Date.now() + maxWaitMs;
       let ok;
@@ -138,7 +141,7 @@ export function WorkspaceProvider({ children }) {
   const login = useCallback(
     async (username, password) => {
       try {
-        const maxWaitMs = 120_000;
+        const maxWaitMs = API_STARTUP_WAIT_MS;
         const pollMs = 400;
         const deadline = Date.now() + maxWaitMs;
         let lastData = null;
