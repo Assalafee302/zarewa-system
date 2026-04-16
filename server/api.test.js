@@ -135,10 +135,13 @@ describe.sequential('Zarewa API', () => {
     expect(String(payload.messages[0].content)).toContain('Client page context:');
   });
 
-  it('GET /api/bootstrap requires authentication', async () => {
+  it('GET /api/bootstrap is public before login (empty snapshot + unauthenticated session)', async () => {
     const res = await request(app).get('/api/bootstrap');
-    expect(res.status).toBe(401);
-    expect(res.body.code).toBe('AUTH_REQUIRED');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.session?.authenticated).toBe(false);
+    expect(Array.isArray(res.body.customers)).toBe(true);
+    expect(res.body.customers.length).toBe(0);
   });
 
   it('POST /api/session/login and GET /api/bootstrap return session payload', async () => {

@@ -8,8 +8,7 @@ export function readinessExemptApiPath(originalUrl) {
   return (
     pathOnly === '/api/health' ||
     pathOnly === '/api/bootstrap-status' ||
-    // Session routes must wait for bootstrap: they touch `app_users` and would 42P01 while migrations run.
-    // Lets the SPA resolve auth (401) immediately while schema/seed runs; requireAuth runs before bootstrap body.
+    // Full workspace snapshot: public (null user → empty lists) so the login page can load before session exists.
     pathOnly === '/api/bootstrap'
   );
 }

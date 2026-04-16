@@ -410,6 +410,48 @@ export function registerHttpApi(app, db, runtime = {}) {
     });
   });
 
+  // Public: login page and WorkspaceContext call this before session exists. buildBootstrap handles null user.
+  app.get('/api/bootstrap', (req, res) => {
+    try {
+      const t0 = Date.now();
+      const includeControls =
+        userHasPermission(req.user, 'audit.view') ||
+        userHasPermission(req.user, 'period.manage') ||
+        userHasPermission(req.user, 'finance.approve');
+      const includeUsers = userHasPermission(req.user, 'settings.view');
+      const branchScope = resolveBootstrapBranchScope(req);
+      const mode = String(req.query?.mode ?? '').trim().toLowerCase();
+      const limit = parseInt(String(req.query?.limit ?? '600'), 10) || 600;
+      const payload =
+        mode === 'dashboard'
+          ? buildDashboardBootstrap(db, {
+              user: req.user,
+              session: req.session,
+              includeControls,
+              includeUsers,
+              branchScope,
+              limit,
+            })
+          : buildBootstrap(db, {
+              user: req.user,
+              session: req.session,
+              includeControls,
+              includeUsers,
+              branchScope,
+            });
+      const ms = Date.now() - t0;
+      if (process.env.ZAREWA_BOOTSTRAP_TIMING === '1') {
+        res.setHeader('X-Zarewa-Bootstrap-Ms', String(ms));
+        res.setHeader('Server-Timing', `bootstrap;dur=${ms}`);
+        console.warn('[zarewa] bootstrap timing', { ms, mode: mode || 'full' });
+      }
+      res.json(payload);
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ ok: false, error: 'Bootstrap failed' });
+    }
+  });
+
   app.get('/api/ai/status', requireAuth, (req, res) => {
     res.json(readAiStatusForRequest(req, readAiAssistConfig().enabled));
   });
@@ -1428,47 +1470,6 @@ export function registerHttpApi(app, db, runtime = {}) {
   });
 
   app.use('/api', requireAuth);
-
-  app.get('/api/bootstrap', (req, res) => {
-    try {
-      const t0 = Date.now();
-      const includeControls =
-        userHasPermission(req.user, 'audit.view') ||
-        userHasPermission(req.user, 'period.manage') ||
-        userHasPermission(req.user, 'finance.approve');
-      const includeUsers = userHasPermission(req.user, 'settings.view');
-      const branchScope = resolveBootstrapBranchScope(req);
-      const mode = String(req.query?.mode ?? '').trim().toLowerCase();
-      const limit = parseInt(String(req.query?.limit ?? '600'), 10) || 600;
-      const payload =
-        mode === 'dashboard'
-          ? buildDashboardBootstrap(db, {
-              user: req.user,
-              session: req.session,
-              includeControls,
-              includeUsers,
-              branchScope,
-              limit,
-            })
-          : buildBootstrap(db, {
-              user: req.user,
-              session: req.session,
-              includeControls,
-              includeUsers,
-              branchScope,
-            });
-      const ms = Date.now() - t0;
-      if (process.env.ZAREWA_BOOTSTRAP_TIMING === '1') {
-        res.setHeader('X-Zarewa-Bootstrap-Ms', String(ms));
-        res.setHeader('Server-Timing', `bootstrap;dur=${ms}`);
-        console.warn('[zarewa] bootstrap timing', { ms, mode: mode || 'full' });
-      }
-      res.json(payload);
-    } catch (e) {
-      console.error(e);
-      res.status(500).json({ ok: false, error: 'Bootstrap failed' });
-    }
-  });
 
   app.patch('/api/workspace/app-users/:userId/department', requirePermission('settings.view'), (req, res) => {
     try {
