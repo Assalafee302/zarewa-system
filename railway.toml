@@ -8,6 +8,9 @@ dockerfilePath = "Dockerfile"
 
 [deploy]
 # Match Dockerfile CMD; avoids npm as PID 1. Image ENV still sets ZAREWA_LISTEN_HOST for Railway probes.
+# Run DDL before the new container serves traffic so bootstrap-bg only seeds (ensurePostgresSchema is a no-op when baseline exists).
+# Set DATABASE_MIGRATE_URL to Supabase direct (db.*.supabase.co:5432); keep DATABASE_URL on pooler for the API if you want.
+preDeployCommand = "node scripts/db-migrate.mjs"
 startCommand = "node server/index.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 120

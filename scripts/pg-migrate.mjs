@@ -1,6 +1,12 @@
 import 'dotenv/config';
-import { createPoolFromEnv } from '../server/pg/pgPool.js';
+import { createPoolFromDatabaseUrl, createPoolFromEnv } from '../server/pg/pgPool.js';
 import { ensurePostgresSchema } from '../server/pg/pgMigrate.js';
+
+function createPoolForMigrate() {
+  const migrateUrl = process.env.DATABASE_MIGRATE_URL?.trim();
+  if (migrateUrl) return createPoolFromDatabaseUrl(migrateUrl);
+  return createPoolFromEnv();
+}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -24,7 +30,7 @@ async function withRetries(fn, { attempts = 10, baseDelayMs = 500 } = {}) {
   throw lastErr;
 }
 
-const pool = createPoolFromEnv();
+const pool = createPoolForMigrate();
 try {
   await withRetries(() => ensurePostgresSchema(pool));
   console.log('[pg-migrate] OK');
@@ -34,7 +40,7 @@ try {
     const h = pool.options?.host ?? '';
     console.error(`[pg-migrate] Password rejected by Postgres (client user: "${u}", host: "${h}").`);
     console.error(
-      '  Use the database password from Supabase → Settings → Database (not anon/service_role keys). Prefer pasting the full "Transaction pooler" URI (port 6543, user postgres.<project-ref>).'
+      '  Use the database password from Supabase → Settings → Database (not anon/service_role keys). For migrations/DDL, prefer DATABASE_MIGRATE_URL = direct URI (host db.*.supabase.co, port 5432); pooler :6543 often fails on schema apply.'
     );
     console.error(
       '  URL-encode characters in the password that are special in URLs (@ as %40, # as %23, etc.). A leading %40 in the password segment means the password starts with @.'
