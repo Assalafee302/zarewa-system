@@ -128,27 +128,39 @@ export function hasPostgresEnv() {
   return discretePostgresPoolConfig() !== null;
 }
 
+/**
+ * @param {string} connectionString
+ * @returns {import('pg').Pool}
+ */
+export function createPoolFromDatabaseUrl(connectionString) {
+  const url = String(connectionString || '').trim();
+  if (!url) {
+    throw new Error('createPoolFromDatabaseUrl: empty connection string');
+  }
+  const sslmodeFromUrl = readSslModeFromDatabaseUrl(url);
+  const urlForParse = databaseUrlForPgParse(url);
+  // `pg` does `Object.assign({}, config, parse(connectionString))`, so query
+  // `sslmode=require` becomes `ssl: {}` and overwrites any caller `ssl`, which
+  // re-enables certificate verification and breaks some pooler / proxy chains.
+  const parsed = parse(urlForParse);
+  const poolConfig = {
+    ...parsed,
+    max: Number(process.env.PGPOOL_MAX || 10),
+    connectionTimeoutMillis: Number(process.env.PGCONNECT_TIMEOUT_MS || 10_000),
+    query_timeout: Number(process.env.PGQUERY_TIMEOUT_MS || 30_000),
+    statement_timeout: Number(process.env.PGSTATEMENT_TIMEOUT_MS || 30_000),
+    keepAlive: true,
+  };
+  delete poolConfig.ssl;
+  delete poolConfig.sslmode;
+  poolConfig.ssl = inferSslForPostgres({ host: poolConfig.host, sslmodeFromUrl });
+  return new Pool(poolConfig);
+}
+
 export function createPoolFromEnv() {
   const url = process.env.DATABASE_URL?.trim();
   if (url) {
-    const sslmodeFromUrl = readSslModeFromDatabaseUrl(url);
-    const urlForParse = databaseUrlForPgParse(url);
-    // `pg` does `Object.assign({}, config, parse(connectionString))`, so query
-    // `sslmode=require` becomes `ssl: {}` and overwrites any caller `ssl`, which
-    // re-enables certificate verification and breaks some pooler / proxy chains.
-    const parsed = parse(urlForParse);
-    const poolConfig = {
-      ...parsed,
-      max: Number(process.env.PGPOOL_MAX || 10),
-      connectionTimeoutMillis: Number(process.env.PGCONNECT_TIMEOUT_MS || 10_000),
-      query_timeout: Number(process.env.PGQUERY_TIMEOUT_MS || 30_000),
-      statement_timeout: Number(process.env.PGSTATEMENT_TIMEOUT_MS || 30_000),
-      keepAlive: true,
-    };
-    delete poolConfig.ssl;
-    delete poolConfig.sslmode;
-    poolConfig.ssl = inferSslForPostgres({ host: poolConfig.host, sslmodeFromUrl });
-    return new Pool(poolConfig);
+    return createPoolFromDatabaseUrl(url);
   }
   const discrete = discretePostgresPoolConfig();
   if (discrete) return new Pool(discrete);

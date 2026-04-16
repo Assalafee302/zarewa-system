@@ -4,7 +4,7 @@ import { backfillAccountsPayableFromPurchaseOrders } from './writeOps.js';
 import { ensureLegacyDemoPack } from './ensureLegacyDemoPack.js';
 import { isEmptySeedMode } from './emptySeed.js';
 import { PgSyncDatabase, blockOn } from './pg/pgSyncDb.js';
-import { hasPostgresEnv } from './pg/pgPool.js';
+import { createPoolFromDatabaseUrl, hasPostgresEnv } from './pg/pgPool.js';
 import { ensurePostgresSchema } from './pg/pgMigrate.js';
 import { truncatePublicApplicationTables } from './pg/pgTruncate.js';
 
@@ -40,6 +40,19 @@ export function blockUntilSchema(db) {
  */
 export function openDatabasePoolOnly() {
   requireDatabaseUrl();
+  return PgSyncDatabase.fromEnv();
+}
+
+/**
+ * Pool used only by `scripts/bootstrap-bg.mjs`. Prefer `DATABASE_MIGRATE_URL` for DDL
+ * (Supabase direct `db.<ref>.supabase.co:5432`); keep `DATABASE_URL` on the pooler for the API if you want.
+ */
+export function openDatabasePoolOnlyForBootstrap() {
+  requireDatabaseUrl();
+  const migrateUrl = process.env.DATABASE_MIGRATE_URL?.trim();
+  if (migrateUrl) {
+    return new PgSyncDatabase(createPoolFromDatabaseUrl(migrateUrl));
+  }
   return PgSyncDatabase.fromEnv();
 }
 
