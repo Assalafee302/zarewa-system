@@ -120,7 +120,10 @@ export function WorkspaceProvider({ children }) {
           replaceLedgerEntries([]);
           return null;
         }
-        if (httpStatus === 503 && data?.code === 'STARTING') {
+        const bootstrapStillStarting =
+          (httpStatus === 503 && data?.code === 'STARTING') ||
+          (data?.ok && data?.bootstrapPhase === 'starting');
+        if (bootstrapStillStarting) {
           // Let AuthGate render LoginScreen while we poll (otherwise status stays "checking" forever).
           setStatus('bootstrap_starting');
           await new Promise((r) => setTimeout(r, pollMs));
@@ -128,7 +131,10 @@ export function WorkspaceProvider({ children }) {
         }
         break;
       }
-      if (httpStatus === 503 && data?.code === 'STARTING') {
+      if (
+        (httpStatus === 503 && data?.code === 'STARTING') ||
+        (data?.ok && data?.bootstrapPhase === 'starting')
+      ) {
         throw new Error(data?.error || 'Server is still starting (timed out waiting for bootstrap).');
       }
       if (!ok || !data?.ok) throw new Error(data?.error || 'Bootstrap failed');

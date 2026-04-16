@@ -1,0 +1,77 @@
+import { WORKSPACE_DEPARTMENT_IDS, SUGGESTED_ROLE_BY_DEPARTMENT } from './departmentRoleTemplates.js';
+import { emptyOperationsInventoryAttention } from './readModel.js';
+import { EMPTY_MASTER_DATA } from './workspaceAccess.js';
+
+/**
+ * Same top-level shape as {@link import('./bootstrap.js').buildBootstrap} for an anonymous user,
+ * but no DB I/O. Served while schema/seed runs so clients get HTTP 200 without hitting Postgres.
+ * `bootstrapPhase: 'starting'` tells the SPA to keep polling until the real snapshot is served.
+ */
+export function anonymousBootstrapStartingStub() {
+  const session = { authenticated: false, user: null, permissions: [] };
+  return {
+    ok: true,
+    bootstrapPhase: 'starting',
+    session,
+    permissions: [],
+    workspaceBranches: [],
+    branchScope: 'ALL',
+    customers: [],
+    quotations: [],
+    ledgerEntries: [],
+    advanceInEvents: [],
+    suppliers: [],
+    transportAgents: [],
+    products: [],
+    purchaseOrders: [],
+    coilLots: [],
+    coilControlEvents: [],
+    movements: [],
+    wipByProduct: {},
+    deliveries: [],
+    receipts: [],
+    cuttingLists: [],
+    productionJobs: [],
+    productionJobAccessoryUsage: [],
+    productionMetrics: {
+      jobCount: 0,
+      byStatus: {},
+      totalPlannedMeters: 0,
+      totalActualMeters: 0,
+      completedActualMeters: 0,
+    },
+    productionJobCoils: [],
+    productionConversionChecks: [],
+    productionCompletionAdjustments: [],
+    operationsInventoryAttention: emptyOperationsInventoryAttention(),
+    refunds: [],
+    masterData: { ...EMPTY_MASTER_DATA },
+    treasuryAccounts: [],
+    treasuryMovements: [],
+    expenses: [],
+    paymentRequests: [],
+    accountsPayable: [],
+    bankReconciliation: [],
+    coilRequests: [],
+    yardCoilRegister: [],
+    procurementCatalog: [],
+    salesAvailableStock: [],
+    customerDashboard: { orders: [], interactions: [], salesTrendByCustomer: {} },
+    appUsers: [],
+    periodLocks: [],
+    approvalActions: [],
+    auditLog: [],
+    dashboardPrefs: {},
+    orgManagerTargets: null,
+    orgGovernanceLimits: null,
+    unifiedWorkItems: [],
+    materialRequests: [],
+    inTransitLoads: [],
+    machines: [],
+    maintenancePlans: [],
+    maintenanceWorkOrders: [],
+    hrPerformanceReviews: [],
+    workspaceDepartmentIds: [...WORKSPACE_DEPARTMENT_IDS],
+    suggestedRoleByDepartment: { ...SUGGESTED_ROLE_BY_DEPARTMENT },
+  };
+}

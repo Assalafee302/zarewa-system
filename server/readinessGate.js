@@ -1,7 +1,9 @@
+import { anonymousBootstrapStartingStub } from './bootstrapStartingStub.js';
+
 /**
  * Paths that must respond while schema/seed runs in the bootstrap subprocess.
- * `GET /api/bootstrap` is NOT exempt: running `buildBootstrap` during migrations can block on DB
- * locks until the edge proxy times out (502). The SPA polls `503 STARTING` until `apiReady`.
+ * `GET /api/bootstrap` is handled below: a **no-DB JSON stub** (HTTP 200 + `bootstrapPhase: 'starting'`)
+ * so clients are not blocked on migrations, while the real `buildBootstrap` still runs only after `apiReady`.
  * @param {string} originalUrl
  */
 export function readinessExemptApiPath(originalUrl) {
@@ -27,6 +29,15 @@ export function attachReadinessGate(app, state) {
     if (state.apiReady) return next();
     if (req.method === 'OPTIONS') return next();
     const url = req.originalUrl || '';
+    const pathOnly = String(url.split('?')[0] || '').replace(/\/+$/, '') || '/';
+    if (
+      req.method === 'GET' &&
+      pathOnly === '/api/bootstrap' &&
+      !state.bootstrapFailed
+    ) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(200).json(anonymousBootstrapStartingStub());
+    }
     if (readinessExemptApiPath(url)) return next();
     if (url.startsWith('/api/')) {
       res.setHeader('Retry-After', '2');
