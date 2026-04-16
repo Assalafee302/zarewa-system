@@ -807,8 +807,10 @@ function AuthGate() {
   }
 
   // Anonymous bootstrap returns status "ok" with session.authenticated false — still show login, not AppShell.
+  // bootstrap_starting: GET /api/bootstrap returns 503 STARTING until DB seed finishes (see readinessGate).
   if (
     ws.authRequired ||
+    ws.status === 'bootstrap_starting' ||
     (ws.status === 'offline' && !ws.snapshot) ||
     ((ws.status === 'ok' || ws.status === 'degraded') && !ws.session?.authenticated)
   ) {

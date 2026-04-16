@@ -23,6 +23,10 @@ export default function DocumentTitleSync() {
       document.title = `Preparing workspace | ${DOCUMENT_TITLE_BASE}`;
       return;
     }
+    if (status === 'bootstrap_starting') {
+      document.title = `Sign in | ${DOCUMENT_TITLE_BASE}`;
+      return;
+    }
     if (authRequired || (status === 'offline' && !snapshot)) {
       document.title = `Sign in | ${DOCUMENT_TITLE_BASE}`;
       return;

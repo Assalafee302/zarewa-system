@@ -121,6 +121,8 @@ export function WorkspaceProvider({ children }) {
           return null;
         }
         if (httpStatus === 503 && data?.code === 'STARTING') {
+          // Let AuthGate render LoginScreen while we poll (otherwise status stays "checking" forever).
+          setStatus('bootstrap_starting');
           await new Promise((r) => setTimeout(r, pollMs));
           continue;
         }
@@ -358,7 +360,11 @@ export function WorkspaceProvider({ children }) {
   }, [permissions, session?.user?.roleKey]);
 
   useEffect(() => {
-    if (status === 'checking' || status === 'auth_required') {
+    if (
+      status === 'checking' ||
+      status === 'auth_required' ||
+      status === 'bootstrap_starting'
+    ) {
       setEditApprovalsPendingCount(0);
       return;
     }

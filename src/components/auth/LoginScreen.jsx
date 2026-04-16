@@ -287,6 +287,13 @@ export default function LoginScreen() {
                   </div>
                 ) : null}
 
+                {ws.status === 'bootstrap_starting' ? (
+                  <div className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-950">
+                    Database setup is still running on the server. You can sign in here; the form will wait until the
+                    API is ready (first boot can take several minutes).
+                  </div>
+                ) : null}
+
                 <button
                   type="submit"
                   disabled={busy}
