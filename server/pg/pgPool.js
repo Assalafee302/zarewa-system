@@ -1,7 +1,18 @@
+import dns from 'node:dns';
 import parse from 'pg-connection-string';
 import pg from 'pg';
 
 const { Pool } = pg;
+
+// Railway and similar hosts often have no working IPv6 egress. Supabase `db.*.supabase.co`
+// can resolve to IPv6 first → connect ENETUNREACH. Prefer IPv4 unless opted out.
+if (process.env.ZAREWA_DNS_IPV4_FIRST !== '0' && typeof dns.setDefaultResultOrder === 'function') {
+  try {
+    dns.setDefaultResultOrder('ipv4first');
+  } catch {
+    /* ignore */
+  }
+}
 
 /**
  * Read `sslmode` from a Postgres URL before we strip it for `pg-connection-string` parse.
