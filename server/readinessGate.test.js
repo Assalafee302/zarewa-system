@@ -4,21 +4,21 @@ import express from 'express';
 import { attachReadinessGate, readinessExemptApiPath } from './readinessGate.js';
 
 describe('readinessExemptApiPath', () => {
-  it('matches health and bootstrap only (session routes wait for schema)', () => {
+  it('matches health + bootstrap-status only (bootstrap waits for schema to avoid 502)', () => {
     expect(readinessExemptApiPath('/api/health')).toBe(true);
     expect(readinessExemptApiPath('/api/health/')).toBe(true);
     expect(readinessExemptApiPath('/api/health?x=1')).toBe(true);
     expect(readinessExemptApiPath('/api/session/login')).toBe(false);
     expect(readinessExemptApiPath('/api/session/forgot-password')).toBe(false);
     expect(readinessExemptApiPath('/api/session/reset-password')).toBe(false);
-    expect(readinessExemptApiPath('/api/bootstrap')).toBe(true);
+    expect(readinessExemptApiPath('/api/bootstrap')).toBe(false);
     expect(readinessExemptApiPath('/api/bootstrap-status')).toBe(true);
     expect(readinessExemptApiPath('/api/session')).toBe(false);
   });
 });
 
 describe('attachReadinessGate', () => {
-  it('returns 503 STARTING for session routes until apiReady; bootstrap stays exempt', async () => {
+  it('returns 503 STARTING for session + bootstrap until apiReady', async () => {
     const app = express();
     app.use(express.json());
     const bootState = { apiReady: false };
@@ -35,8 +35,8 @@ describe('attachReadinessGate', () => {
     expect(loginRes.body.code).toBe('STARTING');
 
     const bootRes = await request(app).get('/api/bootstrap');
-    expect(bootRes.status).toBe(200);
-    expect(bootRes.body.ok).toBe(true);
+    expect(bootRes.status).toBe(503);
+    expect(bootRes.body.code).toBe('STARTING');
   });
 
   it('returns 503 BOOTSTRAP_FAILED when bootstrap subprocess failed', async () => {

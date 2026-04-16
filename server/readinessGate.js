@@ -1,15 +1,14 @@
 /**
  * Paths that must respond while schema/seed runs in the bootstrap subprocess.
- * Otherwise the SPA cannot sign in (or reset password) until apiReady flips.
+ * `GET /api/bootstrap` is NOT exempt: running `buildBootstrap` during migrations can block on DB
+ * locks until the edge proxy times out (502). The SPA polls `503 STARTING` until `apiReady`.
  * @param {string} originalUrl
  */
 export function readinessExemptApiPath(originalUrl) {
   const pathOnly = String(originalUrl || '').split('?')[0].replace(/\/+$/, '') || '/';
   return (
     pathOnly === '/api/health' ||
-    pathOnly === '/api/bootstrap-status' ||
-    // Full workspace snapshot: public (null user → empty lists) so the login page can load before session exists.
-    pathOnly === '/api/bootstrap'
+    pathOnly === '/api/bootstrap-status'
   );
 }
 
