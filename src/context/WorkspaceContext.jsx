@@ -103,7 +103,15 @@ export function WorkspaceProvider({ children }) {
       let httpStatus;
       let data;
       while (Date.now() < deadline) {
-        ({ ok, status: httpStatus, data } = await apiFetch(path));
+        const ctrl = new AbortController();
+        const tid = setTimeout(() => ctrl.abort(), 45_000);
+        let pack;
+        try {
+          pack = await apiFetch(path, { signal: ctrl.signal });
+        } finally {
+          clearTimeout(tid);
+        }
+        ({ ok, status: httpStatus, data } = pack);
         if (httpStatus === 401 || data?.code === 'AUTH_REQUIRED') {
           clearBootstrapCache();
           setStatus('auth_required');

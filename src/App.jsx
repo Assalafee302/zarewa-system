@@ -806,7 +806,12 @@ function AuthGate() {
     return <LoadingScreen />;
   }
 
-  if (ws.authRequired || (ws.status === 'offline' && !ws.snapshot)) {
+  // Anonymous bootstrap returns status "ok" with session.authenticated false — still show login, not AppShell.
+  if (
+    ws.authRequired ||
+    (ws.status === 'offline' && !ws.snapshot) ||
+    ((ws.status === 'ok' || ws.status === 'degraded') && !ws.session?.authenticated)
+  ) {
     return <LoginScreen />;
   }
 
