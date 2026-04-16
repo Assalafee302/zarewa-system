@@ -17,7 +17,12 @@ try {
   try {
     log('blockUntilSchema (migrations / baseline DDL)…');
     blockUntilSchema(db);
-    log('schema OK; bootstrapDataLayer (seeds)…');
+    log('schema OK; bootstrapDataLayer (seeds + legacy demo + backfills)…');
+    log(
+      process.env.ZAREWA_EMPTY_SEED
+        ? '  ZAREWA_EMPTY_SEED set — using minimal seed path'
+        : '  full demo seed path (set ZAREWA_EMPTY_SEED=1 on Railway for faster first boot)'
+    );
     bootstrapDataLayer(db);
     log(`finished OK (+${Date.now() - t0}ms total)`);
   } finally {

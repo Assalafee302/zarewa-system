@@ -92,6 +92,25 @@ Until CI uses only Supabase migrations, keep running **`npm run db:migrate`** wi
     2. **Faster seed (optional):** on the web service add **`ZAREWA_EMPTY_SEED=1`** before the first successful boot if you want **no** demo customers/POs (UAT-style empty client). Remove later if you want full demo data.
     3. **Logs:** in the **Zarewa** service deploy logs, confirm **`[zarewa-bootstrap] … finished OK`**. If you see **`Postgres is not configured`**, `DATABASE_URL` is missing on **that** service. If login returns **401** after `phase` is **ready**, try **`ZAREWA_ALLOW_SEEDED_USERS=1`** once (see [DEPLOY_RAILWAY.md](./DEPLOY_RAILWAY.md)), or set **`ZAREWA_DIAGNOSTIC_LOGIN=1`** briefly to get more detail on **500** errors.
 
+### Sign-in spinner lasts many minutes, then fails
+
+That almost always means the browser is waiting on **`STARTING`** while the container runs **schema + seed** (`[zarewa-bootstrap]` in deploy logs). Until **`/api/bootstrap-status`** shows **`phase":"ready"`**, login is intentionally delayed.
+
+1. **Confirm state:** open `https://<your-railway-host>/api/bootstrap-status` in another tab. If **`phase":"starting"`**, the server is still working (or stuck). If **`failed`**, read **`hint`** and the deploy log lines around **`[zarewa-bootstrap] FAILED`**.
+2. **Speed up first boot (most important):** on your PC, run migrations **before** relying on in-container bootstrap. Use the **direct** Postgres URI from Supabase (**Project Settings → Database → Connection string → URI**, host like `db.<project-ref>.supabase.co`, port **5432**), not the pooler, for this step only — large DDL over the **transaction pooler (6543)** is often very slow or unreliable. Then:
+   ```powershell
+   $env:DATABASE_URL = 'postgresql://postgres:...@db.<project-ref>.supabase.co:5432/postgres'
+   npm run db:migrate
+   ```
+   After `[pg-migrate] OK`, redeploy Railway (pooler `6543` URL on the service is still fine for normal app traffic once the schema exists).
+3. **Less demo data on first boot:** set **`ZAREWA_EMPTY_SEED=1`** on the Railway service for the first successful boot if you do not need the full demo pack (then remove it if you want demo data later). See [DEPLOY_RAILWAY.md](./DEPLOY_RAILWAY.md).
+4. **After `phase` is `ready`:** use **`admin`** / **`Admin@123`** on an empty database, or your real credentials. If you only get **401**, see **`ZAREWA_ALLOW_SEEDED_USERS`** in [DEPLOY_RAILWAY.md](./DEPLOY_RAILWAY.md).
+
+5. **Still `starting` after `npm run db:migrate` on your PC?** Migrate only applies **schema** (`[pg-migrate] OK`). Railway’s child process still runs **all demo seeds** plus legacy demo unless you opt out — that can take **many minutes** over Supabase, especially on the **transaction pooler**. In logs, if you already see **`schema OK; bootstrapDataLayer`**, it is working on data, not DDL. Mitigations:
+   - Set **`ZAREWA_EMPTY_SEED=1`** on the Railway service and **redeploy** (minimal seed; much faster).
+   - Optionally lower pool size so the bootstrap child does not open many DB connections: **`PGPOOL_MAX=2`** (same for the main process; fine for single-user smoke tests).
+   - Confirm PC migrate and Railway use the **same** Supabase project: in the SQL editor run `SELECT id FROM zarewa_migrations LIMIT 3;` — if empty on the project Railway uses, you migrated a different connection string than `DATABASE_URL` on Railway.
+
 ---
 
 ## Part G — After it works
